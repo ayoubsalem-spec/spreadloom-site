@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spreadloom — We weave your spreadsheet into a real app</title>
+<meta name="description" content="Spreadloom turns fragile, single-user spreadsheets into real, hosted, multi-user web applications. Built fast, using AI-accelerated development.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14161f;
+    --ink2: #1c1f2c;
+    --ivory: #f0ece1;
+    --ivory-dim: #b8b3a4;
+    --brass: #c9982f;
+    --brass-light: #e0b654;
+    --teal: #3d5a5c;
+    --border: rgba(240,236,225,0.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--ink);
+    color: var(--ivory);
+    font-family: 'Work Sans', sans-serif;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  h1, h2, h3, .display { font-family: 'Fraunces', serif; font-weight: 600; letter-spacing: -0.01em; }
+  a { color: var(--brass-light); text-decoration: none; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 28px; }
+
+  /* ---------- Weave signature pattern ---------- */
+  .weave-bg {
+    position: absolute; inset: 0; z-index: 0; overflow: hidden; opacity: 0.5;
+    background-image:
+      repeating-linear-gradient(90deg, transparent 0px, transparent 38px, rgba(201,152,47,0.16) 38px, rgba(201,152,47,0.16) 40px),
+      repeating-linear-gradient(0deg, transparent 0px, transparent 38px, rgba(61,90,92,0.22) 38px, rgba(61,90,92,0.22) 40px);
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 30%, black 30%, transparent 75%);
+  }
+  .weave-cross {
+    position: absolute; inset: 0; z-index: 0;
+    background-image: repeating-conic-gradient(from 0deg at 40px 40px, rgba(240,236,225,0.03) 0deg 90deg, transparent 90deg 180deg);
+    background-size: 80px 80px;
+    mask-image: radial-gradient(ellipse 70% 55% at 50% 25%, black 20%, transparent 70%);
+  }
+
+  /* ---------- Nav ---------- */
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(20,22,31,0.9); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .wrap { display: flex; justify-content: space-between; align-items: center; padding: 18px 28px; }
+  .logo { font-family: 'Fraunces', serif; font-size: 21px; font-weight: 700; color: var(--ivory); letter-spacing: -0.01em; }
+  .logo span { color: var(--brass-light); }
+  nav .links a { margin-left: 28px; font-size: 14px; color: var(--ivory-dim); font-weight: 500; }
+  nav .links a:hover { color: var(--ivory); }
+  .btn {
+    display: inline-block; background: var(--brass); color: var(--ink); font-weight: 600;
+    padding: 12px 26px; border-radius: 3px; font-size: 14px; transition: background 0.15s, transform 0.1s;
+  }
+  .btn:hover { background: var(--brass-light); }
+  .btn:active { transform: scale(0.98); }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--ivory); }
+  .btn-ghost:hover { border-color: var(--brass); color: var(--brass-light); }
+
+  /* ---------- Hero ---------- */
+  .hero { position: relative; padding: 110px 0 90px; text-align: center; }
+  .eyebrow {
+    display: inline-block; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--brass-light); border: 1px solid rgba(201,152,47,0.35); border-radius: 20px;
+    padding: 6px 16px; margin-bottom: 28px; position: relative; z-index: 1;
+  }
+  .hero h1 {
+    font-size: clamp(38px, 6vw, 66px); line-height: 1.06; max-width: 820px; margin: 0 auto 24px;
+    position: relative; z-index: 1;
+  }
+  .hero h1 em { font-style: italic; color: var(--brass-light); }
+  .hero p.lead {
+    font-size: 19px; color: var(--ivory-dim); max-width: 560px; margin: 0 auto 40px;
+    position: relative; z-index: 1;
+  }
+  .hero-ctas { display: flex; gap: 14px; justify-content: center; position: relative; z-index: 1; flex-wrap: wrap; }
+
+  /* ---------- Sections ---------- */
+  section { padding: 90px 0; border-top: 1px solid var(--border); }
+  .section-label {
+    font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--teal);
+    font-weight: 600; margin-bottom: 14px;
+  }
+  .section-label.brass { color: var(--brass-light); }
+  h2.section-title { font-size: clamp(28px, 4vw, 40px); max-width: 640px; margin-bottom: 16px; }
+  .section-sub { color: var(--ivory-dim); font-size: 17px; max-width: 560px; margin-bottom: 56px; }
+
+  /* Problem / before-after */
+  .weave-strand { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 36px; max-width: 620px; }
+  .weave-strand .num { font-family: 'Fraunces', serif; font-size: 15px; color: var(--brass-light); border: 1px solid var(--border); border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .weave-strand h3 { font-size: 19px; margin-bottom: 6px; }
+  .weave-strand p { color: var(--ivory-dim); font-size: 15px; }
+
+  /* Case study */
+  .case-card {
+    background: var(--ink2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  }
+  .case-card img { width: 100%; display: block; border-bottom: 1px solid var(--border); }
+  .case-body { padding: 32px; }
+  .case-body h3 { font-size: 22px; margin-bottom: 12px; }
+  .case-body p { color: var(--ivory-dim); font-size: 15px; margin-bottom: 10px; }
+  .case-tag { display: inline-block; font-size: 12px; background: rgba(61,90,92,0.3); color: #8fb4b6; padding: 4px 12px; border-radius: 14px; margin-bottom: 16px; }
+
+  /* Pricing */
+  .pricing-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .price-card {
+    background: var(--ink2); border: 1px solid var(--border); border-radius: 10px; padding: 32px 26px;
+    transition: transform 0.18s ease, border-color 0.18s ease;
+  }
+  .price-card:hover { transform: translateY(-4px); border-color: rgba(201,152,47,0.4); }
+  .price-card.featured { border-color: var(--brass); position: relative; }
+  .price-card .badge {
+    position: absolute; top: -12px; left: 26px; background: var(--brass); color: var(--ink);
+    font-size: 11px; font-weight: 700; padding: 4px 12px; border-radius: 12px; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .price-card .tier { font-size: 13px; color: var(--ivory-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+  .price-card .amount { font-family: 'Fraunces', serif; font-size: 36px; margin-bottom: 4px; }
+  .price-card .amount span { font-size: 15px; color: var(--ivory-dim); font-family: 'Work Sans', sans-serif; }
+  .price-card .desc { color: var(--ivory-dim); font-size: 14px; margin-bottom: 22px; min-height: 40px; }
+  .price-card ul { list-style: none; margin-bottom: 26px; }
+  .price-card li { font-size: 14px; color: var(--ivory-dim); padding: 7px 0; border-bottom: 1px solid var(--border); }
+  .price-card li:last-child { border-bottom: none; }
+  .price-card li strong { color: var(--ivory); }
+
+  /* Contact */
+  .contact-box {
+    background: var(--ink2); border: 1px solid var(--border); border-radius: 12px;
+    padding: 56px 40px; text-align: center;
+  }
+  .contact-box h2 { margin-bottom: 14px; }
+  .contact-box p { color: var(--ivory-dim); max-width: 480px; margin: 0 auto 32px; }
+
+  footer { padding: 40px 0; text-align: center; color: var(--ivory-dim); font-size: 13px; }
+
+  @media (max-width: 760px) {
+    .pricing-grid { grid-template-columns: 1fr; }
+    nav .links { display: none; }
+    .hero { padding: 70px 0 60px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="logo">Spread<span>loom</span></div>
+    <div class="links">
+      <a href="#how">How it works</a>
+      <a href="#work">Case study</a>
+      <a href="#pricing">Pricing</a>
+    </div>
+    <a href="#contact" class="btn">Get a quote</a>
+  </div>
+</nav>
+
+<section class="hero" style="border-top: none;">
+  <div class="weave-bg"></div>
+  <div class="weave-cross"></div>
+  <div class="wrap">
+    <div class="eyebrow">Spreadsheet → real application</div>
+    <h1>We weave your spreadsheet into <em>a real app</em></h1>
+    <p class="lead">Stop emailing files back and forth. Get a hosted, multi-user tool your whole team can use at once — built fast, using AI-accelerated development.</p>
+    <div class="hero-ctas">
+      <a href="#contact" class="btn">Get a quote</a>
+      <a href="#work" class="btn btn-ghost">See the work</a>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <div class="section-label brass">How it works</div>
+    <h2 class="section-title">One spreadsheet in. One real tool out.</h2>
+    <p class="section-sub">No dev team, no six-month build. Most projects are delivered in 3–7 days.</p>
+
+    <div class="weave-strand">
+      <div class="num">1</div>
+      <div><h3>Send it over</h3><p>Share your current spreadsheet, or just describe how your team actually works.</p></div>
+    </div>
+    <div class="weave-strand">
+      <div class="num">2</div>
+      <div><h3>A few questions</h3><p>Who uses it, what breaks today, what "done" looks like.</p></div>
+    </div>
+    <div class="weave-strand">
+      <div class="num">3</div>
+      <div><h3>Built and shown to you</h3><p>You see a working version early, not just at the end. Feedback folds straight back in.</p></div>
+    </div>
+    <div class="weave-strand">
+      <div class="num">4</div>
+      <div><h3>Delivered, hosted, ready</h3><p>A real, shared web app — not another file to email around.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="work">
+  <div class="wrap">
+    <div class="section-label">Recent work</div>
+    <h2 class="section-title">A bid-quoting system, rebuilt from the ground up</h2>
+    <p class="section-sub">A construction estimating team's entire pricing process lived in one fragile Excel file. Only one person could safely edit it. Here's what replaced it.</p>
+
+    <div class="case-card">
+      <img src="spreadloom_case_study_quote.png" alt="Spreadloom-built quoting application, section-by-section pricing breakdown">
+      <div class="case-body">
+        <span class="case-tag">Construction estimating</span>
+        <h3>From single-file bottleneck to shared tool</h3>
+        <p><strong>Before:</strong> One person, one spreadsheet, no shared catalog, no price history, no way to build a client-ready proposal without manual formatting every time.</p>
+        <p><strong>After:</strong> A searchable shared item catalog, live running totals by section, one-click export to either an internal working breakdown or a clean client-facing proposal.</p>
+        <p><strong>Result:</strong> The whole team works from one tool at once — fewer pricing mistakes, faster path from quote to proposal.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="pricing">
+  <div class="wrap">
+    <div class="section-label brass">Pricing</div>
+    <h2 class="section-title">Priced by scope, not by the hour</h2>
+    <p class="section-sub">You know the total before anything starts. Hosting's included for the first month either way.</p>
+
+    <div class="pricing-grid">
+      <div class="price-card">
+        <div class="tier">Starter</div>
+        <div class="amount">$350</div>
+        <div class="desc">Single-user tool, one core workflow replaced.</div>
+        <ul>
+          <li><strong>1</strong> user</li>
+          <li><strong>1</strong> revision round</li>
+          <li><strong>3-day</strong> delivery</li>
+          <li>Hosting included, month 1</li>
+        </ul>
+        <a href="#contact" class="btn btn-ghost" style="width:100%; text-align:center; display:block;">Start here</a>
+      </div>
+      <div class="price-card featured">
+        <span class="badge">Most common</span>
+        <div class="tier">Standard</div>
+        <div class="amount">$750</div>
+        <div class="desc">Multi-user, real database, exports built in.</div>
+        <ul>
+          <li>Up to <strong>10</strong> users</li>
+          <li><strong>2</strong> revision rounds</li>
+          <li><strong>5-day</strong> delivery</li>
+          <li>Hosting included, month 1</li>
+        </ul>
+        <a href="#contact" class="btn" style="width:100%; text-align:center; display:block;">Start here</a>
+      </div>
+      <div class="price-card">
+        <div class="tier">Pro</div>
+        <div class="amount">$1,500<span>+</span></div>
+        <div class="desc">Complex multi-step workflows, integrations.</div>
+        <ul>
+          <li>Unlimited users</li>
+          <li><strong>3</strong> revision rounds</li>
+          <li><strong>7–10 day</strong> delivery</li>
+          <li>Hosting included, month 1</li>
+        </ul>
+        <a href="#contact" class="btn btn-ghost" style="width:100%; text-align:center; display:block;">Start here</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="contact">
+  <div class="wrap">
+    <div class="contact-box">
+      <h2 class="section-title" style="margin: 0 auto 14px;">Have a spreadsheet that's outgrown itself?</h2>
+      <p>Send over what you're working with — or just describe the process — and I'll tell you honestly which tier it falls into before you commit to anything.</p>
+      <a href="mailto:hello@spreadloom.com?subject=Project%20inquiry" class="btn">Email hello@spreadloom.com</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    © 2026 Spreadloom. Built one thread at a time.
+  </div>
+</footer>
+
+</body>
+</html>
