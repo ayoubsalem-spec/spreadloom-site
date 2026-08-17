@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="text-align:center; padding:40px 0 10px;">
+    <div style="font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:3px; color:var(--cyan); margin-bottom:16px;">TECHNOLOGY PLATFORM</div>
+    <h1 style="font-size:40px; line-height:1.25;">The <span style="color:var(--brass);">Intelligent Operating System</span> for Construction</h1>
+    <div style="font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--text-faint); margin-top:22px;">ESTIMATING &middot; PROCUREMENT &middot; FINANCE &middot; ENGINEERING &middot; OPERATIONS</div>
+</div>
+
+<div style="display:flex; gap:24px; justify-content:center; padding:48px 0; flex-wrap:wrap;">
+
+    {% if not current_user.is_authenticated or has_project_hunt_access %}
+    <div class="card" style="width:280px; padding:0; position:relative;">
+        <div style="padding:14px 22px 22px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px;">
+                <img src="{{ url_for('static', filename='icons/apps/project-hunt.png') }}" style="width:40px; height:40px;">
+                <span class="stamp status-live">LIVE</span>
+            </div>
+            <h3 style="font-size:19px; margin-bottom:4px;">Project Hunt</h3>
+            <div style="color:var(--cyan); font-size:12px; font-family:'IBM Plex Mono',monospace; margin-bottom:12px;">CHASE THE BUSINESS</div>
+            <p class="sub" style="min-height:40px;">Company-wide bids, vendor quotes, and deadlines.</p>
+            {% if current_user.is_authenticated %}
+            <a href="{{ url_for('tracker_dashboard') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
+            {% else %}
+            <a href="{{ url_for('login') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Log In &rarr;</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card" style="width:280px; padding:0; position:relative;">
+        <div style="padding:14px 22px 22px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px;">
+                <img src="{{ url_for('static', filename='icons/apps/equipment-center.png') }}" style="width:40px; height:40px;">
+                <span class="stamp status-beta">BETA</span>
+            </div>
+            <h3 style="font-size:19px; margin-bottom:4px;">Equipment Center</h3>
+            <div style="color:var(--cyan); font-size:12px; font-family:'IBM Plex Mono',monospace; margin-bottom:12px;">KNOW WHAT'S WHERE</div>
+            <p class="sub" style="min-height:40px;">Equipment tracking, status, location, and outside rentals.</p>
+            {% if current_user.is_authenticated %}
+            <a href="{{ url_for('sitepulse_dashboard') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
+            {% else %}
+            <a href="{{ url_for('login') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Log In &rarr;</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="card" style="width:280px; padding:0; position:relative;">
+        <div style="padding:14px 22px 22px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px;">
+                <img src="{{ url_for('static', filename='icons/apps/sitepulse.png') }}" style="width:40px; height:40px;">
+                <span class="stamp status-pending">PENDING</span>
+            </div>
+            <h3 style="font-size:19px; margin-bottom:4px;">SitePulse</h3>
+            <div style="color:var(--cyan); font-size:12px; font-family:'IBM Plex Mono',monospace; margin-bottom:12px;">RUN THE FIELD</div>
+            <p class="sub" style="min-height:40px;">Concrete requests and material inventory across every site.</p>
+            {% if current_user.is_authenticated %}
+            <a href="{{ url_for('inventory_materials_list') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
+            {% else %}
+            <a href="{{ url_for('login') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Log In &rarr;</a>
+            {% endif %}
+        </div>
+    </div>
+
+</div>
+
+{% if not current_user.is_authenticated %}
+<div style="text-align:center; padding-bottom:40px;">
+    <a href="{{ url_for('signup') }}" class="sub" style="text-decoration:underline;">No account yet? Sign up</a>
+</div>
+{% endif %}
+{% endblock %}

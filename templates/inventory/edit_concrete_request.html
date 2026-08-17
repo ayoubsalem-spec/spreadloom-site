@@ -1,0 +1,61 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<h1>Edit Concrete Request</h1>
+<p class="sub">Concrete Checklist Form</p>
+<div class="card">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <h3 style="font-size:15px; color:var(--gold); margin-bottom:6px;">Project Info</h3>
+        <label>Project</label><input type="text" name="project" value="{{ r['project'] }}" required autofocus>
+        <label>Job Site Address</label><input type="text" name="job_site_address" value="{{ r['job_site_address'] or '' }}">
+        <label>Description of Area to Pour</label><input type="text" name="area_description" value="{{ r['area_description'] or '' }}">
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Concrete Details</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Date of Pour</label><input type="date" name="pour_date" value="{{ r['pour_date'] }}" required></div>
+            <div style="flex:1;"><label>Time of Pour</label><input type="time" name="pour_time" value="{{ r['pour_time'] or '' }}"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Mix Design (PSI)</label><input type="text" name="mix_design_psi" value="{{ r['mix_design_psi'] or '' }}"></div>
+            <div style="flex:1;"><label>Mix Slump</label><input type="text" name="mix_slump" value="{{ r['mix_slump'] or '' }}"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Concrete Amount</label><input type="text" name="concrete_amount" value="{{ r['concrete_amount'] or '' }}"></div>
+            <div style="flex:1;"><label>Spacing Between Trucks</label><input type="text" name="truck_spacing" value="{{ r['truck_spacing'] or '' }}"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Pump Size (if required)</label><input type="text" name="pump_size" value="{{ r['pump_size'] or '' }}"></div>
+            <div style="flex:1;"><label>Pump Arrival Time</label><input type="text" name="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Lab (same time with Concrete)</label>
+                <select name="lab_required">
+                    <option value="No" {{ 'selected' if r['lab_required'] != 'Yes' }}>No</option>
+                    <option value="Yes" {{ 'selected' if r['lab_required'] == 'Yes' }}>Yes</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>If yes, Time</label><input type="time" name="lab_time" value="{{ r['lab_time'] or '' }}"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Drilling Company (if required)</label>
+                <select name="drilling_required">
+                    <option value="No" {{ 'selected' if r['drilling_required'] != 'Yes' }}>No</option>
+                    <option value="Yes" {{ 'selected' if r['drilling_required'] == 'Yes' }}>Yes</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>If yes, Time</label><input type="time" name="drilling_time" value="{{ r['drilling_time'] or '' }}"></div>
+        </div>
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Requested By</h3>
+        <p class="sub" style="margin-bottom:14px;">{{ r['requested_by'] or '\u2014' }} (original requester &mdash; unchanged on edit)</p>
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ordered By</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Name</label><input type="text" name="ordered_by" value="{{ r['ordered_by'] or '' }}"></div>
+            <div style="flex:1;"><label>Signature</label><input type="text" name="ordered_signature" value="{{ r['ordered_signature'] or '' }}"></div>
+            <div style="flex:1;"><label>Date</label><input type="date" name="ordered_date" value="{{ r['ordered_date'] or '' }}"></div>
+        </div>
+        <button type="submit" class="btn btn-gold" style="margin-top:16px;">Save Changes</button>
+    </form>
+</div>
+{% endblock %}

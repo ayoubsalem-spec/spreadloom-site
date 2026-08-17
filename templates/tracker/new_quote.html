@@ -1,0 +1,43 @@
+{% extends "tracker/base.html" %}
+{% block content %}
+<div class="card" style="max-width:520px; margin:0 auto;">
+    <h1 style="font-size:20px;">Add Vendor / Trade — {{ project['name'] }}</h1>
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Trade</label>
+        <input type="text" name="trade" placeholder="HVAC, Electrical, Elevator..." required>
+
+        <label>Vendor Name</label>
+        <input type="text" name="vendor_name" placeholder="Dynamic Elevators">
+
+        <label>Contact Name</label>
+        <input type="text" name="vendor_contact" placeholder="Chris Hernandez">
+
+        <label>Contact Email</label>
+        <input type="email" name="vendor_email">
+
+        <label>Contact Phone</label>
+        <input type="text" name="vendor_phone" placeholder="(713) 930-5600">
+
+        <label>RFQ Sent Date</label>
+        <input type="date" name="rfq_sent_date">
+
+        <label>Status</label>
+        <select name="status">
+            <option value="Not Sent">Not Sent</option>
+            <option value="Sent">Sent</option>
+            <option value="Received">Received</option>
+        </select>
+
+        <label style="display:flex; align-items:center; gap:8px; margin-top:16px;">
+            <input type="checkbox" name="is_submit_blocking" style="width:auto;" checked>
+            This quote blocks bid submission if missing
+        </label>
+
+        <label>Notes</label>
+        <textarea name="notes" placeholder="Waiting on scope clarification..."></textarea>
+
+        <button type="submit">Add</button>
+    </form>
+</div>
+{% endblock %}

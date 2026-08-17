@@ -1,0 +1,41 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<div class="section-row">
+    <div><h1>SitePulse</h1><p class="sub">Materials stored at each site &mdash; findable and reusable across projects.</p></div>
+    <a href="{{ url_for('inventory_new_material') }}" class="btn btn-gold">+ Add Material</a>
+</div>
+<div style="display:flex; gap:10px; margin-bottom:16px;">
+    <a href="{{ url_for('inventory_materials_list') }}" class="btn btn-sm">Materials</a>
+    <a href="{{ url_for('inventory_concrete_list') }}" class="btn btn-sm">Concrete Requests</a>
+    <a href="{{ url_for('inventory_purchase_list') }}" class="btn btn-sm">Purchase Requests</a>
+</div>
+<form method="GET" style="margin-bottom:16px;">
+    <input type="text" name="q" value="{{ search }}" placeholder="Search by item, site, or shelf location...">
+</form>
+{% if materials|length == 0 %}
+<div class="card"><p class="sub" style="margin:0;">No materials logged yet.</p></div>
+{% else %}
+{% set ns = namespace(site='') %}
+{% for m in materials %}
+    {% if m['site'] != ns.site %}
+        {% if not loop.first %}</table></div>{% endif %}
+        {% set ns.site = m['site'] %}
+        <h3 style="margin:20px 0 10px; color:var(--gold); font-size:15px;">{{ m['site'] }}</h3>
+        <div class="card" style="padding:0; overflow-x:auto;"><table>
+            <tr><th>Item</th><th>Quantity</th><th>Shelf/Location</th><th></th></tr>
+    {% endif %}
+        <tr>
+            <td><strong>{{ m['item_name'] }}</strong></td>
+            <td>{{ m['quantity'] or '' }} {{ m['unit'] or '' }}</td>
+            <td>{{ m['shelf_location'] or '\u2014' }}</td>
+            <td>{% if current_user.email == "ayoub@darycet.com" %}
+                <form method="POST" action="{{ url_for('inventory_delete_material', material_id=m['id']) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm" style="color:var(--red); border-color:var(--red);">Delete</button>
+                </form>
+            {% endif %}</td>
+        </tr>
+{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

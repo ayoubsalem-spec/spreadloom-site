@@ -1,0 +1,198 @@
+{% extends "tracker/base.html" %}
+{% block content %}
+<div class="section-row" style="margin-top:0;">
+    <div>
+        <h1>{{ p['name'] }}</h1>
+        <p class="sub" style="margin-bottom:0;">{{ p['client'] or 'No client set' }} — Due: {{ p['bid_due_date'] or 'No date' }}</p>
+        {% if p['address'] %}<p class="sub" style="margin-bottom:0; margin-top:4px;">📍 {{ p['address'] }}</p>{% endif %}
+    </div>
+    <div>
+        <span class="badge {{ p['status']|statusclass }}" style="font-size:13px; padding:6px 16px;">{{ p['status'] }}</span>
+        <a href="{{ url_for('tracker_edit_project', project_id=p['id']) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Edit Project</a>
+        <a href="{{ url_for('tracker_project_activity_log', project_id=p['id']) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Activity Log</a>
+    </div>
+</div>
+
+<div class="card">
+    <h2>Project Status</h2>
+    <form method="POST" action="{{ url_for('tracker_update_project', project_id=p['id']) }}" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <select name="status" style="width:auto;">
+            {% for s in status_options %}<option value="{{ s }}" {{ 'selected' if p['status']==s }}>{{ s }}</option>{% endfor %}
+        </select>
+        <input type="text" name="estimated_value" value="{{ p['estimated_value'] or '' }}" placeholder="Estimated value" style="width:180px;">
+        <button type="submit" class="btn-sm btn-gold">Update</button>
+    </form>
+</div>
+
+{% set blocking_count = trade_groups|sum(attribute='any_blocking') %}
+{% set total_blocking = trade_groups|selectattr('any_blocking')|list|length %}
+{% if total_blocking > 0 %}
+<div class="alert-banner">⚠ {{ total_blocking }} trade{{ 's' if total_blocking != 1 else '' }} still missing a submit-blocking quote.</div>
+{% endif %}
+
+<div class="section-row">
+    <h2 style="margin-bottom:0;">Vendor Quotes</h2>
+    <a href="{{ url_for('tracker_new_quote', project_id=p['id']) }}" class="btn btn-sm">+ Add Vendor</a>
+</div>
+
+{% for group in trade_groups %}
+<div class="card" style="padding:0; overflow:hidden;">
+    <details {{ 'open' if group.any_blocking else '' }}>
+        <summary style="cursor:pointer; padding:18px 24px; list-style:none; display:flex; justify-content:space-between; align-items:center;">
+            <span>
+                <b style="font-family:'Space Grotesk','Inter',sans-serif; font-size:15px;">{{ group.trade }}</b>
+                <span class="sub" style="margin-left:8px; font-size:12.5px;">{{ group.quotes|length }} quote{{ 's' if group.quotes|length != 1 else '' }}</span>
+            </span>
+            <span class="sub" style="font-size:12px;">Click to {{ 'collapse' if group.any_blocking else 'expand' }} ▾</span>
+        </summary>
+
+        <div style="padding:0 24px 20px;">
+        {% for q in group.quotes %}
+        <details style="border-top:1px solid var(--border); padding-top:14px; margin-top:14px;">
+            <summary style="cursor:pointer; list-style:none; display:flex; justify-content:space-between; align-items:center;">
+                <span>
+                    <b>{{ q['vendor_name'] or 'No vendor set' }}</b>
+                    {% if q['vendor_phone'] %}<span class="sub" style="font-size:12.5px;"> — {{ q['vendor_phone'] }}</span>{% endif %}
+                </span>
+                <span class="badge {{ 'badge-received' if q['status']=='Received' else ('badge-sent' if q['status']=='Sent' else 'badge-notsent') }}">{{ q['status'] }}</span>
+            </summary>
+
+            <div style="margin-top:14px; padding-left:4px;">
+                {% if q['vendor_contact'] %}<p class="sub" style="margin-bottom:4px; font-size:13px;">Contact: {{ q['vendor_contact'] }}</p>{% endif %}
+                {% if q['vendor_email'] %}<p class="sub" style="margin-bottom:4px; font-size:13px;">Email: {{ q['vendor_email'] }}</p>{% endif %}
+                {% if q['rfq_sent_date'] %}<p class="sub" style="margin-bottom:4px; font-size:13px;">RFQ Sent: {{ q['rfq_sent_date'] }}</p>{% endif %}
+                {% if q['notes'] %}<p class="sub" style="margin-bottom:8px; font-size:12.5px; font-style:italic;">📝 {{ q['notes'] }}</p>{% endif %}
+
+                <a href="{{ url_for('tracker_edit_quote', quote_id=q['id']) }}" class="btn btn-sm">Edit</a>
+                <form method="POST" action="{{ url_for('tracker_delete_quote', quote_id=q['id']) }}" style="display:inline;"
+                      onsubmit="return confirm('Delete this vendor quote permanently?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn-sm" style="color:#F87171; border-color:#7F1D1D;">Delete Quote</button>
+                </form>
+
+                <form method="POST" action="{{ url_for('tracker_update_quote_status', quote_id=q['id']) }}" class="inline-form" style="margin-top:12px;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <select name="status" style="width:auto;">
+                        <option value="Not Sent" {{ 'selected' if q['status']=='Not Sent' }}>Not Sent</option>
+                        <option value="Sent" {{ 'selected' if q['status']=='Sent' }}>Sent</option>
+                        <option value="Received" {{ 'selected' if q['status']=='Received' }}>Received</option>
+                    </select>
+                    <input type="text" name="amount" placeholder="Amount" value="{{ q['amount'] or '' }}" style="width:160px;">
+                    <button type="submit" class="btn-sm">Update</button>
+                </form>
+
+                <div style="margin-top:12px;">
+                    {% if q['attachment_filename'] %}
+                    <a href="{{ url_for('tracker_download_quote_file', quote_id=q['id']) }}" class="btn btn-sm">📎 {{ q['attachment_original_name'] }}</a>
+                    <form method="POST" action="{{ url_for('tracker_delete_quote_file', quote_id=q['id']) }}" style="display:inline;"
+                          onsubmit="return confirm('Remove this attached file?');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn-sm" style="color:#F87171; border-color:#7F1D1D;">Remove File</button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="{{ url_for('tracker_upload_quote_file', quote_id=q['id']) }}" enctype="multipart/form-data" class="inline-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="file" name="quote_file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" style="width:auto;">
+                        <button type="submit" class="btn-sm">Attach Quote File</button>
+                    </form>
+                    {% endif %}
+                </div>
+
+                {% if q['status'] != 'Received' %}
+                <div style="margin-top:14px;">
+                    <form method="POST" action="{{ url_for('tracker_generate_rfq', quote_id=q['id']) }}" style="display:inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn-sm">{{ 'Regenerate RFQ Email' if q['rfq_email'] else 'Generate RFQ Email' }}</button>
+                    </form>
+                    <form method="POST" action="{{ url_for('tracker_generate_followup', quote_id=q['id']) }}" style="display:inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn-sm">{{ 'Regenerate Follow-Up' if q['follow_up_email'] else 'Generate Follow-Up Email' }}</button>
+                    </form>
+                    {% if q['rfq_email'] %}
+                    <div class="ai-output">
+                        <div class="section-row" style="margin-top:0;">
+                            <b style="color:var(--gold-light);">RFQ Email:</b>
+                            <form method="POST" action="{{ url_for('tracker_clear_rfq', quote_id=q['id']) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn-sm">Clear</button>
+                            </form>
+                        </div>
+                        {{ q['rfq_email']|markdown|safe }}
+                    </div>
+                    {% endif %}
+                    {% if q['follow_up_email'] %}
+                    <div class="ai-output">
+                        <div class="section-row" style="margin-top:0;">
+                            <b style="color:var(--gold-light);">Follow-Up Email:</b>
+                            <form method="POST" action="{{ url_for('tracker_clear_followup', quote_id=q['id']) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                                <button type="submit" class="btn-sm">Clear</button>
+                            </form>
+                        </div>
+                        {{ q['follow_up_email']|markdown|safe }}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </details>
+        {% endfor %}
+        </div>
+    </details>
+</div>
+{% endfor %}
+{% if trade_groups|length == 0 %}
+<div class="card"><p class="sub" style="margin-bottom:0;">No vendors/trades added yet for this project.</p></div>
+{% endif %}
+
+<hr class="divider">
+
+<div class="section-row" style="margin-top:0;">
+    <h2 style="margin-bottom:0;">Document Log</h2>
+</div>
+<div class="card">
+    <form method="POST" action="{{ url_for('tracker_new_doc', project_id=p['id']) }}" class="inline-form" style="margin-bottom:16px; flex-wrap:wrap;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="doc_name" placeholder="Document name" required style="width:200px;">
+        <input type="text" name="doc_type" placeholder="Type (Permit, Plan Set, RFI...)" style="width:180px;">
+        <input type="url" name="link" placeholder="Shared drive link" style="width:220px;">
+        <button type="submit" class="btn-sm">Add</button>
+    </form>
+    {% if docs|length > 0 %}
+    <table>
+        <tr><th>Document</th><th>Type</th><th>Status</th><th>Location</th><th></th></tr>
+        {% for d in docs %}
+        <tr>
+            <td>{{ d['doc_name'] }}</td>
+            <td>{{ d['doc_type'] or '—' }}</td>
+            <td><span class="badge {{ 'badge-received' if d['status']=='On File' else 'badge-notsent' }}">{{ d['status'] }}</span></td>
+            <td>
+                {% if d['link'] %}
+                    {% if d['link'].startswith('http://') or d['link'].startswith('https://') %}
+                        <a href="{{ d['link'] }}" target="_blank" rel="noopener">Open →</a>
+                    {% else %}
+                        <span style="user-select:all; font-size:12px; color:var(--text-dim);" title="Network path — copy and paste into File Explorer, browsers can't open this directly">{{ d['link'] }}</span>
+                    {% endif %}
+                {% else %}—{% endif %}
+            </td>
+            <td>
+                <a href="{{ url_for('tracker_edit_doc', doc_id=d['id']) }}" class="btn btn-sm">Edit</a>
+                <form method="POST" action="{{ url_for('tracker_update_doc', doc_id=d['id']) }}" class="inline-form" style="margin-top:6px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <select name="status" style="width:auto;">
+                        <option value="Needed" {{ 'selected' if d['status']=='Needed' }}>Needed</option>
+                        <option value="Requested" {{ 'selected' if d['status']=='Requested' }}>Requested</option>
+                        <option value="On File" {{ 'selected' if d['status']=='On File' }}>On File</option>
+                    </select>
+                    <button type="submit" class="btn-sm">Update</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="sub" style="margin-bottom:0;">No documents logged yet.</p>
+    {% endif %}
+</div>
+{% endblock %}
