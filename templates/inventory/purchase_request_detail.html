@@ -48,10 +48,29 @@
     </table>
 </div>
 
+{% if r['ordered_by'] %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Details</h3>
+    <table>
+        <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date'] }}{% endif %}</td></tr>
+        {% if r['vendor_company'] %}<tr><td class="sub">Vendor</td><td>{{ r['vendor_company'] }}{% if r['vendor_company_phone'] %} &middot; {{ r['vendor_company_phone'] }}{% endif %}</td></tr>{% endif %}
+    </table>
+    {% if is_procurement %}
+    <a href="{{ url_for('inventory_place_purchase_order', request_id=r['id']) }}" class="btn btn-sm" style="margin-top:10px;">Edit Order Details</a>
+    {% endif %}
+</div>
+{% elif is_procurement %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Not Yet Placed</h3>
+    <p class="sub" style="margin-bottom:12px;">Record who this was ordered from to mark it Scheduled.</p>
+    <a href="{{ url_for('inventory_place_purchase_order', request_id=r['id']) }}" class="btn btn-gold">Place Order</a>
+</div>
+{% endif %}
+
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Update Status</h3>
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
-        {% for s in ['Submitted', 'Scheduled', 'Completed'] %}
+        {% for s in ['Submitted', 'Completed'] %}
         {% if r['status'] != s %}
         <form method="POST" action="{{ url_for('inventory_update_purchase_status', request_id=r['id']) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

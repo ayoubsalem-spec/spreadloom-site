@@ -1,0 +1,45 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<h1>Place Concrete Order</h1>
+<p class="sub">{{ r['project'] }} &middot; Pour {{ r['pour_date'] }}{% if r['pour_time'] %} at {{ r['pour_time'] }}{% endif %} &mdash; fill in who's showing up and when. This marks the request Scheduled and builds the notification below.</p>
+<div class="card">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+        <h3 style="font-size:15px; color:var(--gold); margin-bottom:6px;">Concrete Company</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Company Name</label><input type="text" name="concrete_company" value="{{ r['concrete_company'] or '' }}" data-remember="concrete_company" autofocus placeholder="e.g. Texan Concrete"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="concrete_company_phone" value="{{ r['concrete_company_phone'] or '' }}" data-remember="concrete_company_phone" placeholder="e.g. 713-255-3333"></div>
+        </div>
+        <p class="sub" style="margin-top:6px;">Arrival time uses the pour time above ({{ r['pour_time'] or 'not set' }}) &mdash; edit the request if that needs to change.</p>
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ground Pump {% if r['pump_size'] %}<span class="sub" style="text-transform:none; font-weight:400;">({{ r['pump_size'] }})</span>{% endif %}</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Company / Contact Name</label><input type="text" name="pump_company" value="{{ r['pump_company'] or '' }}" data-remember="pump_company" placeholder="e.g. Diego Romo"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="pump_company_phone" value="{{ r['pump_company_phone'] or '' }}" data-remember="pump_company_phone" placeholder="e.g. 832-236-9108"></div>
+            <div style="flex:1;"><label>Arrival Time</label><input type="time" name="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
+        </div>
+
+        {% if r['lab_required'] == 'Yes' %}
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Lab</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Lab Company</label><input type="text" name="lab_company" value="{{ r['lab_company'] or '' }}" data-remember="lab_company" placeholder="e.g. Alliance Lab"></div>
+            <div style="flex:1;"><label>Arrival Time</label><input type="time" name="lab_time" value="{{ r['lab_time'] or '' }}"></div>
+        </div>
+        {% endif %}
+
+        {% if r['drilling_required'] == 'Yes' %}
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Drilling Company</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Company Name</label><input type="text" name="drilling_company" value="{{ r['drilling_company'] or '' }}" data-remember="drilling_company"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="drilling_company_phone" value="{{ r['drilling_company_phone'] or '' }}" data-remember="drilling_company_phone"></div>
+            <div style="flex:1;"><label>Arrival Time</label><input type="time" name="drilling_time" value="{{ r['drilling_time'] or '' }}"></div>
+        </div>
+        {% endif %}
+
+        <p class="sub" style="margin-top:16px;">Ordered by: <strong style="color:var(--text);">{{ current_user.name or current_user.email }}</strong> &middot; {{ today }}</p>
+        <button type="submit" class="btn btn-gold" style="margin-top:8px;">Place Order &amp; Mark Scheduled</button>
+    </form>
+</div>
+<a href="{{ url_for('inventory_view_concrete', request_id=r['id']) }}" class="btn btn-sm">&larr; Cancel</a>
+{% endblock %}

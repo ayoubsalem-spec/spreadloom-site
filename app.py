@@ -48,10 +48,18 @@ ALLOWED_DOMAIN = "@darycet.com"
 EXTRA_ALLOWED_SIGNUP_EMAILS = {"hghuneim@nomaengineering.com"}
 # Full access to every section, including Project Hunt.
 FULL_ACCESS_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", "hghuneim@nomaengineering.com"}
+# Only these can actually place a concrete/material order -- everyone else
+# can submit a request, but "Scheduled/Ordered" plus the vendor/contact
+# details is procurement's call.
+PROCUREMENT_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com"}
 
 
 def is_project_hunt_allowed():
     return current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS
+
+
+def is_procurement():
+    return current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -78,7 +86,10 @@ def is_admin():
 
 @app.context_processor
 def inject_permissions():
-    return {"has_project_hunt_access": current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS}
+    return {
+        "has_project_hunt_access": current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS,
+        "is_procurement": current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS,
+    }
 
 
 @app.before_request
@@ -204,6 +215,9 @@ def init_db():
             lab_required TEXT, lab_time TEXT, drilling_required TEXT, drilling_time TEXT,
             requested_by TEXT, requested_signature TEXT, requested_date TEXT,
             ordered_by TEXT, ordered_signature TEXT, ordered_date TEXT,
+            concrete_company TEXT, concrete_company_phone TEXT,
+            pump_company TEXT, pump_company_phone TEXT,
+            lab_company TEXT, drilling_company TEXT, drilling_company_phone TEXT,
             status TEXT DEFAULT 'Submitted',
             created_at TEXT, updated_at TEXT
         );
@@ -217,6 +231,7 @@ def init_db():
             job_name TEXT, location_description TEXT,
             requested_by TEXT, needed_on TEXT, source_of_supply TEXT,
             requestor_signature TEXT, requestor_date TEXT,
+            ordered_by TEXT, ordered_date TEXT, vendor_company TEXT, vendor_company_phone TEXT,
             status TEXT DEFAULT 'Submitted',
             created_at TEXT, updated_at TEXT
         );
@@ -276,6 +291,28 @@ def init_db():
         db.execute("ALTER TABLE inventory_purchase_requests ADD COLUMN status TEXT DEFAULT 'Submitted'")
     except sqlite3.OperationalError:
         pass
+
+    # Order-placement fields added for item 14 -- procurement records who
+    # ordered, when, and the vendor/contact for each piece (concrete truck,
+    # pump, lab, drilling; vendor for purchase requests). Same safe-migration
+    # pattern as above for databases created before this existed.
+    for column_sql in [
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_company TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_company_phone TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN pump_company TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN pump_company_phone TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN lab_company TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN drilling_company TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN drilling_company_phone TEXT",
+        "ALTER TABLE inventory_purchase_requests ADD COLUMN ordered_by TEXT",
+        "ALTER TABLE inventory_purchase_requests ADD COLUMN ordered_date TEXT",
+        "ALTER TABLE inventory_purchase_requests ADD COLUMN vendor_company TEXT",
+        "ALTER TABLE inventory_purchase_requests ADD COLUMN vendor_company_phone TEXT",
+    ]:
+        try:
+            db.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
 
     db.commit()
     db.close()
@@ -971,6 +1008,82 @@ def inventory_new_concrete():
     return render_template("inventory/new_concrete_request.html", today=date.today().isoformat())
 
 
+def build_concrete_order_notification(r):
+    """Build the plain-text order notification in the format procurement
+    texts/emails out once an order is placed -- e.g.:
+    'Concrete scheduled tomorrow (2nd road pour) 07/21/2026 at 8:00 AM'
+    """
+    if not r["pour_date"]:
+        return ""
+    try:
+        pour_dt = datetime.strptime(r["pour_date"], "%Y-%m-%d").date()
+        date_display = pour_dt.strftime("%m/%d/%Y")
+        delta = (pour_dt - date.today()).days
+        when = "today" if delta == 0 else ("tomorrow" if delta == 1 else pour_dt.strftime("%A"))
+    except ValueError:
+        date_display = r["pour_date"]
+        when = ""
+
+    def fmt_time(t):
+        if not t:
+            return None
+        try:
+            return datetime.strptime(t, "%H:%M").strftime("%-I:%M %p")
+        except ValueError:
+            return t
+
+    pour_time = fmt_time(r["pour_time"])
+    lines = []
+    header = f"Concrete scheduled {when}".strip()
+    if r["area_description"]:
+        header += f" ({r['area_description']})"
+    header += f" {date_display}"
+    if pour_time:
+        header += f" at {pour_time}"
+    lines.append(header)
+
+    amount_line = " ".join(x for x in [r["concrete_amount"], f"plus {r['mix_design_psi']} PSI" if r["mix_design_psi"] else ""] if x)
+    if amount_line:
+        lines.append(amount_line)
+
+    if r["pump_company"] or r["pump_size"]:
+        pump_time = fmt_time(r["pump_arrival_time"])
+        pump_line = "Ground pump"
+        if r["pump_company"]:
+            pump_line += f"-{r['pump_company']}"
+        if r["pump_company_phone"]:
+            pump_line += f" #{r['pump_company_phone']}"
+        if pump_time:
+            pump_line += f" @{pump_time}"
+        lines.append(pump_line)
+
+    if r["concrete_company"]:
+        concrete_line = r["concrete_company"]
+        if pour_time:
+            concrete_line += f" @{pour_time}"
+        if r["concrete_company_phone"]:
+            concrete_line += f" #{r['concrete_company_phone']}"
+        lines.append(concrete_line)
+
+    if r["lab_required"] == "Yes" and (r["lab_company"] or r["lab_time"]):
+        lab_time = fmt_time(r["lab_time"])
+        lab_line = r["lab_company"] or "Lab"
+        if lab_time:
+            lab_line += f" at {lab_time}"
+        lines.append(lab_line)
+
+    if r["drilling_required"] == "Yes" and (r["drilling_company"] or r["drilling_time"]):
+        drill_time = fmt_time(r["drilling_time"])
+        drill_line = r["drilling_company"] or "Drilling company"
+        if r["drilling_company_phone"]:
+            drill_line += f" #{r['drilling_company_phone']}"
+        if drill_time:
+            drill_line += f" at {drill_time}"
+        lines.append(drill_line)
+
+    return "\n\n".join(lines)
+
+
 @app.route("/inventory/concrete/<int:request_id>")
 @login_required
 def inventory_view_concrete(request_id):
@@ -979,7 +1092,8 @@ def inventory_view_concrete(request_id):
     if not r:
         flash("Request not found.", "error")
         return redirect(url_for("inventory_concrete_list"))
-    return render_template("inventory/concrete_request_detail.html", r=r)
+    notification = build_concrete_order_notification(r) if r["ordered_by"] else None
+    return render_template("inventory/concrete_request_detail.html", r=r, notification=notification)
 
 
 @app.route("/inventory/concrete/<int:request_id>/edit", methods=["GET", "POST"])
@@ -1014,6 +1128,40 @@ def inventory_edit_concrete(request_id):
     return render_template("inventory/edit_concrete_request.html", r=r, today=date.today().isoformat())
 
 
+@app.route("/inventory/concrete/<int:request_id>/order", methods=["GET", "POST"])
+@login_required
+def inventory_place_concrete_order(request_id):
+    if not is_procurement():
+        flash("Only procurement (Ayoub, Rebecca, or Marilu) can place a concrete order.", "error")
+        return redirect(url_for("inventory_view_concrete", request_id=request_id))
+    db = get_db()
+    r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
+    if not r:
+        flash("Request not found.", "error")
+        return redirect(url_for("inventory_concrete_list"))
+    if request.method == "POST":
+        now = datetime.utcnow().isoformat()
+        db.execute(
+            """UPDATE inventory_concrete_requests SET
+               concrete_company=?, concrete_company_phone=?, pump_company=?, pump_company_phone=?,
+               pump_arrival_time=?, lab_company=?, lab_time=?, drilling_company=?, drilling_company_phone=?,
+               drilling_time=?, ordered_by=?, ordered_date=?, status='Scheduled', updated_at=?
+               WHERE id=?""",
+            (request.form.get("concrete_company", ""), request.form.get("concrete_company_phone", ""),
+             request.form.get("pump_company", ""), request.form.get("pump_company_phone", ""),
+             request.form.get("pump_arrival_time", ""), request.form.get("lab_company", ""),
+             request.form.get("lab_time", ""), request.form.get("drilling_company", ""),
+             request.form.get("drilling_company_phone", ""), request.form.get("drilling_time", ""),
+             current_user.name or current_user.email, date.today().isoformat(), now, request_id)
+        )
+        log_activity("inventory", "concrete_request", request_id, "updated", field="status",
+                     old_value=r["status"], new_value="Scheduled")
+        db.commit()
+        flash("Order placed and marked Scheduled.")
+        return redirect(url_for("inventory_view_concrete", request_id=request_id))
+    return render_template("inventory/place_concrete_order.html", r=r, today=date.today().isoformat())
+
+
 @app.route("/inventory/concrete/<int:request_id>/status", methods=["POST"])
 @login_required
 def inventory_update_concrete_status(request_id):
@@ -1023,6 +1171,9 @@ def inventory_update_concrete_status(request_id):
         flash("Request not found.", "error")
         return redirect(url_for("inventory_concrete_list"))
     new_status = request.form["status"]
+    if new_status == "Scheduled" and not is_procurement():
+        flash("Only procurement can mark a concrete request Scheduled -- use Place Order.", "error")
+        return redirect(url_for("inventory_view_concrete", request_id=request_id))
     db.execute("UPDATE inventory_concrete_requests SET status = ?, updated_at = ? WHERE id = ?",
                (new_status, datetime.utcnow().isoformat(), request_id))
     log_activity("inventory", "concrete_request", request_id, "updated", field="status",
@@ -1197,6 +1348,9 @@ def inventory_update_purchase_status(request_id):
         flash("Request not found.", "error")
         return redirect(url_for("inventory_purchase_list"))
     new_status = request.form["status"]
+    if new_status == "Scheduled" and not is_procurement():
+        flash("Only procurement can mark a purchase request Scheduled -- use Place Order.", "error")
+        return redirect(url_for("inventory_view_purchase", request_id=request_id))
     db.execute("UPDATE inventory_purchase_requests SET status = ?, updated_at = ? WHERE id = ?",
                (new_status, datetime.utcnow().isoformat(), request_id))
     log_activity("inventory", "purchase_request", request_id, "updated", field="status",
@@ -1204,6 +1358,33 @@ def inventory_update_purchase_status(request_id):
     db.commit()
     flash(f"Marked as {new_status}.")
     return redirect(url_for("inventory_view_purchase", request_id=request_id))
+
+
+@app.route("/inventory/purchase/<int:request_id>/order", methods=["GET", "POST"])
+@login_required
+def inventory_place_purchase_order(request_id):
+    if not is_procurement():
+        flash("Only procurement (Ayoub, Rebecca, or Marilu) can place this order.", "error")
+        return redirect(url_for("inventory_view_purchase", request_id=request_id))
+    db = get_db()
+    r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
+    if not r:
+        flash("Request not found.", "error")
+        return redirect(url_for("inventory_purchase_list"))
+    if request.method == "POST":
+        db.execute(
+            """UPDATE inventory_purchase_requests SET vendor_company=?, vendor_company_phone=?,
+               ordered_by=?, ordered_date=?, status='Scheduled', updated_at=? WHERE id=?""",
+            (request.form.get("vendor_company", ""), request.form.get("vendor_company_phone", ""),
+             current_user.name or current_user.email, date.today().isoformat(),
+             datetime.utcnow().isoformat(), request_id)
+        )
+        log_activity("inventory", "purchase_request", request_id, "updated", field="status",
+                     old_value=r["status"], new_value="Scheduled")
+        db.commit()
+        flash("Order placed and marked Scheduled.")
+        return redirect(url_for("inventory_view_purchase", request_id=request_id))
+    return render_template("inventory/place_purchase_order.html", r=r, today=date.today().isoformat())
 
 
 @app.route("/inventory/purchase/<int:request_id>/delete", methods=["POST"])

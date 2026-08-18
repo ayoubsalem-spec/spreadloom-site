@@ -30,10 +30,37 @@
     </table>
 </div>
 
+{% if r['ordered_by'] %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Details</h3>
+    <table>
+        <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date'] }}{% endif %}</td></tr>
+        {% if r['concrete_company'] %}<tr><td class="sub">Concrete Company</td><td>{{ r['concrete_company'] }}{% if r['concrete_company_phone'] %} &middot; {{ r['concrete_company_phone'] }}{% endif %}</td></tr>{% endif %}
+        {% if r['pump_company'] %}<tr><td class="sub">Ground Pump</td><td>{{ r['pump_company'] }}{% if r['pump_company_phone'] %} &middot; {{ r['pump_company_phone'] }}{% endif %}{% if r['pump_arrival_time'] %} &middot; {{ r['pump_arrival_time'] }}{% endif %}</td></tr>{% endif %}
+        {% if r['lab_company'] %}<tr><td class="sub">Lab</td><td>{{ r['lab_company'] }}{% if r['lab_time'] %} &middot; {{ r['lab_time'] }}{% endif %}</td></tr>{% endif %}
+        {% if r['drilling_company'] %}<tr><td class="sub">Drilling Company</td><td>{{ r['drilling_company'] }}{% if r['drilling_company_phone'] %} &middot; {{ r['drilling_company_phone'] }}{% endif %}{% if r['drilling_time'] %} &middot; {{ r['drilling_time'] }}{% endif %}</td></tr>{% endif %}
+    </table>
+    {% if notification %}
+    <h3 style="font-size:15px; color:var(--gold); margin:18px 0 8px;">Notification</h3>
+    <textarea id="order-notification" readonly style="min-height:140px; font-family:inherit; white-space:pre-wrap;">{{ notification }}</textarea>
+    <button type="button" class="btn btn-sm" style="margin-top:10px;" onclick="navigator.clipboard.writeText(document.getElementById('order-notification').value); this.textContent='Copied!'; setTimeout(() => this.textContent='Copy Notification', 1500);">Copy Notification</button>
+    {% endif %}
+    {% if is_procurement %}
+    <a href="{{ url_for('inventory_place_concrete_order', request_id=r['id']) }}" class="btn btn-sm" style="margin-top:10px;">Edit Order Details</a>
+    {% endif %}
+</div>
+{% elif is_procurement %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Not Yet Placed</h3>
+    <p class="sub" style="margin-bottom:12px;">Fill in the company and contact for the truck, pump, and lab to mark this Scheduled and generate the notification.</p>
+    <a href="{{ url_for('inventory_place_concrete_order', request_id=r['id']) }}" class="btn btn-gold">Place Order</a>
+</div>
+{% endif %}
+
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Update Status</h3>
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
-        {% for s in ['Submitted', 'Scheduled', 'Completed'] %}
+        {% for s in ['Submitted', 'Completed'] %}
         {% if r['status'] != s %}
         <form method="POST" action="{{ url_for('inventory_update_concrete_status', request_id=r['id']) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
