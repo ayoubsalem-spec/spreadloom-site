@@ -141,6 +141,35 @@ def log_activity(section, entity_type, entity_id, action, asset_id=None, field=N
     )
 
 
+def apply_due_scheduled_moves(asset_id=None):
+    """Scheduled location moves apply themselves once their date arrives --
+    there's no cron here, so we check for anything due whenever an asset
+    page (or the dashboard) loads and apply it right then. asset_id=None
+    checks every asset (used on the dashboard); a specific id scopes it to
+    one asset's page load.
+    """
+    db = get_db()
+    today = date.today().isoformat()
+    if asset_id is not None:
+        due = db.execute(
+            "SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND entry_kind='move' AND move_status='Scheduled' AND scheduled_date <= ?",
+            (asset_id, today)
+        ).fetchall()
+    else:
+        due = db.execute(
+            "SELECT * FROM sitepulse_usage_log WHERE entry_kind='move' AND move_status='Scheduled' AND scheduled_date <= ?",
+            (today,)
+        ).fetchall()
+    for move in due:
+        db.execute("UPDATE sitepulse_assets SET location=?, updated_at=? WHERE id=?",
+                   (move["to_location"], datetime.utcnow().isoformat(), move["asset_id"]))
+        db.execute("UPDATE sitepulse_usage_log SET move_status='Applied' WHERE id=?", (move["id"],))
+        log_activity("sitepulse", "move", move["id"], "applied", asset_id=move["asset_id"],
+                     field="location", old_value=move["from_location"], new_value=move["to_location"])
+    if due:
+        db.commit()
+
+
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.executescript("""
@@ -180,6 +209,8 @@ def init_db():
             usage_type TEXT DEFAULT 'Internal Job', job_name TEXT, job_address TEXT,
             client TEXT, out_date TEXT, duration_unit TEXT, return_date TEXT, notes TEXT,
             photo_filename TEXT, created_at TEXT,
+            entry_kind TEXT DEFAULT 'usage', from_location TEXT, to_location TEXT,
+            mileage_hours TEXT, move_status TEXT DEFAULT 'Applied', scheduled_date TEXT,
             FOREIGN KEY (asset_id) REFERENCES sitepulse_assets (id)
         );
         CREATE TABLE IF NOT EXISTS sitepulse_maintenance_log (
@@ -308,6 +339,15 @@ def init_db():
         "ALTER TABLE inventory_purchase_requests ADD COLUMN ordered_date TEXT",
         "ALTER TABLE inventory_purchase_requests ADD COLUMN vendor_company TEXT",
         "ALTER TABLE inventory_purchase_requests ADD COLUMN vendor_company_phone TEXT",
+        # Location-move auto-tracking (item 15) -- Status & Location now
+        # writes movement entries straight into the usage log, including
+        # ones scheduled for a future date.
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN entry_kind TEXT DEFAULT 'usage'",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN from_location TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN to_location TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN mileage_hours TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN move_status TEXT DEFAULT 'Applied'",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN scheduled_date TEXT",
     ]:
         try:
             db.execute(column_sql)
@@ -435,6 +475,7 @@ def sp_statusclass(status):
 @app.route("/sitepulse/")
 @login_required
 def sitepulse_dashboard():
+    apply_due_scheduled_moves()
     db = get_db()
     status_filter = request.args.get("status", "")
     location_filter = request.args.get("location", "")
@@ -538,12 +579,17 @@ def sitepulse_new_asset():
 @app.route("/sitepulse/asset/<int:asset_id>")
 @login_required
 def sitepulse_view_asset(asset_id):
+    apply_due_scheduled_moves(asset_id)
     db = get_db()
     a = db.execute("SELECT * FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
     if not a:
         flash("Asset not found.", "error")
         return redirect(url_for("sitepulse_dashboard"))
-    usage = db.execute("SELECT * FROM sitepulse_usage_log WHERE asset_id = ? ORDER BY out_date DESC", (asset_id,)).fetchall()
+    usage = db.execute("SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND move_status != 'Scheduled' ORDER BY COALESCE(out_date, created_at) DESC", (asset_id,)).fetchall()
+    scheduled_moves = db.execute(
+        "SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND entry_kind='move' AND move_status='Scheduled' ORDER BY scheduled_date ASC",
+        (asset_id,)
+    ).fetchall()
     maintenance = db.execute("SELECT * FROM sitepulse_maintenance_log WHERE asset_id = ? ORDER BY entry_date DESC", (asset_id,)).fetchall()
 
     mileage_entries = db.execute(
@@ -565,8 +611,10 @@ def sitepulse_view_asset(asset_id):
     monthly_totals_sorted = sorted(monthly_totals.items(), reverse=True)
 
     return render_template("sitepulse/asset.html", a=a, usage=usage, maintenance=maintenance,
+                            scheduled_moves=scheduled_moves,
                             mileage_entries=mileage_entries, monthly_totals=monthly_totals_sorted,
-                            status_options=SP_STATUS_OPTIONS, usage_type_options=["Internal Job", "External Rental"])
+                            status_options=SP_STATUS_OPTIONS, usage_type_options=["Internal Job", "External Rental"],
+                            today=date.today().isoformat())
 
 
 @app.route("/sitepulse/asset/<int:asset_id>/edit-details", methods=["POST"])
@@ -592,14 +640,71 @@ def sitepulse_edit_asset_details(asset_id):
 def sitepulse_update_asset(asset_id):
     db = get_db()
     old = db.execute("SELECT status, location FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
+    new_status = request.form["status"]
+    new_location = request.form.get("location", "").strip()
+    hours_mileage = request.form.get("hours_mileage", "")
+    schedule_date = request.form.get("schedule_date", "").strip()
+    now = datetime.utcnow().isoformat()
+    today = date.today().isoformat()
+    old_location = old["location"] or ""
+
+    location_changed = new_location != old_location and new_location != ""
+
+    if location_changed and schedule_date and schedule_date > today:
+        # Future move: don't touch the asset's location yet -- park it as a
+        # Scheduled entry in the usage log. apply_due_scheduled_moves()
+        # applies it automatically once that date arrives.
+        db.execute("UPDATE sitepulse_assets SET status=?, hours_mileage=?, updated_at=? WHERE id=?",
+                   (new_status, hours_mileage, now, asset_id))
+        cur = db.execute(
+            """INSERT INTO sitepulse_usage_log (asset_id, entry_kind, from_location, to_location,
+               mileage_hours, move_status, scheduled_date, out_date, created_at)
+               VALUES (?, 'move', ?, ?, ?, 'Scheduled', ?, ?, ?)""",
+            (asset_id, old_location, new_location, hours_mileage, schedule_date, schedule_date, now)
+        )
+        log_activity("sitepulse", "move", cur.lastrowid, "scheduled", asset_id=asset_id,
+                     field="location", old_value=old_location, new_value=new_location)
+        db.commit()
+        flash(f"Move to {new_location} scheduled for {schedule_date}.")
+        return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
     db.execute("UPDATE sitepulse_assets SET status=?, location=?, hours_mileage=?, updated_at=? WHERE id=?",
-               (request.form["status"], request.form.get("location", ""), request.form.get("hours_mileage", ""),
-                datetime.utcnow().isoformat(), asset_id))
-    if old["status"] != request.form["status"]:
-        log_activity("sitepulse", "asset", asset_id, "updated", field="status", old_value=old["status"], new_value=request.form["status"])
+               (new_status, new_location, hours_mileage, now, asset_id))
+
+    if location_changed:
+        cur = db.execute(
+            """INSERT INTO sitepulse_usage_log (asset_id, entry_kind, from_location, to_location,
+               mileage_hours, move_status, scheduled_date, out_date, created_at)
+               VALUES (?, 'move', ?, ?, ?, 'Applied', ?, ?, ?)""",
+            (asset_id, old_location, new_location, hours_mileage, today, today, now)
+        )
+        log_activity("sitepulse", "move", cur.lastrowid, "created", asset_id=asset_id,
+                     field="location", old_value=old_location, new_value=new_location)
+
+    if old["status"] != new_status:
+        log_activity("sitepulse", "asset", asset_id, "updated", field="status", old_value=old["status"], new_value=new_status)
     db.commit()
     flash("Asset updated.")
     return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
+
+@app.route("/sitepulse/move/<int:move_id>/cancel", methods=["POST"])
+@login_required
+def sitepulse_cancel_scheduled_move(move_id):
+    db = get_db()
+    move = db.execute("SELECT * FROM sitepulse_usage_log WHERE id = ? AND entry_kind='move'", (move_id,)).fetchone()
+    if not move:
+        flash("Scheduled move not found.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    if move["move_status"] != "Scheduled":
+        flash("That move has already been applied.", "error")
+        return redirect(url_for("sitepulse_view_asset", asset_id=move["asset_id"]))
+    db.execute("DELETE FROM sitepulse_usage_log WHERE id = ?", (move_id,))
+    log_activity("sitepulse", "move", move_id, "cancelled", asset_id=move["asset_id"],
+                 field="location", old_value=move["from_location"], new_value=move["to_location"])
+    db.commit()
+    flash("Scheduled move cancelled.")
+    return redirect(url_for("sitepulse_view_asset", asset_id=move["asset_id"]))
 
 
 @app.route("/sitepulse/asset/<int:asset_id>/status", methods=["POST"])

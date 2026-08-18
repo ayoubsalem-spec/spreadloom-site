@@ -33,6 +33,7 @@
 
 <div class="card">
     <h2>Status &amp; Location</h2>
+    <p class="sub">Changing location here logs the move automatically &mdash; no need to add it separately below.</p>
     <form method="POST" action="{{ url_for('sitepulse_update_asset', asset_id=a['id']) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
@@ -51,8 +52,25 @@
                 <input type="text" name="hours_mileage" value="{{ a['hours_mileage'] or '' }}">
             </div>
         </div>
+        <label>Schedule for a Future Date (optional)</label>
+        <input type="date" name="schedule_date" min="{{ today }}">
+        <p class="sub" style="margin-top:4px;">Leave blank to move it now. Set a date and the location above will apply automatically once that date arrives &mdash; the current location stays put until then.</p>
         <button type="submit" class="btn btn-gold">Save</button>
     </form>
+    {% if scheduled_moves|length > 0 %}
+    <div style="margin-top:16px;">
+        <h3 style="font-size:13px; color:var(--gold); margin-bottom:8px;">Scheduled Moves</h3>
+        {% for m in scheduled_moves %}
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
+            <span class="sub" style="margin:0;">{{ m['from_location'] or '\u2014' }} &rarr; {{ m['to_location'] }} on {{ m['scheduled_date'] }}</span>
+            <form method="POST" action="{{ url_for('sitepulse_cancel_scheduled_move', move_id=m['id']) }}" onsubmit="return confirm('Cancel this scheduled move?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-sm" style="color:#F87171;">Cancel</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
     <div id="asset-map" style="height:220px; border-radius:8px; margin-top:14px; border:1px solid var(--border);"></div>
     {% if a['value'] or a['daily_rate'] %}
     <p class="sub" style="margin-top:14px; margin-bottom:0;">
@@ -104,9 +122,22 @@
         <p class="sub" style="margin-bottom:0;">No usage history yet.</p>
     {% else %}
     <table>
-        <tr><th>Type</th><th>Job / Client</th><th>Out</th><th>Return</th><th>Photo</th><th></th></tr>
+        <tr><th>Type</th><th>Details</th><th>Date</th><th>Return</th><th>Photo</th><th></th></tr>
         {% for u in usage %}
         <tr>
+            {% if u['entry_kind'] == 'move' %}
+            <td><span class="badge status-inprogress">Location Move</span></td>
+            <td>{{ u['from_location'] or '\u2014' }} &rarr; {{ u['to_location'] }}{% if u['mileage_hours'] %}<br><span class="sub" style="margin:0;">Hours/Mileage: {{ u['mileage_hours'] }}</span>{% endif %}</td>
+            <td>{{ u['scheduled_date'] or u['out_date'] or '—' }}</td>
+            <td>—</td>
+            <td>—</td>
+            <td style="white-space:nowrap;">
+                <form method="POST" action="{{ url_for('sitepulse_delete_usage', usage_id=u['id']) }}" style="display:inline;" onsubmit="return confirm('Delete this move entry?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm" style="color:#F87171;">Delete</button>
+                </form>
+            </td>
+            {% else %}
             <td>{{ u['usage_type'] }}</td>
             <td>{{ u['job_name'] or u['client'] or '—' }}</td>
             <td>{{ u['out_date'] or '—' }}</td>
@@ -157,6 +188,7 @@
                     <button type="submit" class="btn btn-sm" style="color:#F87171;">Delete</button>
                 </form>
             </td>
+            {% endif %}
         </tr>
         {% endfor %}
     </table>
