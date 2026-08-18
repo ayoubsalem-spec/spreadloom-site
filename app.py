@@ -42,6 +42,10 @@ ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "heic", "webp"}
 MAX_PHOTO_SIZE_MB = 10
 
 ADMIN_EMAILS = ["ayoub@darycet.com"]
+
+# Who's allowed to actually place an order (mark "Ordered" and fill in
+# Ordered From / vendor / contact).
+PROCUREMENT_EMAILS = {"rebecca@darycet.com", "marilu@darycet.com"}
 ALLOWED_DOMAIN = "@darycet.com"
 # Extra emails allowed to sign up even though they're outside the main
 # company email domain.
@@ -74,6 +78,10 @@ def close_db(exception):
 
 def is_admin():
     return current_user.is_authenticated and current_user.email in ADMIN_EMAILS
+
+
+def is_procurement():
+    return current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS
 
 
 @app.context_processor
@@ -127,6 +135,14 @@ def log_activity(section, entity_type, entity_id, action, asset_id=None, field=N
          str(old_value) if old_value is not None else None,
          str(new_value) if new_value is not None else None,
          user_email, datetime.utcnow().isoformat())
+    )
+
+
+def create_notification(section, entity_type, entity_id, message):
+    db = get_db()
+    db.execute(
+        "INSERT INTO notifications (section, entity_type, entity_id, message, created_at) VALUES (?, ?, ?, ?, ?)",
+        (section, entity_type, entity_id, message, datetime.utcnow().isoformat())
     )
 
 
@@ -187,6 +203,33 @@ def init_db():
             equipment_description TEXT NOT NULL, job_name TEXT, rate_amount TEXT,
             rate_period TEXT DEFAULT 'Daily', rented_date TEXT NOT NULL, due_date TEXT,
             returned_date TEXT, notes TEXT, created_at TEXT, updated_at TEXT
+        );
+
+        -- Status & Location control center: a future move an asset is
+        -- planned to make. Does NOT touch the asset's current site/location
+        -- until it's marked completed -- see sitepulse_complete_movement.
+        CREATE TABLE IF NOT EXISTS sitepulse_scheduled_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER NOT NULL,
+            from_site TEXT, from_location TEXT, to_site TEXT, to_location TEXT,
+            scheduled_date TEXT NOT NULL, scheduled_time TEXT,
+            status TEXT DEFAULT 'Scheduled', completed_at TEXT,
+            created_by TEXT, created_at TEXT,
+            FOREIGN KEY (asset_id) REFERENCES sitepulse_assets (id)
+        );
+
+        -- The automatic audit trail for Status & Location. Every location
+        -- change, scheduled movement, completed movement, mileage update,
+        -- and engine-hours update writes one row here -- never entered by
+        -- hand, always generated from the action that caused it.
+        CREATE TABLE IF NOT EXISTS sitepulse_location_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            previous_site TEXT, new_site TEXT, previous_location TEXT, new_location TEXT,
+            previous_mileage TEXT, new_mileage TEXT, miles_added TEXT,
+            previous_engine_hours TEXT, new_engine_hours TEXT, hours_added TEXT,
+            scheduled_date TEXT, scheduled_time TEXT,
+            user_email TEXT, created_at TEXT NOT NULL,
+            FOREIGN KEY (asset_id) REFERENCES sitepulse_assets (id)
         );
 
         -- Site Inventory: concrete requests + material inventory, split out
@@ -276,6 +319,39 @@ def init_db():
         db.execute("ALTER TABLE inventory_purchase_requests ADD COLUMN status TEXT DEFAULT 'Submitted'")
     except sqlite3.OperationalError:
         pass
+
+    # Status & Location control center columns -- added on top of the
+    # original hours_mileage free-text field, which stays as-is so nothing
+    # that already reads/writes it breaks.
+    for col_def in [
+        "site TEXT", "equipment_type TEXT DEFAULT 'mileage'",
+        "current_mileage TEXT", "current_engine_hours TEXT",
+    ]:
+        try:
+            db.execute(f"ALTER TABLE sitepulse_assets ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass
+
+    # Order-placement fields -- "Ordered From" and related vendor/contact
+    # info only ever get filled in when procurement actually places the
+    # order (see inventory_place_order_concrete / _purchase below), never
+    # at request time.
+    for col_def in ["ordered_from TEXT", "ordered_contact TEXT", "ordered_phone TEXT", "order_placed_at TEXT"]:
+        for table in ["inventory_concrete_requests", "inventory_purchase_requests"]:
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass
+
+    # Notifications -- generated automatically when an order is placed,
+    # pulling from the record rather than being typed by hand.
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, section TEXT NOT NULL,
+            entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL,
+            message TEXT NOT NULL, created_at TEXT NOT NULL
+        )
+    """)
 
     db.commit()
     db.close()
@@ -483,13 +559,14 @@ def sitepulse_new_asset():
         now = datetime.utcnow().isoformat()
         cur = db.execute(
             """INSERT INTO sitepulse_assets (name, description, year, serial_number, value, daily_rate,
-               weekly_rate, monthly_rate, status, location, hours_mileage, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               weekly_rate, monthly_rate, status, location, hours_mileage, site, equipment_type, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request.form["name"], request.form.get("description", ""), request.form.get("year", ""),
              request.form.get("serial_number", ""), request.form.get("value", ""),
              request.form.get("daily_rate", ""), request.form.get("weekly_rate", ""),
              request.form.get("monthly_rate", ""), "Available", request.form.get("location", ""),
-             request.form.get("hours_mileage", ""), now, now)
+             request.form.get("hours_mileage", ""), request.form.get("site", ""),
+             request.form.get("equipment_type", "mileage"), now, now)
         )
         log_activity("sitepulse", "asset", cur.lastrowid, "created", new_value=request.form["name"])
         db.commit()
@@ -527,8 +604,17 @@ def sitepulse_view_asset(asset_id):
             pass
     monthly_totals_sorted = sorted(monthly_totals.items(), reverse=True)
 
+    upcoming_movements = db.execute(
+        "SELECT * FROM sitepulse_scheduled_movements WHERE asset_id = ? AND status = 'Scheduled' "
+        "ORDER BY scheduled_date ASC, scheduled_time ASC", (asset_id,)
+    ).fetchall()
+    location_history = db.execute(
+        "SELECT * FROM sitepulse_location_history WHERE asset_id = ? ORDER BY created_at DESC", (asset_id,)
+    ).fetchall()
+
     return render_template("sitepulse/asset.html", a=a, usage=usage, maintenance=maintenance,
                             mileage_entries=mileage_entries, monthly_totals=monthly_totals_sorted,
+                            upcoming_movements=upcoming_movements, location_history=location_history,
                             status_options=SP_STATUS_OPTIONS, usage_type_options=["Internal Job", "External Rental"])
 
 
@@ -538,11 +624,12 @@ def sitepulse_edit_asset_details(asset_id):
     db = get_db()
     db.execute(
         """UPDATE sitepulse_assets SET name=?, description=?, year=?, serial_number=?, value=?,
-           daily_rate=?, weekly_rate=?, monthly_rate=?, updated_at=? WHERE id=?""",
+           daily_rate=?, weekly_rate=?, monthly_rate=?, equipment_type=?, updated_at=? WHERE id=?""",
         (request.form["name"], request.form.get("description", ""), request.form.get("year", ""),
          request.form.get("serial_number", ""), request.form.get("value", ""),
          request.form.get("daily_rate", ""), request.form.get("weekly_rate", ""),
-         request.form.get("monthly_rate", ""), datetime.utcnow().isoformat(), asset_id)
+         request.form.get("monthly_rate", ""), request.form.get("equipment_type", "mileage"),
+         datetime.utcnow().isoformat(), asset_id)
     )
     log_activity("sitepulse", "asset", asset_id, "updated", asset_id=asset_id, field="details", new_value=request.form["name"])
     db.commit()
@@ -563,6 +650,150 @@ def sitepulse_update_asset(asset_id):
     db.commit()
     flash("Asset updated.")
     return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
+
+@app.route("/sitepulse/asset/<int:asset_id>/location-update", methods=["POST"])
+@login_required
+def sitepulse_location_update(asset_id):
+    """The Status & Location control center: one action that changes
+    site/location and/or logs a new mileage or engine-hours reading, and
+    automatically writes the corresponding history row. This is the only
+    place site/location/mileage/hours should be edited from now on."""
+    db = get_db()
+    a = db.execute("SELECT * FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
+    if not a:
+        flash("Asset not found.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+
+    new_site = request.form.get("site", "").strip()
+    new_location = request.form.get("location", "").strip()
+    new_mileage = request.form.get("current_mileage", "").strip()
+    new_engine_hours = request.form.get("current_engine_hours", "").strip()
+    now = datetime.utcnow().isoformat()
+    user_email = current_user.email
+
+    old_site, old_location = a["site"] or "", a["location"] or ""
+    old_mileage, old_engine_hours = a["current_mileage"] or "", a["current_engine_hours"] or ""
+
+    location_changed = new_site != old_site or new_location != old_location
+    miles_added, hours_added = "", ""
+    mileage_changed = a["equipment_type"] == "mileage" and new_mileage and new_mileage != old_mileage
+    hours_changed = a["equipment_type"] == "engine_hours" and new_engine_hours and new_engine_hours != old_engine_hours
+
+    if mileage_changed:
+        try:
+            miles_added = str(round(float(new_mileage) - float(old_mileage), 1)) if old_mileage else ""
+        except ValueError:
+            miles_added = ""
+    if hours_changed:
+        try:
+            hours_added = str(round(float(new_engine_hours) - float(old_engine_hours), 1)) if old_engine_hours else ""
+        except ValueError:
+            hours_added = ""
+
+    if not (location_changed or mileage_changed or hours_changed):
+        flash("No changes to apply.")
+        return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
+    db.execute(
+        "UPDATE sitepulse_assets SET site=?, location=?, current_mileage=?, current_engine_hours=?, updated_at=? WHERE id=?",
+        (new_site, new_location, new_mileage or old_mileage, new_engine_hours or old_engine_hours, now, asset_id)
+    )
+
+    event_type = "location_change" if location_changed else ("mileage_update" if mileage_changed else "engine_hours_update")
+    db.execute(
+        """INSERT INTO sitepulse_location_history (asset_id, event_type, previous_site, new_site,
+           previous_location, new_location, previous_mileage, new_mileage, miles_added,
+           previous_engine_hours, new_engine_hours, hours_added, user_email, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (asset_id, event_type, old_site, new_site, old_location, new_location,
+         old_mileage if mileage_changed else "", new_mileage if mileage_changed else "", miles_added,
+         old_engine_hours if hours_changed else "", new_engine_hours if hours_changed else "", hours_added,
+         user_email, now)
+    )
+    log_activity("sitepulse", "location", asset_id, "updated", asset_id=asset_id, field=event_type,
+                 old_value=f"{old_site}/{old_location}", new_value=f"{new_site}/{new_location}")
+    db.commit()
+    flash("Location updated.")
+    return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
+
+@app.route("/sitepulse/asset/<int:asset_id>/schedule-movement", methods=["POST"])
+@login_required
+def sitepulse_schedule_movement(asset_id):
+    db = get_db()
+    a = db.execute("SELECT * FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
+    if not a:
+        flash("Asset not found.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    now = datetime.utcnow().isoformat()
+    to_site = request.form.get("to_site", "").strip()
+    to_location = request.form.get("to_location", "").strip()
+    scheduled_date = request.form.get("scheduled_date", "")
+    scheduled_time = request.form.get("scheduled_time", "")
+
+    cur = db.execute(
+        """INSERT INTO sitepulse_scheduled_movements (asset_id, from_site, from_location, to_site, to_location,
+           scheduled_date, scheduled_time, status, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'Scheduled', ?, ?)""",
+        (asset_id, a["site"] or "", a["location"] or "", to_site, to_location,
+         scheduled_date, scheduled_time, current_user.email, now)
+    )
+    db.execute(
+        """INSERT INTO sitepulse_location_history (asset_id, event_type, previous_site, new_site,
+           previous_location, new_location, scheduled_date, scheduled_time, user_email, created_at)
+           VALUES (?, 'scheduled_movement_created', ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (asset_id, a["site"] or "", to_site, a["location"] or "", to_location,
+         scheduled_date, scheduled_time, current_user.email, now)
+    )
+    log_activity("sitepulse", "scheduled_movement", cur.lastrowid, "created", asset_id=asset_id,
+                 new_value=f"{to_site}/{to_location} on {scheduled_date}")
+    db.commit()
+    flash("Movement scheduled.")
+    return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
+
+@app.route("/sitepulse/movement/<int:movement_id>/complete", methods=["POST"])
+@login_required
+def sitepulse_complete_movement(movement_id):
+    db = get_db()
+    m = db.execute("SELECT * FROM sitepulse_scheduled_movements WHERE id = ?", (movement_id,)).fetchone()
+    if not m:
+        flash("Scheduled movement not found.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    a = db.execute("SELECT * FROM sitepulse_assets WHERE id = ?", (m["asset_id"],)).fetchone()
+    now = datetime.utcnow().isoformat()
+
+    db.execute("UPDATE sitepulse_scheduled_movements SET status='Completed', completed_at=? WHERE id=?", (now, movement_id))
+    db.execute("UPDATE sitepulse_assets SET site=?, location=?, updated_at=? WHERE id=?",
+               (m["to_site"], m["to_location"], now, a["id"]))
+    db.execute(
+        """INSERT INTO sitepulse_location_history (asset_id, event_type, previous_site, new_site,
+           previous_location, new_location, scheduled_date, scheduled_time, user_email, created_at)
+           VALUES (?, 'movement_completed', ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (a["id"], a["site"] or "", m["to_site"], a["location"] or "", m["to_location"],
+         m["scheduled_date"], m["scheduled_time"], current_user.email, now)
+    )
+    log_activity("sitepulse", "scheduled_movement", movement_id, "completed", asset_id=a["id"],
+                 new_value=f"{m['to_site']}/{m['to_location']}")
+    db.commit()
+    flash("Movement completed -- location updated.")
+    return redirect(url_for("sitepulse_view_asset", asset_id=a["id"]))
+
+
+@app.route("/sitepulse/movement/<int:movement_id>/cancel", methods=["POST"])
+@login_required
+def sitepulse_cancel_movement(movement_id):
+    db = get_db()
+    m = db.execute("SELECT * FROM sitepulse_scheduled_movements WHERE id = ?", (movement_id,)).fetchone()
+    if not m:
+        flash("Scheduled movement not found.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db.execute("UPDATE sitepulse_scheduled_movements SET status='Cancelled' WHERE id=?", (movement_id,))
+    log_activity("sitepulse", "scheduled_movement", movement_id, "cancelled", asset_id=m["asset_id"])
+    db.commit()
+    flash("Scheduled movement cancelled.")
+    return redirect(url_for("sitepulse_view_asset", asset_id=m["asset_id"]))
 
 
 @app.route("/sitepulse/asset/<int:asset_id>/status", methods=["POST"])
@@ -878,6 +1109,14 @@ def inventory_home():
     return redirect(url_for("inventory_materials_list"))
 
 
+@app.route("/inventory/notifications")
+@login_required
+def inventory_notifications():
+    db = get_db()
+    rows = db.execute("SELECT * FROM notifications ORDER BY created_at DESC LIMIT 100").fetchall()
+    return render_template("inventory/notifications.html", notifications=rows)
+
+
 @app.route("/inventory/materials")
 @login_required
 def inventory_materials_list():
@@ -979,7 +1218,7 @@ def inventory_view_concrete(request_id):
     if not r:
         flash("Request not found.", "error")
         return redirect(url_for("inventory_concrete_list"))
-    return render_template("inventory/concrete_request_detail.html", r=r)
+    return render_template("inventory/concrete_request_detail.html", r=r, has_procurement_access=is_procurement())
 
 
 @app.route("/inventory/concrete/<int:request_id>/edit", methods=["GET", "POST"])
@@ -1012,6 +1251,61 @@ def inventory_edit_concrete(request_id):
         flash("Concrete request updated.")
         return redirect(url_for("inventory_view_concrete", request_id=request_id))
     return render_template("inventory/edit_concrete_request.html", r=r, today=date.today().isoformat())
+
+
+@app.route("/inventory/concrete/<int:request_id>/place-order", methods=["POST"])
+@login_required
+def inventory_place_order_concrete(request_id):
+    if not is_procurement():
+        flash("Only procurement personnel can place an order.", "error")
+        return redirect(url_for("inventory_view_concrete", request_id=request_id))
+    db = get_db()
+    r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
+    if not r:
+        flash("Request not found.", "error")
+        return redirect(url_for("inventory_concrete_list"))
+    now = datetime.utcnow().isoformat()
+    ordered_from = request.form.get("ordered_from", "").strip()
+    ordered_contact = request.form.get("ordered_contact", "").strip()
+    ordered_phone = request.form.get("ordered_phone", "").strip()
+    db.execute(
+        """UPDATE inventory_concrete_requests SET status='Ordered', ordered_from=?, ordered_contact=?,
+           ordered_phone=?, ordered_by=?, ordered_date=?, order_placed_at=?, updated_at=? WHERE id=?""",
+        (ordered_from, ordered_contact, ordered_phone, current_user.name or current_user.email,
+         date.today().isoformat(), now, now, request_id)
+    )
+    log_activity("inventory", "concrete_request", request_id, "updated", field="status",
+                 old_value=r["status"], new_value="Ordered")
+
+    # Build the notification straight from the record -- nothing typed by hand.
+    r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
+    lines = [f"Concrete scheduled ({r['project']}) {r['pour_date']}" + (f" at {r['pour_time']}" if r['pour_time'] else "")]
+    detail = []
+    if r["concrete_amount"]:
+        detail.append(r["concrete_amount"])
+    if r["mix_design_psi"]:
+        detail.append(f"{r['mix_design_psi']} PSI")
+    if detail:
+        lines.append(" + ".join(detail))
+    if r["pump_size"] or r["pump_arrival_time"]:
+        pump_line = "Pump"
+        if r["pump_arrival_time"]:
+            pump_line += f" @ {r['pump_arrival_time']}"
+        lines.append(pump_line)
+    if ordered_from:
+        vendor_line = ordered_from
+        if ordered_contact:
+            vendor_line += f" — {ordered_contact}"
+        if ordered_phone:
+            vendor_line += f" — {ordered_phone}"
+        lines.append(vendor_line)
+    if r["lab_required"] == "Yes":
+        lines.append("Lab" + (f" @ {r['lab_time']}" if r["lab_time"] else ""))
+    create_notification("inventory", "concrete_request", request_id, "\n".join(lines))
+
+    db.commit()
+    flash("Order placed -- notification generated.")
+    return redirect(url_for("inventory_view_concrete", request_id=request_id))
 
 
 @app.route("/inventory/concrete/<int:request_id>/status", methods=["POST"])
@@ -1099,7 +1393,7 @@ def inventory_view_purchase(request_id):
         flash("Request not found.", "error")
         return redirect(url_for("inventory_purchase_list"))
     items = db.execute("SELECT * FROM inventory_purchase_request_items WHERE purchase_request_id = ?", (request_id,)).fetchall()
-    return render_template("inventory/purchase_request_detail.html", r=r, items=items)
+    return render_template("inventory/purchase_request_detail.html", r=r, items=items, has_procurement_access=is_procurement())
 
 
 @app.route("/inventory/activity")
@@ -1186,6 +1480,45 @@ def inventory_edit_purchase(request_id):
         return redirect(url_for("inventory_view_purchase", request_id=request_id))
     existing_items = db.execute("SELECT * FROM inventory_purchase_request_items WHERE purchase_request_id = ?", (request_id,)).fetchall()
     return render_template("inventory/edit_purchase_request.html", r=r, items=existing_items)
+
+
+@app.route("/inventory/purchase/<int:request_id>/place-order", methods=["POST"])
+@login_required
+def inventory_place_order_purchase(request_id):
+    if not is_procurement():
+        flash("Only procurement personnel can place an order.", "error")
+        return redirect(url_for("inventory_view_purchase", request_id=request_id))
+    db = get_db()
+    r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
+    if not r:
+        flash("Request not found.", "error")
+        return redirect(url_for("inventory_purchase_list"))
+    now = datetime.utcnow().isoformat()
+    ordered_from = request.form.get("ordered_from", "").strip()
+    ordered_contact = request.form.get("ordered_contact", "").strip()
+    ordered_phone = request.form.get("ordered_phone", "").strip()
+    db.execute(
+        """UPDATE inventory_purchase_requests SET status='Ordered', ordered_from=?, ordered_contact=?,
+           ordered_phone=?, ordered_by=?, ordered_date=?, order_placed_at=?, updated_at=? WHERE id=?""",
+        (ordered_from, ordered_contact, ordered_phone, current_user.name or current_user.email,
+         date.today().isoformat(), now, now, request_id)
+    )
+    log_activity("inventory", "purchase_request", request_id, "updated", field="status",
+                 old_value=r["status"], new_value="Ordered")
+
+    lines = [f"Purchase order placed ({r['job_name'] or r['pr_number'] or 'PR'})" + (f" — needed {r['needed_on']}" if r["needed_on"] else "")]
+    vendor_line = ordered_from
+    if ordered_contact:
+        vendor_line += f" — {ordered_contact}"
+    if ordered_phone:
+        vendor_line += f" — {ordered_phone}"
+    if ordered_from:
+        lines.append(vendor_line)
+    create_notification("inventory", "purchase_request", request_id, "\n".join(lines))
+
+    db.commit()
+    flash("Order placed -- notification generated.")
+    return redirect(url_for("inventory_view_purchase", request_id=request_id))
 
 
 @app.route("/inventory/purchase/<int:request_id>/status", methods=["POST"])

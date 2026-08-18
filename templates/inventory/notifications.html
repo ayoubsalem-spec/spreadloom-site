@@ -1,0 +1,22 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<h1>Notifications</h1>
+<p class="sub">Generated automatically when procurement places an order -- nothing here is typed by hand.</p>
+<div class="card" style="padding:0; overflow-x:auto;">
+    {% if notifications|length == 0 %}
+    <p class="sub" style="padding:20px;">No notifications yet.</p>
+    {% else %}
+    {% for n in notifications %}
+    <div style="padding:14px 20px; border-bottom:1px solid var(--border);">
+        <p class="sub" style="margin-bottom:6px;">{{ n['created_at'][:16].replace('T', ' ') }}</p>
+        <p style="white-space:pre-line; margin:0;">{{ n['message'] }}</p>
+        {% if n['entity_type'] == 'concrete_request' %}
+        <a href="{{ url_for('inventory_view_concrete', request_id=n['entity_id']) }}" style="font-size:12.5px;">View request &rarr;</a>
+        {% elif n['entity_type'] == 'purchase_request' %}
+        <a href="{{ url_for('inventory_view_purchase', request_id=n['entity_id']) }}" style="font-size:12.5px;">View request &rarr;</a>
+        {% endif %}
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
+{% endblock %}

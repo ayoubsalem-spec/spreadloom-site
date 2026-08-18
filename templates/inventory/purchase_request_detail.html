@@ -5,7 +5,7 @@
         <h1>{{ r['job_name'] or 'Purchase Request' }}</h1>
         <p class="sub">PR# {{ r['pr_number'] or '\u2014' }} &middot; Submitted {{ r['created_at'][:16].replace('T',' ') }}</p>
     </div>
-    <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
+    <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status'] in ('Scheduled','Ordered') else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
 </div>
 
 <div class="card">
@@ -17,7 +17,37 @@
         <tr><td class="sub">Needed On</td><td>{{ r['needed_on'] or '\u2014' }}</td></tr>
         <tr><td class="sub">Source of Supply</td><td>{{ r['source_of_supply'] or '\u2014' }}</td></tr>
     </table>
+    {% if r['ordered_from'] %}
+    <h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Order Placed</h3>
+    <table>
+        <tr><td class="sub" style="width:220px;">Ordered From</td><td>{{ r['ordered_from'] }}</td></tr>
+        <tr><td class="sub">Contact</td><td>{{ r['ordered_contact'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Phone</td><td>{{ r['ordered_phone'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Ordered By</td><td>{{ r['ordered_by'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Date Ordered</td><td>{{ r['ordered_date'] or '\u2014' }}</td></tr>
+    </table>
+    {% endif %}
 </div>
+
+{% if not r['ordered_from'] %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Place Order</h3>
+    {% if has_procurement_access %}
+    <form method="POST" action="{{ url_for('inventory_place_order_purchase', request_id=r['id']) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-row">
+            <div style="flex:1;"><label>Vendor / Company (Ordered From)</label><input type="text" name="ordered_from" required></div>
+            <div style="flex:1;"><label>Contact Person</label><input type="text" name="ordered_contact"></div>
+            <div style="flex:1;"><label>Contact Phone</label><input type="text" name="ordered_phone"></div>
+        </div>
+        <p class="sub" style="margin-bottom:14px;">Ordered by (you): <strong style="color:var(--text);">{{ current_user.name or current_user.email }}</strong> &middot; today's date will be recorded automatically.</p>
+        <button type="submit" class="btn btn-gold">Place Order</button>
+    </form>
+    {% else %}
+    <p class="sub" style="margin:0;">Only procurement personnel can place this order.</p>
+    {% endif %}
+</div>
+{% endif %}
 
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Items</h3>

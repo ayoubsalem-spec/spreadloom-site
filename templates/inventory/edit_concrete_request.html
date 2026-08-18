@@ -49,12 +49,6 @@
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Requested By</h3>
         <p class="sub" style="margin-bottom:14px;">{{ r['requested_by'] or '\u2014' }} (original requester &mdash; unchanged on edit)</p>
 
-        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ordered By</h3>
-        <div class="form-row">
-            <div style="flex:1;"><label>Name</label><input type="text" name="ordered_by" value="{{ r['ordered_by'] or '' }}"></div>
-            <div style="flex:1;"><label>Signature</label><input type="text" name="ordered_signature" value="{{ r['ordered_signature'] or '' }}"></div>
-            <div style="flex:1;"><label>Date</label><input type="date" name="ordered_date" value="{{ r['ordered_date'] or '' }}"></div>
-        </div>
         <button type="submit" class="btn btn-gold" style="margin-top:16px;">Save Changes</button>
     </form>
 </div>

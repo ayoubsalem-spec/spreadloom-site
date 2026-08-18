@@ -19,6 +19,12 @@
             <div class="form-row">
                 <div style="flex:1;"><label>Year</label><input type="text" name="year" value="{{ a['year'] or '' }}"></div>
                 <div style="flex:1;"><label>Serial Number</label><input type="text" name="serial_number" value="{{ a['serial_number'] or '' }}"></div>
+                <div style="flex:1;"><label>Tracks</label>
+                    <select name="equipment_type">
+                        <option value="mileage" {{ 'selected' if a['equipment_type']=='mileage' }}>Mileage</option>
+                        <option value="engine_hours" {{ 'selected' if a['equipment_type']=='engine_hours' }}>Engine Hours</option>
+                    </select>
+                </div>
             </div>
             <div class="form-row">
                 <div style="flex:1;"><label>Value</label><input type="text" name="value" value="{{ a['value'] or '' }}"></div>
@@ -33,26 +39,88 @@
 
 <div class="card">
     <h2>Status &amp; Location</h2>
-    <form method="POST" action="{{ url_for('sitepulse_update_asset', asset_id=a['id']) }}">
+    <p class="sub">This is the control center -- change status, site, location, mileage, or engine hours here and the history below is generated automatically. Nothing needs to be entered twice.</p>
+
+    <form method="POST" action="{{ url_for('sitepulse_quick_status', asset_id=a['id']) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div style="flex:1;">
                 <label>Status</label>
-                <select name="status">
+                <select name="status" onchange="this.form.submit()">
                     {% for s in status_options %}<option value="{{ s }}" {{ 'selected' if a['status']==s }}>{{ s }}</option>{% endfor %}
                 </select>
             </div>
             <div style="flex:1;">
-                <label>Current Location</label>
-                <input type="text" name="location" value="{{ a['location'] or '' }}">
+                <label>Equipment Tracks</label>
+                <select disabled><option>{{ 'Mileage' if a['equipment_type']=='mileage' else 'Engine Hours' }}</option></select>
             </div>
             <div style="flex:1;">
-                <label>Hours / Mileage</label>
-                <input type="text" name="hours_mileage" value="{{ a['hours_mileage'] or '' }}">
+                <label>{{ 'Current Mileage' if a['equipment_type']=='mileage' else 'Current Engine Hours' }}</label>
+                <input type="text" disabled value="{{ (a['current_mileage'] or 'Not set') if a['equipment_type']=='mileage' else (a['current_engine_hours'] or 'Not set') }}">
             </div>
         </div>
-        <button type="submit" class="btn btn-gold">Save</button>
     </form>
+
+    <div class="form-row" style="margin-top:6px;">
+        <div style="flex:1;"><label>Current Site</label><input type="text" disabled value="{{ a['site'] or 'Not set' }}"></div>
+        <div style="flex:1;"><label>Current Location</label><input type="text" disabled value="{{ a['location'] or 'Not set' }}"></div>
+    </div>
+
+    {% if upcoming_movements %}
+    <div style="margin-top:14px; padding:10px 12px; background:rgba(212,175,55,0.08); border:1px solid var(--border); border-radius:8px;">
+        <strong style="color:var(--gold-light); font-size:13px;">Upcoming Movement</strong>
+        {% for m in upcoming_movements %}
+        <div style="margin-top:6px; font-size:13px;">
+            {{ m['from_site'] or m['from_location'] or 'Current' }} &rarr; {{ m['to_site'] }}{% if m['to_location'] and m['to_location'] != m['to_site'] %} ({{ m['to_location'] }}){% endif %}<br>
+            <span class="sub">{{ m['scheduled_date'] }}{% if m['scheduled_time'] %} at {{ m['scheduled_time'] }}{% endif %}</span>
+            <form method="POST" action="{{ url_for('sitepulse_complete_movement', movement_id=m['id']) }}" style="display:inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-gold" style="padding:2px 10px; font-size:12px; margin-left:8px;">Mark Completed</button>
+            </form>
+            <form method="POST" action="{{ url_for('sitepulse_cancel_movement', movement_id=m['id']) }}" style="display:inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn" style="padding:2px 10px; font-size:12px;">Cancel</button>
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <details style="margin-top:14px;">
+        <summary style="cursor:pointer; color:var(--gold-light); font-size:13px; font-weight:600;">Change Location / Update Reading</summary>
+        <form method="POST" action="{{ url_for('sitepulse_location_update', asset_id=a['id']) }}" style="margin-top:10px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-row">
+                <div style="flex:1;"><label>Site</label><input type="text" name="site" value="{{ a['site'] or '' }}"></div>
+                <div style="flex:1;"><label>Location</label><input type="text" name="location" value="{{ a['location'] or '' }}"></div>
+            </div>
+            {% if a['equipment_type'] == 'mileage' %}
+            <label>New Mileage</label>
+            <input type="text" name="current_mileage" value="{{ a['current_mileage'] or '' }}">
+            {% else %}
+            <label>New Engine Hours</label>
+            <input type="text" name="current_engine_hours" value="{{ a['current_engine_hours'] or '' }}">
+            {% endif %}
+            <button type="submit" class="btn btn-gold">Apply Change</button>
+        </form>
+    </details>
+
+    <details style="margin-top:10px;">
+        <summary style="cursor:pointer; color:var(--gold-light); font-size:13px; font-weight:600;">Schedule Equipment Movement</summary>
+        <form method="POST" action="{{ url_for('sitepulse_schedule_movement', asset_id=a['id']) }}" style="margin-top:10px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-row">
+                <div style="flex:1;"><label>Future Site</label><input type="text" name="to_site" required></div>
+                <div style="flex:1;"><label>Future Location</label><input type="text" name="to_location"></div>
+            </div>
+            <div class="form-row">
+                <div style="flex:1;"><label>Scheduled Date</label><input type="date" name="scheduled_date" required></div>
+                <div style="flex:1;"><label>Scheduled Time</label><input type="time" name="scheduled_time"></div>
+            </div>
+            <button type="submit" class="btn btn-gold">Schedule Movement</button>
+        </form>
+    </details>
+
     <div id="asset-map" style="height:220px; border-radius:8px; margin-top:14px; border:1px solid var(--border);"></div>
     {% if a['value'] or a['daily_rate'] %}
     <p class="sub" style="margin-top:14px; margin-bottom:0;">
@@ -61,6 +129,32 @@
         {% if a['weekly_rate'] %} &middot; Weekly: ${{ a['weekly_rate'] }}{% endif %}
         {% if a['monthly_rate'] %} &middot; Monthly: ${{ a['monthly_rate'] }}{% endif %}
     </p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Location &amp; Movement History</h2>
+    <p class="sub">Generated automatically -- nothing here is entered by hand.</p>
+    {% if location_history %}
+    <table>
+        <tr><th>Date</th><th>Event</th><th>Site</th><th>Location</th><th>Mileage / Hours</th><th>User</th></tr>
+        {% for h in location_history %}
+        <tr>
+            <td>{{ h['created_at'][:16].replace('T', ' ') }}</td>
+            <td>{{ h['event_type'].replace('_', ' ').title() }}</td>
+            <td>{% if h['previous_site'] or h['new_site'] %}{{ h['previous_site'] or '--' }} &rarr; {{ h['new_site'] or '--' }}{% endif %}</td>
+            <td>{% if h['previous_location'] or h['new_location'] %}{{ h['previous_location'] or '--' }} &rarr; {{ h['new_location'] or '--' }}{% endif %}</td>
+            <td>
+                {% if h['miles_added'] %}{{ h['previous_mileage'] }} &rarr; {{ h['new_mileage'] }} ({{ h['miles_added'] }} mi){% endif %}
+                {% if h['hours_added'] %}{{ h['previous_engine_hours'] }} &rarr; {{ h['new_engine_hours'] }} ({{ h['hours_added'] }} hrs){% endif %}
+                {% if h['scheduled_date'] %}<span class="sub">Scheduled: {{ h['scheduled_date'] }} {{ h['scheduled_time'] or '' }}</span>{% endif %}
+            </td>
+            <td>{{ h['user_email'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="sub">No location history yet.</p>
     {% endif %}
 </div>
 
