@@ -1,7 +1,0 @@
-flask
-flask-login
-flask-wtf
-werkzeug
-requests
-openpyxl
-markdown
