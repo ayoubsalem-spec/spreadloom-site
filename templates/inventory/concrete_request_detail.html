@@ -30,57 +30,18 @@
     </table>
 </div>
 
-{% if r['status'] == 'Scheduled' %}
-<div class="card">
-    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Details</h3>
-    <p class="sub" style="margin-bottom:14px;">Scheduled by {{ r['ordered_by'] or '\u2014' }} on {{ r['ordered_date'] or '\u2014' }}</p>
-    {% if contacts|length == 0 %}
-    <p class="sub" style="margin:0;">No supplier/contact details on file for this pour.</p>
-    {% else %}
-    <table>
-        <tr><th>Role / Company</th><th>Contact</th><th>Phone</th><th>Arrival</th></tr>
-        {% for c in contacts %}
-        <tr>
-            <td>{{ c['role_label'] or c['company_name'] or '\u2014' }}</td>
-            <td>{{ c['contact_name'] or '\u2014' }}</td>
-            <td>{{ c['contact_phone'] or '\u2014' }}</td>
-            <td>{{ c['arrival_time'] or '\u2014' }}</td>
-        </tr>
-        {% endfor %}
-    </table>
-    {% endif %}
-    <a href="{{ url_for('inventory_schedule_concrete', request_id=r['id']) }}" class="btn btn-sm" style="margin-top:14px;">Edit Order Details</a>
-</div>
-
-{% if notification_text %}
-<div class="card">
-    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Notification Preview</h3>
-    <p class="sub" style="margin-bottom:10px;">Ready to copy and send to the team.</p>
-    <pre style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:16px; white-space:pre-wrap; font-family:inherit; color:var(--text-light); margin:0;">{{ notification_text }}</pre>
-</div>
-{% endif %}
-{% endif %}
-
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Update Status</h3>
     <div style="display:flex; gap:10px; flex-wrap:wrap;">
-        {% if r['status'] != 'Submitted' %}
+        {% for s in ['Submitted', 'Scheduled', 'Completed'] %}
+        {% if r['status'] != s %}
         <form method="POST" action="{{ url_for('inventory_update_concrete_status', request_id=r['id']) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="status" value="Submitted">
-            <button type="submit" class="btn btn-sm">Mark Submitted</button>
+            <input type="hidden" name="status" value="{{ s }}">
+            <button type="submit" class="btn btn-sm">Mark {{ s }}</button>
         </form>
         {% endif %}
-        {% if r['status'] != 'Scheduled' %}
-        <a href="{{ url_for('inventory_schedule_concrete', request_id=r['id']) }}" class="btn btn-sm">Mark Scheduled&hellip;</a>
-        {% endif %}
-        {% if r['status'] != 'Completed' %}
-        <form method="POST" action="{{ url_for('inventory_update_concrete_status', request_id=r['id']) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="status" value="Completed">
-            <button type="submit" class="btn btn-sm">Mark Completed</button>
-        </form>
-        {% endif %}
+        {% endfor %}
         <form method="POST" action="{{ url_for('inventory_delete_concrete', request_id=r['id']) }}" onsubmit="return confirm('Delete this concrete request? This can\'t be undone.');">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-sm" style="color:var(--red); border-color:var(--red);">Delete</button>

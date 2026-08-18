@@ -4,10 +4,10 @@
     <div><h1>Purchase Requests</h1><p class="sub">Purchase Request Form</p></div>
     <a href="{{ url_for('inventory_new_purchase') }}" class="btn btn-gold">+ New Request</a>
 </div>
-<div style="display:flex; gap:10px; margin-bottom:16px;">
-    <a href="{{ url_for('inventory_materials_list') }}" class="btn btn-sm">Materials</a>
-    <a href="{{ url_for('inventory_concrete_list') }}" class="btn btn-sm">Concrete Requests</a>
-    <a href="{{ url_for('inventory_purchase_list') }}" class="btn btn-sm">Purchase Requests</a>
+<div class="stack-nav">
+    <a href="{{ url_for('inventory_materials_list') }}" class="btn-stack">Materials</a>
+    <a href="{{ url_for('inventory_concrete_list') }}" class="btn-stack">Concrete Requests</a>
+    <a href="{{ url_for('inventory_purchase_list') }}" class="btn-stack">Purchase Requests</a>
 </div>
 {% if requests|length == 0 %}
 <div class="card"><p class="sub" style="margin:0;">No purchase requests logged yet.</p></div>

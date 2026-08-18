@@ -162,7 +162,6 @@ def init_db():
             name TEXT NOT NULL, description TEXT, year TEXT, serial_number TEXT,
             value TEXT, daily_rate TEXT, weekly_rate TEXT, monthly_rate TEXT,
             status TEXT DEFAULT 'Available', location TEXT, hours_mileage TEXT,
-            scheduled_location TEXT, scheduled_date TEXT, scheduled_time TEXT,
             created_at TEXT, updated_at TEXT
         );
         CREATE TABLE IF NOT EXISTS sitepulse_usage_log (
@@ -207,11 +206,6 @@ def init_db():
             ordered_by TEXT, ordered_signature TEXT, ordered_date TEXT,
             status TEXT DEFAULT 'Submitted',
             created_at TEXT, updated_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS inventory_concrete_order_contacts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER NOT NULL,
-            role_label TEXT, company_name TEXT, contact_name TEXT, contact_phone TEXT, arrival_time TEXT,
-            FOREIGN KEY (request_id) REFERENCES inventory_concrete_requests (id)
         );
 
         -- Purchase Request Form (DIL-24-CON-F-PR-1) -- same paper-replica
@@ -282,12 +276,6 @@ def init_db():
         db.execute("ALTER TABLE inventory_purchase_requests ADD COLUMN status TEXT DEFAULT 'Submitted'")
     except sqlite3.OperationalError:
         pass
-
-    for col in ["scheduled_location TEXT", "scheduled_date TEXT", "scheduled_time TEXT"]:
-        try:
-            db.execute(f"ALTER TABLE sitepulse_assets ADD COLUMN {col}")
-        except sqlite3.OperationalError:
-            pass
 
     db.commit()
     db.close()
@@ -566,87 +554,14 @@ def sitepulse_edit_asset_details(asset_id):
 @login_required
 def sitepulse_update_asset(asset_id):
     db = get_db()
-    old = db.execute("SELECT status, location, hours_mileage FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
-    new_location = request.form.get("location", "")
-    new_mileage = request.form.get("hours_mileage", "")
-    now = datetime.utcnow().isoformat()
+    old = db.execute("SELECT status, location FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
     db.execute("UPDATE sitepulse_assets SET status=?, location=?, hours_mileage=?, updated_at=? WHERE id=?",
-               (request.form["status"], new_location, new_mileage, now, asset_id))
+               (request.form["status"], request.form.get("location", ""), request.form.get("hours_mileage", ""),
+                datetime.utcnow().isoformat(), asset_id))
     if old["status"] != request.form["status"]:
-        log_activity("sitepulse", "asset", asset_id, "updated", asset_id=asset_id,
-                     field="status", old_value=old["status"], new_value=request.form["status"])
-
-    # Location changes are the primary way equipment movement gets tracked
-    # now -- auto-create the history entry here instead of making someone
-    # fill out a separate Usage Log form for the same information.
-    old_location = old["location"] or ""
-    if new_location.strip() and new_location.strip() != old_location.strip():
-        db.execute(
-            """INSERT INTO sitepulse_usage_log (asset_id, usage_type, job_name, notes, out_date, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (asset_id, "Location Change", new_location,
-             f"Moved from {old_location or '(not set)'} to {new_location}",
-             date.today().isoformat(), now)
-        )
-        log_activity("sitepulse", "asset", asset_id, "updated", asset_id=asset_id,
-                     field="location", old_value=old_location, new_value=new_location)
-
-    # Mileage/hours travel alongside the movement history automatically too --
-    # no separate manual mileage entry needed when it's just being updated
-    # as part of a normal Status & Location save.
-    old_mileage = old["hours_mileage"] or ""
-    if new_mileage.strip() and new_mileage.strip() != old_mileage.strip():
-        db.execute(
-            """INSERT INTO sitepulse_mileage_log (asset_id, reading_date, mileage, notes, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
-            (asset_id, date.today().isoformat(), new_mileage, "Auto-logged from Status & Location update", now)
-        )
-
+        log_activity("sitepulse", "asset", asset_id, "updated", field="status", old_value=old["status"], new_value=request.form["status"])
     db.commit()
     flash("Asset updated.")
-    return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
-
-
-@app.route("/sitepulse/asset/<int:asset_id>/schedule-move", methods=["POST"])
-@login_required
-def sitepulse_schedule_move(asset_id):
-    db = get_db()
-    a = db.execute("SELECT * FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
-    if not a:
-        flash("Asset not found.", "error")
-        return redirect(url_for("sitepulse_dashboard"))
-    scheduled_location = request.form.get("scheduled_location", "")
-    scheduled_date = request.form.get("scheduled_date", "")
-    scheduled_time = request.form.get("scheduled_time", "")
-    now = datetime.utcnow().isoformat()
-    db.execute(
-        "UPDATE sitepulse_assets SET scheduled_location=?, scheduled_date=?, scheduled_time=?, updated_at=? WHERE id=?",
-        (scheduled_location, scheduled_date, scheduled_time, now, asset_id)
-    )
-    when_str = f"{scheduled_date} {scheduled_time}".strip()
-    db.execute(
-        """INSERT INTO sitepulse_usage_log (asset_id, usage_type, job_name, notes, out_date, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (asset_id, "Scheduled Move", scheduled_location,
-         f"Scheduled to move to {scheduled_location} on {when_str}", date.today().isoformat(), now)
-    )
-    log_activity("sitepulse", "asset", asset_id, "updated", asset_id=asset_id,
-                 field="scheduled_location", new_value=f"{scheduled_location} on {when_str}")
-    db.commit()
-    flash("Move scheduled.")
-    return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
-
-
-@app.route("/sitepulse/asset/<int:asset_id>/schedule-move/clear", methods=["POST"])
-@login_required
-def sitepulse_clear_scheduled_move(asset_id):
-    db = get_db()
-    db.execute(
-        "UPDATE sitepulse_assets SET scheduled_location=NULL, scheduled_date=NULL, scheduled_time=NULL, updated_at=? WHERE id=?",
-        (datetime.utcnow().isoformat(), asset_id)
-    )
-    db.commit()
-    flash("Scheduled move cleared.")
     return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
 
 
@@ -960,7 +875,7 @@ def sitepulse_delete_rental(rental_id):
 @app.route("/inventory/")
 @login_required
 def inventory_home():
-    return render_template("inventory/hub.html")
+    return redirect(url_for("inventory_materials_list"))
 
 
 @app.route("/inventory/materials")
@@ -1064,43 +979,7 @@ def inventory_view_concrete(request_id):
     if not r:
         flash("Request not found.", "error")
         return redirect(url_for("inventory_concrete_list"))
-    contacts = db.execute(
-        "SELECT * FROM inventory_concrete_order_contacts WHERE request_id = ?", (request_id,)
-    ).fetchall()
-
-    notification_text = None
-    if r["status"] == "Scheduled" and contacts:
-        try:
-            pour_dt = datetime.strptime(r["pour_date"], "%Y-%m-%d")
-            date_str = pour_dt.strftime("%m/%d/%Y")
-        except (ValueError, TypeError):
-            date_str = r["pour_date"] or ""
-        lines = [
-            f"Concrete scheduled {r['pour_date']} ({r['area_description'] or r['project']}) {date_str}"
-            + (f" at {r['pour_time']}" if r["pour_time"] else ""),
-            "",
-        ]
-        specs = []
-        if r["concrete_amount"]:
-            specs.append(r["concrete_amount"])
-        if r["mix_design_psi"]:
-            specs.append(r["mix_design_psi"])
-        if specs:
-            lines.append(" plus ".join(specs))
-            lines.append("")
-        for c in contacts:
-            parts = [c["role_label"] or c["company_name"] or ""]
-            if c["contact_name"]:
-                parts.append(f"-{c['contact_name']}")
-            piece = "".join(parts)
-            if c["contact_phone"]:
-                piece += f" #{c['contact_phone']}"
-            if c["arrival_time"]:
-                piece += f" @{c['arrival_time']}"
-            lines.append(piece)
-        notification_text = "\n".join(lines)
-
-    return render_template("inventory/concrete_request_detail.html", r=r, contacts=contacts, notification_text=notification_text)
+    return render_template("inventory/concrete_request_detail.html", r=r)
 
 
 @app.route("/inventory/concrete/<int:request_id>/edit", methods=["GET", "POST"])
@@ -1116,7 +995,7 @@ def inventory_edit_concrete(request_id):
             """UPDATE inventory_concrete_requests SET project=?, job_site_address=?, area_description=?,
                pour_date=?, pour_time=?, mix_design_psi=?, mix_slump=?, concrete_amount=?, truck_spacing=?,
                pump_size=?, pump_arrival_time=?, lab_required=?, lab_time=?, drilling_required=?,
-               drilling_time=?, updated_at=?
+               drilling_time=?, ordered_by=?, ordered_signature=?, ordered_date=?, updated_at=?
                WHERE id=?""",
             (request.form.get("project", ""), request.form.get("job_site_address", ""),
              request.form.get("area_description", ""), request.form["pour_date"], request.form.get("pour_time", ""),
@@ -1125,7 +1004,8 @@ def inventory_edit_concrete(request_id):
              request.form.get("pump_size", ""), request.form.get("pump_arrival_time", ""),
              request.form.get("lab_required", "No"), request.form.get("lab_time", ""),
              request.form.get("drilling_required", "No"), request.form.get("drilling_time", ""),
-             datetime.utcnow().isoformat(), request_id)
+             request.form.get("ordered_by", ""), request.form.get("ordered_signature", ""),
+             request.form.get("ordered_date", ""), datetime.utcnow().isoformat(), request_id)
         )
         log_activity("inventory", "concrete_request", request_id, "updated", new_value=request.form.get("project", ""))
         db.commit()
@@ -1150,44 +1030,6 @@ def inventory_update_concrete_status(request_id):
     db.commit()
     flash(f"Marked as {new_status}.")
     return redirect(url_for("inventory_view_concrete", request_id=request_id))
-
-
-@app.route("/inventory/concrete/<int:request_id>/schedule", methods=["GET", "POST"])
-@login_required
-def inventory_schedule_concrete(request_id):
-    db = get_db()
-    r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
-    if not r:
-        flash("Request not found.", "error")
-        return redirect(url_for("inventory_concrete_list"))
-    if request.method == "POST":
-        now = datetime.utcnow().isoformat()
-        db.execute(
-            """UPDATE inventory_concrete_requests SET status='Scheduled', ordered_by=?, ordered_date=?, updated_at=? WHERE id=?""",
-            (current_user.name or current_user.email, date.today().isoformat(), now, request_id)
-        )
-        db.execute("DELETE FROM inventory_concrete_order_contacts WHERE request_id = ?", (request_id,))
-        roles = request.form.getlist("role_label[]")
-        contacts = request.form.getlist("contact_name[]")
-        phones = request.form.getlist("contact_phone[]")
-        times = request.form.getlist("arrival_time[]")
-        for role, contact, phone, atime in zip(roles, contacts, phones, times):
-            if role.strip():
-                db.execute(
-                    """INSERT INTO inventory_concrete_order_contacts
-                       (request_id, role_label, contact_name, contact_phone, arrival_time)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (request_id, role, contact, phone, atime)
-                )
-        log_activity("inventory", "concrete_request", request_id, "updated", field="status",
-                     old_value=r["status"], new_value="Scheduled")
-        db.commit()
-        flash("Concrete pour scheduled and order details saved.")
-        return redirect(url_for("inventory_view_concrete", request_id=request_id))
-    existing_contacts = db.execute(
-        "SELECT * FROM inventory_concrete_order_contacts WHERE request_id = ?", (request_id,)
-    ).fetchall()
-    return render_template("inventory/schedule_concrete.html", r=r, contacts=existing_contacts)
 
 
 @app.route("/inventory/concrete/<int:request_id>/delete", methods=["POST"])

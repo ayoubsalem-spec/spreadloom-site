@@ -1,13 +1,13 @@
 {% extends "inventory/base.html" %}
 {% block content %}
 <div class="section-row">
-    <div><h1>SitePulse</h1><p class="sub">Materials stored at each site &mdash; findable and reusable across projects.</p></div>
+    <div><h1>SitePulse</h1><p class="sub">Stay on top of materials from order to delivery. Track inventory, place material and concrete orders, monitor deliveries, and generate reports&mdash;all in one place.</p></div>
     <a href="{{ url_for('inventory_new_material') }}" class="btn btn-gold">+ Add Material</a>
 </div>
-<div style="display:flex; gap:10px; margin-bottom:16px;">
-    <a href="{{ url_for('inventory_materials_list') }}" class="btn btn-sm">Materials</a>
-    <a href="{{ url_for('inventory_concrete_list') }}" class="btn btn-sm">Concrete Requests</a>
-    <a href="{{ url_for('inventory_purchase_list') }}" class="btn btn-sm">Purchase Requests</a>
+<div class="stack-nav">
+    <a href="{{ url_for('inventory_materials_list') }}" class="btn-stack">Materials</a>
+    <a href="{{ url_for('inventory_concrete_list') }}" class="btn-stack">Concrete Requests</a>
+    <a href="{{ url_for('inventory_purchase_list') }}" class="btn-stack">Purchase Requests</a>
 </div>
 <form method="GET" style="margin-bottom:16px;">
     <input type="text" name="q" value="{{ search }}" placeholder="Search by item, site, or shelf location...">

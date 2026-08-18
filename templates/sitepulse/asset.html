@@ -53,30 +53,6 @@
         </div>
         <button type="submit" class="btn btn-gold">Save</button>
     </form>
-
-    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
-        <h3 style="font-size:14px; color:var(--gold-light); margin-bottom:10px;">Schedule Future Move</h3>
-        {% if a['scheduled_location'] %}
-        <div class="sub" style="margin-bottom:10px;">
-            Scheduled to move to <strong style="color:var(--text-light);">{{ a['scheduled_location'] }}</strong>
-            on {{ a['scheduled_date'] or '?' }}{% if a['scheduled_time'] %} at {{ a['scheduled_time'] }}{% endif %}
-        </div>
-        <form method="POST" action="{{ url_for('sitepulse_clear_scheduled_move', asset_id=a['id']) }}" style="display:inline;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Cancel Scheduled Move</button>
-        </form>
-        {% else %}
-        <form method="POST" action="{{ url_for('sitepulse_schedule_move', asset_id=a['id']) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <div class="form-row">
-                <div style="flex:1;"><label>Scheduled Location</label><input type="text" name="scheduled_location"></div>
-                <div style="flex:1;"><label>Scheduled Date</label><input type="date" name="scheduled_date"></div>
-                <div style="flex:1;"><label>Scheduled Time</label><input type="time" name="scheduled_time"></div>
-            </div>
-            <button type="submit" class="btn btn-sm">Schedule Move</button>
-        </form>
-        {% endif %}
-    </div>
     <div id="asset-map" style="height:220px; border-radius:8px; margin-top:14px; border:1px solid var(--border);"></div>
     {% if a['value'] or a['daily_rate'] %}
     <p class="sub" style="margin-top:14px; margin-bottom:0;">

@@ -102,6 +102,13 @@
         .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
         .desktop-only { display: block; }
         .mobile-only { display: none; }
+        .stack-nav { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; max-width: 320px; }
+        .stack-nav a.btn-stack {
+            background: linear-gradient(135deg, var(--gold), var(--gold-dim)); color: var(--navy);
+            border: none; font-weight: 700; text-align: center; padding: 13px 18px; border-radius: 7px;
+            font-size: 14px; margin-top: 0;
+        }
+        .stack-nav a.btn-stack:hover { color: var(--navy); opacity: 0.9; }
         @media (max-width: 700px) {
             .container { padding: 20px 14px; }
             nav { padding: 14px 16px; flex-wrap: wrap; gap: 10px; }
@@ -162,5 +169,49 @@
         {% endwith %}
         {% block content %}{% endblock %}
     </div>
+    <script>
+        // Remembered-field autofill: any <input data-remember="key"> gets its
+        // past values saved to localStorage and offered back via a datalist.
+        (function () {
+            function storageKey(key) { return 'sitepulse_remember_' + key; }
+            function getSaved(key) {
+                try { return JSON.parse(localStorage.getItem(storageKey(key)) || '[]'); }
+                catch (e) { return []; }
+            }
+            function saveValue(key, value) {
+                value = (value || '').trim();
+                if (!value) return;
+                var saved = getSaved(key).filter(function (v) { return v !== value; });
+                saved.unshift(value);
+                saved = saved.slice(0, 8);
+                localStorage.setItem(storageKey(key), JSON.stringify(saved));
+            }
+            document.querySelectorAll('input[data-remember]').forEach(function (input) {
+                var key = input.getAttribute('data-remember');
+                var listId = 'remember-' + key;
+                var saved = getSaved(key);
+                if (saved.length) {
+                    var datalist = document.getElementById(listId);
+                    if (!datalist) {
+                        datalist = document.createElement('datalist');
+                        datalist.id = listId;
+                        input.after(datalist);
+                    }
+                    datalist.innerHTML = '';
+                    saved.forEach(function (v) {
+                        var opt = document.createElement('option');
+                        opt.value = v;
+                        datalist.appendChild(opt);
+                    });
+                    input.setAttribute('list', listId);
+                }
+                input.addEventListener('change', function () { saveValue(key, input.value); });
+                var form = input.closest('form');
+                if (form) {
+                    form.addEventListener('submit', function () { saveValue(key, input.value); });
+                }
+            });
+        })();
+    </script>
 </body>
 </html>
