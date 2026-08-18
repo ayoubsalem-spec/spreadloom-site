@@ -8,22 +8,22 @@
 
         <h3 style="font-size:15px; color:var(--gold); margin-bottom:6px;">Concrete Company</h3>
         <div class="form-row">
-            <div style="flex:1;"><label>Company Name</label><input type="text" name="concrete_company" value="{{ r['concrete_company'] or '' }}" data-remember="concrete_company" autofocus placeholder="e.g. Texan Concrete"></div>
-            <div style="flex:1;"><label>Phone</label><input type="text" name="concrete_company_phone" value="{{ r['concrete_company_phone'] or '' }}" data-remember="concrete_company_phone" placeholder="e.g. 713-255-3333"></div>
+            <div style="flex:1;"><label>Company Name</label><input type="text" name="concrete_company" value="{{ r['concrete_company'] or '' }}" data-remember="concrete_company" autofocus></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="concrete_company_phone" value="{{ r['concrete_company_phone'] or '' }}" data-remember="concrete_company_phone"></div>
         </div>
         <p class="sub" style="margin-top:6px;">Arrival time uses the pour time above ({{ r['pour_time'] or 'not set' }}) &mdash; edit the request if that needs to change.</p>
 
-        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ground Pump {% if r['pump_size'] %}<span class="sub" style="text-transform:none; font-weight:400;">({{ r['pump_size'] }})</span>{% endif %}</h3>
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ground Pump {% if r['pump_size'] and r['pump_size'].strip().lower() not in ['none', 'no', 'n/a', 'na', '-'] %}<span class="sub" style="text-transform:none; font-weight:400;">({{ r['pump_size'] }})</span>{% endif %}</h3>
         <div class="form-row">
-            <div style="flex:1;"><label>Company / Contact Name</label><input type="text" name="pump_company" value="{{ r['pump_company'] or '' }}" data-remember="pump_company" placeholder="e.g. Diego Romo"></div>
-            <div style="flex:1;"><label>Phone</label><input type="text" name="pump_company_phone" value="{{ r['pump_company_phone'] or '' }}" data-remember="pump_company_phone" placeholder="e.g. 832-236-9108"></div>
+            <div style="flex:1;"><label>Company / Contact Name</label><input type="text" name="pump_company" value="{{ r['pump_company'] or '' }}" data-remember="pump_company"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="pump_company_phone" value="{{ r['pump_company_phone'] or '' }}" data-remember="pump_company_phone"></div>
             <div style="flex:1;"><label>Arrival Time</label><input type="time" name="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
         </div>
 
         {% if r['lab_required'] == 'Yes' %}
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Lab</h3>
         <div class="form-row">
-            <div style="flex:1;"><label>Lab Company</label><input type="text" name="lab_company" value="{{ r['lab_company'] or '' }}" data-remember="lab_company" placeholder="e.g. Alliance Lab"></div>
+            <div style="flex:1;"><label>Lab Company</label><input type="text" name="lab_company" value="{{ r['lab_company'] or '' }}" data-remember="lab_company"></div>
             <div style="flex:1;"><label>Arrival Time</label><input type="time" name="lab_time" value="{{ r['lab_time'] or '' }}"></div>
         </div>
         {% endif %}
