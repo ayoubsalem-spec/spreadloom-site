@@ -37,10 +37,8 @@
         </div>
 
         <h3 style="font-size:15px; color:var(--gold); margin:22px 0 10px;">Requestor</h3>
-        <div class="form-row">
-            <div style="flex:1;"><label>Signature</label><input type="text" name="requestor_signature"></div>
-            <div style="flex:1;"><label>Date</label><input type="date" name="requestor_date" value="{{ today }}"></div>
-        </div>
+        <p class="sub" style="margin-bottom:14px;">Logged in as: <strong style="color:var(--text);">{{ current_user.name or current_user.email }}</strong></p>
+        <label>Date</label><input type="date" name="requestor_date" value="{{ today }}">
 
         <button type="submit" class="btn btn-gold" style="margin-top:16px;">Submit Request</button>
     </form>

@@ -144,7 +144,6 @@
                 <a href="{{ url_for('inventory_materials_list') }}">Materials</a>
                 <a href="{{ url_for('inventory_concrete_list') }}">Concrete Requests</a>
                 <a href="{{ url_for('inventory_purchase_list') }}">Purchase Requests</a>
-                <a href="{{ url_for('inventory_notifications') }}">Notifications</a>
                 {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('inventory_activity_log') }}">Activity</a>{% endif %}
                 
                 {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('admin_backup') }}">Backup</a>{% endif %}
