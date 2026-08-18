@@ -34,6 +34,20 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 csrf = CSRFProtect(app)
 
+
+@app.template_filter("friendly_dt")
+def friendly_dt(iso_str):
+    """'2026-08-18T18:34:33.082104' -> 'August 18, 2026 at 2:34 PM' (UTC as
+    stored -- good enough for movement history, no per-user timezone here)."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%B %-d, %Y at %-I:%M %p")
+    except ValueError:
+        return iso_str
+
+
 DB_DIR = os.environ.get("DATA_DIR", ".")
 DB_PATH = os.path.join(DB_DIR, "buildiq.db")
 UPLOAD_DIR = os.path.join(DB_DIR, "uploads")
@@ -141,6 +155,27 @@ def log_activity(section, entity_type, entity_id, action, asset_id=None, field=N
     )
 
 
+def _apply_move(db, move, moved_by, is_auto=False):
+    """Shared logic for completing a movement -- whether it's an immediate
+    move being recorded right now, or a previously Scheduled one becoming
+    active. Snapshots the asset's CURRENT status/hours onto the history
+    row (never the value from whenever it was scheduled), moves the asset,
+    and stamps who/when it actually happened.
+    """
+    asset = db.execute("SELECT status, hours_mileage FROM sitepulse_assets WHERE id = ?", (move["asset_id"],)).fetchone()
+    now = datetime.utcnow().isoformat()
+    mover_label = f"{moved_by} (auto, scheduled by {move['created_by']})" if is_auto and move["created_by"] else moved_by
+    db.execute("UPDATE sitepulse_assets SET location=?, updated_at=? WHERE id=?",
+               (move["to_location"], now, move["asset_id"]))
+    db.execute(
+        """UPDATE sitepulse_usage_log SET move_status='Applied', status_at_move=?, mileage_hours=?,
+           moved_by=?, applied_at=?, out_date=? WHERE id=?""",
+        (asset["status"], asset["hours_mileage"], mover_label, now, date.today().isoformat(), move["id"])
+    )
+    log_activity("sitepulse", "move", move["id"], "applied", asset_id=move["asset_id"],
+                 field="location", old_value=move["from_location"], new_value=move["to_location"])
+
+
 def apply_due_scheduled_moves(asset_id=None):
     """Scheduled location moves apply themselves once their date arrives --
     there's no cron here, so we check for anything due whenever an asset
@@ -150,6 +185,7 @@ def apply_due_scheduled_moves(asset_id=None):
     """
     db = get_db()
     today = date.today().isoformat()
+    mover = current_user.name or current_user.email if current_user.is_authenticated else "System"
     if asset_id is not None:
         due = db.execute(
             "SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND entry_kind='move' AND move_status='Scheduled' AND scheduled_date <= ?",
@@ -161,11 +197,7 @@ def apply_due_scheduled_moves(asset_id=None):
             (today,)
         ).fetchall()
     for move in due:
-        db.execute("UPDATE sitepulse_assets SET location=?, updated_at=? WHERE id=?",
-                   (move["to_location"], datetime.utcnow().isoformat(), move["asset_id"]))
-        db.execute("UPDATE sitepulse_usage_log SET move_status='Applied' WHERE id=?", (move["id"],))
-        log_activity("sitepulse", "move", move["id"], "applied", asset_id=move["asset_id"],
-                     field="location", old_value=move["from_location"], new_value=move["to_location"])
+        _apply_move(db, move, mover, is_auto=True)
     if due:
         db.commit()
 
@@ -211,6 +243,8 @@ def init_db():
             photo_filename TEXT, created_at TEXT,
             entry_kind TEXT DEFAULT 'usage', from_location TEXT, to_location TEXT,
             mileage_hours TEXT, move_status TEXT DEFAULT 'Applied', scheduled_date TEXT,
+            scheduled_time TEXT, move_reason TEXT, status_at_move TEXT, moved_by TEXT,
+            applied_at TEXT, created_by TEXT,
             FOREIGN KEY (asset_id) REFERENCES sitepulse_assets (id)
         );
         CREATE TABLE IF NOT EXISTS sitepulse_maintenance_log (
@@ -348,6 +382,12 @@ def init_db():
         "ALTER TABLE sitepulse_usage_log ADD COLUMN mileage_hours TEXT",
         "ALTER TABLE sitepulse_usage_log ADD COLUMN move_status TEXT DEFAULT 'Applied'",
         "ALTER TABLE sitepulse_usage_log ADD COLUMN scheduled_date TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN scheduled_time TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN move_reason TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN status_at_move TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN moved_by TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN applied_at TEXT",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN created_by TEXT",
     ]:
         try:
             db.execute(column_sql)
@@ -585,7 +625,7 @@ def sitepulse_view_asset(asset_id):
     if not a:
         flash("Asset not found.", "error")
         return redirect(url_for("sitepulse_dashboard"))
-    usage = db.execute("SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND move_status != 'Scheduled' ORDER BY COALESCE(out_date, created_at) DESC", (asset_id,)).fetchall()
+    usage = db.execute("SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND move_status != 'Scheduled' ORDER BY COALESCE(applied_at, out_date, created_at) DESC", (asset_id,)).fetchall()
     scheduled_moves = db.execute(
         "SELECT * FROM sitepulse_usage_log WHERE asset_id = ? AND entry_kind='move' AND move_status='Scheduled' ORDER BY scheduled_date ASC",
         (asset_id,)
@@ -644,23 +684,27 @@ def sitepulse_update_asset(asset_id):
     new_location = request.form.get("location", "").strip()
     hours_mileage = request.form.get("hours_mileage", "")
     schedule_date = request.form.get("schedule_date", "").strip()
+    schedule_time = request.form.get("schedule_time", "").strip()
+    move_reason = request.form.get("move_reason", "").strip()
     now = datetime.utcnow().isoformat()
     today = date.today().isoformat()
     old_location = old["location"] or ""
+    mover = current_user.name or current_user.email
 
     location_changed = new_location != old_location and new_location != ""
 
     if location_changed and schedule_date and schedule_date > today:
         # Future move: don't touch the asset's location yet -- park it as a
         # Scheduled entry in the usage log. apply_due_scheduled_moves()
-        # applies it automatically once that date arrives.
+        # (or manually completing it) fills in the actual status/hours/mover
+        # snapshot once it really happens, not at scheduling time.
         db.execute("UPDATE sitepulse_assets SET status=?, hours_mileage=?, updated_at=? WHERE id=?",
                    (new_status, hours_mileage, now, asset_id))
         cur = db.execute(
             """INSERT INTO sitepulse_usage_log (asset_id, entry_kind, from_location, to_location,
-               mileage_hours, move_status, scheduled_date, out_date, created_at)
-               VALUES (?, 'move', ?, ?, ?, 'Scheduled', ?, ?, ?)""",
-            (asset_id, old_location, new_location, hours_mileage, schedule_date, schedule_date, now)
+               move_status, scheduled_date, scheduled_time, move_reason, created_by, created_at)
+               VALUES (?, 'move', ?, ?, 'Scheduled', ?, ?, ?, ?, ?)""",
+            (asset_id, old_location, new_location, schedule_date, schedule_time, move_reason, mover, now)
         )
         log_activity("sitepulse", "move", cur.lastrowid, "scheduled", asset_id=asset_id,
                      field="location", old_value=old_location, new_value=new_location)
@@ -674,9 +718,10 @@ def sitepulse_update_asset(asset_id):
     if location_changed:
         cur = db.execute(
             """INSERT INTO sitepulse_usage_log (asset_id, entry_kind, from_location, to_location,
-               mileage_hours, move_status, scheduled_date, out_date, created_at)
-               VALUES (?, 'move', ?, ?, ?, 'Applied', ?, ?, ?)""",
-            (asset_id, old_location, new_location, hours_mileage, today, today, now)
+               mileage_hours, move_status, status_at_move, moved_by, scheduled_date, applied_at,
+               out_date, created_by, created_at)
+               VALUES (?, 'move', ?, ?, ?, 'Applied', ?, ?, ?, ?, ?, ?, ?)""",
+            (asset_id, old_location, new_location, hours_mileage, new_status, mover, today, now, today, mover, now)
         )
         log_activity("sitepulse", "move", cur.lastrowid, "created", asset_id=asset_id,
                      field="location", old_value=old_location, new_value=new_location)
@@ -686,6 +731,23 @@ def sitepulse_update_asset(asset_id):
     db.commit()
     flash("Asset updated.")
     return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
+
+
+@app.route("/sitepulse/move/<int:move_id>/complete", methods=["POST"])
+@login_required
+def sitepulse_complete_scheduled_move(move_id):
+    db = get_db()
+    move = db.execute("SELECT * FROM sitepulse_usage_log WHERE id = ? AND entry_kind='move'", (move_id,)).fetchone()
+    if not move:
+        flash("Scheduled move not found.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    if move["move_status"] != "Scheduled":
+        flash("That move has already been applied.", "error")
+        return redirect(url_for("sitepulse_view_asset", asset_id=move["asset_id"]))
+    _apply_move(db, move, current_user.name or current_user.email, is_auto=False)
+    db.commit()
+    flash(f"Marked moved to {move['to_location']}.")
+    return redirect(url_for("sitepulse_view_asset", asset_id=move["asset_id"]))
 
 
 @app.route("/sitepulse/move/<int:move_id>/cancel", methods=["POST"])

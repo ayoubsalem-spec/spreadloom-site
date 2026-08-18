@@ -53,20 +53,34 @@
             </div>
         </div>
         <label>Schedule for a Future Date (optional)</label>
-        <input type="date" name="schedule_date" min="{{ today }}">
-        <p class="sub" style="margin-top:4px;">Leave blank to move it now. Set a date and the location above will apply automatically once that date arrives &mdash; the current location stays put until then.</p>
+        <div class="form-row">
+            <div style="flex:1;"><input type="date" name="schedule_date" min="{{ today }}"></div>
+            <div style="flex:1;"><input type="time" name="schedule_time" placeholder="Time"></div>
+            <div style="flex:2;"><input type="text" name="move_reason" placeholder="Reason / Job (optional)"></div>
+        </div>
+        <p class="sub" style="margin-top:4px;">Leave the date blank to move it now. Set a date and the location above will apply automatically once that date arrives &mdash; the current location stays put until then.</p>
         <button type="submit" class="btn btn-gold">Save</button>
     </form>
     {% if scheduled_moves|length > 0 %}
     <div style="margin-top:16px;">
         <h3 style="font-size:13px; color:var(--gold); margin-bottom:8px;">Scheduled Moves</h3>
         {% for m in scheduled_moves %}
-        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border);">
-            <span class="sub" style="margin:0;">{{ m['from_location'] or '\u2014' }} &rarr; {{ m['to_location'] }} on {{ m['scheduled_date'] }}</span>
-            <form method="POST" action="{{ url_for('sitepulse_cancel_scheduled_move', move_id=m['id']) }}" onsubmit="return confirm('Cancel this scheduled move?');">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="btn btn-sm" style="color:#F87171;">Cancel</button>
-            </form>
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--border); flex-wrap:wrap; gap:8px;">
+            <span class="sub" style="margin:0;">
+                {{ m['from_location'] or '\u2014' }} &rarr; {{ m['to_location'] }} &middot; {{ m['scheduled_date'] }}{% if m['scheduled_time'] %} at {{ m['scheduled_time'] }}{% endif %}
+                {%- if m['move_reason'] %} &middot; {{ m['move_reason'] }}{% endif %}
+                {%- if m['created_by'] %} &middot; scheduled by {{ m['created_by'] }}{% endif %}
+            </span>
+            <div style="display:flex; gap:8px;">
+                <form method="POST" action="{{ url_for('sitepulse_complete_scheduled_move', move_id=m['id']) }}" onsubmit="return confirm('Mark this moved now?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm">Mark Moved Now</button>
+                </form>
+                <form method="POST" action="{{ url_for('sitepulse_cancel_scheduled_move', move_id=m['id']) }}" onsubmit="return confirm('Cancel this scheduled move?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm" style="color:#F87171;">Cancel</button>
+                </form>
+            </div>
         </div>
         {% endfor %}
     </div>
@@ -127,8 +141,16 @@
         <tr>
             {% if u['entry_kind'] == 'move' %}
             <td><span class="badge status-inprogress">Location Move</span></td>
-            <td>{{ u['from_location'] or '\u2014' }} &rarr; {{ u['to_location'] }}{% if u['mileage_hours'] %}<br><span class="sub" style="margin:0;">Hours/Mileage: {{ u['mileage_hours'] }}</span>{% endif %}</td>
-            <td>{{ u['scheduled_date'] or u['out_date'] or '—' }}</td>
+            <td>
+                {{ u['from_location'] or '\u2014' }} &rarr; {{ u['to_location'] }}
+                {%- if u['move_reason'] %} &middot; {{ u['move_reason'] }}{% endif %}
+                <br><span class="sub" style="margin:0;">
+                    {%- if u['mileage_hours'] %}Hours/Mileage: {{ u['mileage_hours'] }}{% endif %}
+                    {%- if u['status_at_move'] %} &middot; Status: {{ u['status_at_move'] }}{% endif %}
+                    {%- if u['moved_by'] %} &middot; By: {{ u['moved_by'] }}{% endif %}
+                </span>
+            </td>
+            <td>{{ u['applied_at']|friendly_dt if u['applied_at'] else (u['scheduled_date'] or u['out_date'] or '—') }}</td>
             <td>—</td>
             <td>—</td>
             <td style="white-space:nowrap;">
