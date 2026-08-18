@@ -45,7 +45,7 @@ ADMIN_EMAILS = ["ayoub@darycet.com"]
 
 # Who's allowed to actually place an order (mark "Ordered" and fill in
 # Ordered From / vendor / contact).
-PROCUREMENT_EMAILS = {"rebecca@darycet.com", "marilu@darycet.com"}
+PROCUREMENT_EMAILS = {"rebecca@darycet.com", "marilu@darycet.com","ayoub@darycet.com"}
 ALLOWED_DOMAIN = "@darycet.com"
 # Extra emails allowed to sign up even though they're outside the main
 # company email domain.
