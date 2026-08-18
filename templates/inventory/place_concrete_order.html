@@ -13,7 +13,7 @@
         </div>
         <p class="sub" style="margin-top:6px;">Arrival time uses the pour time above ({{ r['pour_time'] or 'not set' }}) &mdash; edit the request if that needs to change.</p>
 
-        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ground Pump {% if r['pump_size'] and r['pump_size'].strip().lower() not in ['none', 'no', 'n/a', 'na', '-'] %}<span class="sub" style="text-transform:none; font-weight:400;">({{ r['pump_size'] }})</span>{% endif %}</h3>
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Pump {% if r['pump_size'] and r['pump_size'].strip().lower() not in ['none', 'no', 'n/a', 'na', '-'] %}<span class="sub" style="text-transform:none; font-weight:400;">({{ r['pump_size'] }})</span>{% endif %}</h3>
         <div class="form-row">
             <div style="flex:1;"><label>Company / Contact Name</label><input type="text" name="pump_company" value="{{ r['pump_company'] or '' }}" data-remember="pump_company"></div>
             <div style="flex:1;"><label>Phone</label><input type="text" name="pump_company_phone" value="{{ r['pump_company_phone'] or '' }}" data-remember="pump_company_phone"></div>

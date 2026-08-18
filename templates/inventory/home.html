@@ -1,0 +1,10 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<h1>SitePulse</h1>
+<p class="sub">Stay on top of materials from order to delivery. Track inventory, place material and concrete orders, monitor deliveries, and generate reports&mdash;all in one place.</p>
+<div class="stack-nav">
+    <a href="{{ url_for('inventory_concrete_list') }}" class="btn-stack">Concrete Requests</a>
+    <a href="{{ url_for('inventory_purchase_list') }}" class="btn-stack">Purchase Requests</a>
+    <a href="{{ url_for('inventory_materials_list') }}" class="btn-stack">Inventory</a>
+</div>
+{% endblock %}

@@ -36,7 +36,7 @@
     <table>
         <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date'] }}{% endif %}</td></tr>
         {% if r['concrete_company'] %}<tr><td class="sub">Concrete Company</td><td>{{ r['concrete_company'] }}{% if r['concrete_company_phone'] %} &middot; {{ r['concrete_company_phone'] }}{% endif %}</td></tr>{% endif %}
-        {% if r['pump_company'] %}<tr><td class="sub">Ground Pump</td><td>{{ r['pump_company'] }}{% if r['pump_company_phone'] %} &middot; {{ r['pump_company_phone'] }}{% endif %}{% if r['pump_arrival_time'] %} &middot; {{ r['pump_arrival_time'] }}{% endif %}</td></tr>{% endif %}
+        {% if r['pump_company'] %}<tr><td class="sub">Pump</td><td>{{ r['pump_company'] }}{% if r['pump_company_phone'] %} &middot; {{ r['pump_company_phone'] }}{% endif %}{% if r['pump_arrival_time'] %} &middot; {{ r['pump_arrival_time'] }}{% endif %}</td></tr>{% endif %}
         {% if r['lab_company'] %}<tr><td class="sub">Lab</td><td>{{ r['lab_company'] }}{% if r['lab_time'] %} &middot; {{ r['lab_time'] }}{% endif %}</td></tr>{% endif %}
         {% if r['drilling_company'] %}<tr><td class="sub">Drilling Company</td><td>{{ r['drilling_company'] }}{% if r['drilling_company_phone'] %} &middot; {{ r['drilling_company_phone'] }}{% endif %}{% if r['drilling_time'] %} &middot; {{ r['drilling_time'] }}{% endif %}</td></tr>{% endif %}
     </table>

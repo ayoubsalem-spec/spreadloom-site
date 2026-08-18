@@ -912,7 +912,7 @@ def sitepulse_delete_rental(rental_id):
 @app.route("/inventory/")
 @login_required
 def inventory_home():
-    return redirect(url_for("inventory_materials_list"))
+    return render_template("inventory/home.html")
 
 
 @app.route("/inventory/materials")
@@ -1048,7 +1048,7 @@ def build_concrete_order_notification(r):
 
     if r["pump_company"] or r["pump_size"]:
         pump_time = fmt_time(r["pump_arrival_time"])
-        pump_line = "Ground pump"
+        pump_line = "Pump"
         if r["pump_company"]:
             pump_line += f"-{r['pump_company']}"
         if r["pump_company_phone"]:
