@@ -1,0 +1,94 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<div class="section-row">
+    <div>
+        <h1>{{ r['project'] }}</h1>
+        <p class="sub">Concrete Checklist Form &middot; Submitted {{ r['created_at'][:16].replace('T',' ') }}</p>
+    </div>
+    <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
+</div>
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Project Info</h3>
+    <table>
+        <tr><td class="sub" style="width:220px;">Project</td><td>{{ r['project'] }}</td></tr>
+        <tr><td class="sub">Job Site Address</td><td>{{ r['job_site_address'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Description of Area to Pour</td><td>{{ r['area_description'] or '\u2014' }}</td></tr>
+    </table>
+    <h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Concrete Details</h3>
+    <table>
+        <tr><td class="sub" style="width:220px;">Date of Pour</td><td>{{ r['pour_date'] }}</td></tr>
+        <tr><td class="sub">Time of Pour</td><td>{{ r['pour_time'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Mix Design (PSI)</td><td>{{ r['mix_design_psi'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Concrete Amount</td><td>{{ r['concrete_amount'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Lab</td><td>{{ r['lab_required'] }}{% if r['lab_time'] %} &mdash; {{ r['lab_time'] }}{% endif %}</td></tr>
+        <tr><td class="sub">Drilling Company</td><td>{{ r['drilling_required'] }}{% if r['drilling_time'] %} &mdash; {{ r['drilling_time'] }}{% endif %}</td></tr>
+    </table>
+    <h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Requested By</h3>
+    <table>
+        <tr><td class="sub" style="width:220px;">Name</td><td>{{ r['requested_by'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Date</td><td>{{ r['requested_date'] or '\u2014' }}</td></tr>
+    </table>
+</div>
+
+{% if r['status'] == 'Scheduled' %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Details</h3>
+    <p class="sub" style="margin-bottom:14px;">Scheduled by {{ r['ordered_by'] or '\u2014' }} on {{ r['ordered_date'] or '\u2014' }}</p>
+    {% if contacts|length == 0 %}
+    <p class="sub" style="margin:0;">No supplier/contact details on file for this pour.</p>
+    {% else %}
+    <table>
+        <tr><th>Role / Company</th><th>Contact</th><th>Phone</th><th>Arrival</th></tr>
+        {% for c in contacts %}
+        <tr>
+            <td>{{ c['role_label'] or c['company_name'] or '\u2014' }}</td>
+            <td>{{ c['contact_name'] or '\u2014' }}</td>
+            <td>{{ c['contact_phone'] or '\u2014' }}</td>
+            <td>{{ c['arrival_time'] or '\u2014' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+    <a href="{{ url_for('inventory_schedule_concrete', request_id=r['id']) }}" class="btn btn-sm" style="margin-top:14px;">Edit Order Details</a>
+</div>
+
+{% if notification_text %}
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Notification Preview</h3>
+    <p class="sub" style="margin-bottom:10px;">Ready to copy and send to the team.</p>
+    <pre style="background:var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:16px; white-space:pre-wrap; font-family:inherit; color:var(--text-light); margin:0;">{{ notification_text }}</pre>
+</div>
+{% endif %}
+{% endif %}
+
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Update Status</h3>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        {% if r['status'] != 'Submitted' %}
+        <form method="POST" action="{{ url_for('inventory_update_concrete_status', request_id=r['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="status" value="Submitted">
+            <button type="submit" class="btn btn-sm">Mark Submitted</button>
+        </form>
+        {% endif %}
+        {% if r['status'] != 'Scheduled' %}
+        <a href="{{ url_for('inventory_schedule_concrete', request_id=r['id']) }}" class="btn btn-sm">Mark Scheduled&hellip;</a>
+        {% endif %}
+        {% if r['status'] != 'Completed' %}
+        <form method="POST" action="{{ url_for('inventory_update_concrete_status', request_id=r['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="status" value="Completed">
+            <button type="submit" class="btn btn-sm">Mark Completed</button>
+        </form>
+        {% endif %}
+        <form method="POST" action="{{ url_for('inventory_delete_concrete', request_id=r['id']) }}" onsubmit="return confirm('Delete this concrete request? This can\'t be undone.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm" style="color:var(--red); border-color:var(--red);">Delete</button>
+        </form>
+    </div>
+</div>
+
+<a href="{{ url_for('inventory_concrete_list') }}" class="btn btn-sm">&larr; Back to Concrete Requests</a>
+<a href="{{ url_for('inventory_edit_concrete', request_id=r['id']) }}" class="btn btn-sm">Edit</a>
+{% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('inventory_concrete_activity_log', request_id=r['id']) }}" class="btn btn-sm">View Activity Log</a>{% endif %}
+{% endblock %}

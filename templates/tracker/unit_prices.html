@@ -1,0 +1,36 @@
+{% extends "tracker/base.html" %}
+{% block content %}
+<h1>Unit Prices</h1>
+<p class="sub">Reference pricing for estimating.</p>
+
+<div class="card">
+    <form method="POST" action="{{ url_for('tracker_new_unit_price') }}" class="inline-form" style="flex-wrap:wrap;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="category" placeholder="Category (Concrete, Sitework...)" style="width:180px;">
+        <input type="text" name="item" placeholder="Item" required style="width:200px;">
+        <input type="text" name="unit" placeholder="Unit (SF, LF, EA...)" style="width:100px;">
+        <input type="text" name="price" placeholder="Price" style="width:120px;">
+        <input type="text" name="notes" placeholder="Notes" style="width:180px;">
+        <button type="submit" class="btn-sm btn-gold">Add</button>
+    </form>
+</div>
+
+<div class="card">
+    {% if prices|length == 0 %}
+        <p class="sub" style="margin-bottom:0;">No unit prices added yet.</p>
+    {% else %}
+    <table>
+        <tr><th>Category</th><th>Item</th><th>Unit</th><th>Price</th><th>Notes</th></tr>
+        {% for u in prices %}
+        <tr>
+            <td>{{ u['category'] or '—' }}</td>
+            <td>{{ u['item'] }}</td>
+            <td>{{ u['unit'] or '—' }}</td>
+            <td>{{ u['price'] or '—' }}</td>
+            <td>{{ u['notes'] or '—' }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

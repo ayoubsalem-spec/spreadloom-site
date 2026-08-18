@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:500px; margin:0 auto;">
+    <h1 style="font-size:20px;">Restore from Backup</h1>
+    <p class="sub" style="margin:14px 0; line-height:1.6;">
+        This replaces ALL current data across every section (Project Hunt, Equipment Center, SitePulse)
+        with what's in the backup file. Consider downloading a fresh backup first.
+    </p>
+    <form method="POST" enctype="multipart/form-data" onsubmit="return confirm('This will REPLACE all current data. Are you sure?');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Backup File (.db)</label>
+        <input type="file" name="backup_file" accept=".db" required>
+        <button type="submit" class="btn btn-gold" style="margin-top:16px; color:var(--red); border-color:#7F1D1D;">Restore This Backup</button>
+    </form>
+</div>
+{% endblock %}

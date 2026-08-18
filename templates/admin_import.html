@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Import Real Data</h1>
+<p class="sub" style="margin-bottom:20px;">
+    Upload the backup files downloaded from your existing equipment tracker and bid tracker apps.
+    This copies everything in &mdash; equipment, rentals, materials, concrete requests, project
+    hunt records, and vendor quotes &mdash; into BuildIQ. Safe to run more than once if needed, but
+    running it twice with the same file will create duplicate rows, so only upload each backup once.
+</p>
+<div class="card">
+    <form method="POST" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Equipment Center Backup (.db)</label>
+        <input type="file" name="sitepulse_backup" accept=".db">
+        <label>Project Hunt Backup (.db)</label>
+        <input type="file" name="tracker_backup" accept=".db">
+        <button type="submit" class="btn btn-gold" style="margin-top:16px;">Import</button>
+    </form>
+</div>
+{% endblock %}

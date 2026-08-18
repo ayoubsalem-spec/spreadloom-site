@@ -1,0 +1,44 @@
+{% extends "tracker/base.html" %}
+{% block content %}
+<div class="card" style="max-width:520px; margin:0 auto;">
+    <h1 style="font-size:20px;">Edit Project</h1>
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Project Name</label>
+        <input type="text" name="name" value="{{ p['name'] }}" required>
+
+        <label>Client</label>
+        <input type="text" name="client" value="{{ p['client'] or '' }}">
+
+        <label>Address</label>
+        <input type="text" name="address" value="{{ p['address'] or '' }}">
+
+        <label>Bid Due Date</label>
+        <input type="date" name="bid_due_date" value="{{ p['bid_due_date'] or '' }}">
+
+        <label>Estimated Value</label>
+        <input type="text" name="estimated_value" value="{{ p['estimated_value'] or '' }}">
+
+        <label>Status</label>
+        <select name="status">
+            {% for s in status_options %}<option value="{{ s }}" {{ 'selected' if p['status']==s }}>{{ s }}</option>{% endfor %}
+        </select>
+
+        <label>Assigned To</label>
+        <input type="text" name="assigned_to" value="{{ p['assigned_to'] or '' }}">
+
+        <label>Notes</label>
+        <textarea name="notes">{{ p['notes'] or '' }}</textarea>
+
+        <button type="submit" class="btn-gold">Save Changes</button>
+        <a href="{{ url_for('tracker_view_project', project_id=p['id']) }}" class="btn" style="margin-left:8px;">Cancel</a>
+    </form>
+
+    <hr class="divider">
+    <form method="POST" action="{{ url_for('tracker_delete_project', project_id=p['id']) }}"
+          onsubmit="return confirm('Delete this project permanently? This also deletes all its quotes and documents. This cannot be undone.');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" style="color:#F87171; border-color:#7F1D1D;">Delete Project Permanently</button>
+    </form>
+</div>
+{% endblock %}

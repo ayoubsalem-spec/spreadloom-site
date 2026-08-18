@@ -1,0 +1,23 @@
+{% extends "tracker/base.html" %}
+{% block content %}
+<h1>Archived Projects</h1>
+<p class="sub">Completed or inactive projects, kept for reference.</p>
+<div class="card">
+    {% if projects|length == 0 %}
+        <p class="sub" style="margin-bottom:0;">No archived projects yet. Set a project's status to "Archived" to move it here.</p>
+    {% else %}
+    <table>
+        <tr><th>Project</th><th>Client</th><th>Value</th><th>Last Updated</th><th></th></tr>
+        {% for p in projects %}
+        <tr>
+            <td>{{ p['name'] }}</td>
+            <td>{{ p['client'] or '—' }}</td>
+            <td>{{ p['estimated_value'] or '—' }}</td>
+            <td>{{ p['updated_at'][:10] }}</td>
+            <td><a href="{{ url_for('tracker_view_project', project_id=p['id']) }}">Open →</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</div>
+{% endblock %}

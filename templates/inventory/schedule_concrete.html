@@ -1,0 +1,30 @@
+{% extends "inventory/base.html" %}
+{% block content %}
+<h1>Schedule Concrete Pour</h1>
+<p class="sub">{{ r['project'] }} &middot; {{ r['area_description'] or '' }} &middot; Pour date {{ r['pour_date'] }}</p>
+<div class="card">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <p class="sub" style="margin-bottom:16px;">
+            Enter who's supplying this pour &mdash; pump company, concrete supplier, testing lab, or anything else
+            that needs to show up on the day-of notification. Leave rows blank if not needed.
+        </p>
+        <div class="card" style="padding:0; overflow-x:auto; background:var(--surface-2);">
+            <table>
+                <tr><th>Role / Company</th><th>Contact Name</th><th>Phone</th><th>Arrival Time</th></tr>
+                {% for i in range(4) %}
+                {% set c = contacts[i] if i < contacts|length else None %}
+                <tr>
+                    <td><input type="text" name="role_label[]" value="{{ c['role_label'] if c else '' }}" placeholder="e.g. Ground Pump, Concrete Supplier, Lab"></td>
+                    <td><input type="text" name="contact_name[]" value="{{ c['contact_name'] if c else '' }}"></td>
+                    <td><input type="text" name="contact_phone[]" value="{{ c['contact_phone'] if c else '' }}"></td>
+                    <td><input type="time" name="arrival_time[]" value="{{ c['arrival_time'] if c else '' }}"></td>
+                </tr>
+                {% endfor %}
+            </table>
+        </div>
+        <button type="submit" class="btn btn-gold" style="margin-top:16px;">Confirm Schedule &amp; Save</button>
+    </form>
+</div>
+<a href="{{ url_for('inventory_view_concrete', request_id=r['id']) }}" class="btn btn-sm">&larr; Cancel</a>
+{% endblock %}

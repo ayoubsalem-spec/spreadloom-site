@@ -1,0 +1,348 @@
+{% extends "sitepulse/base.html" %}
+{% block content %}
+<div class="section-row">
+    <div>
+        <h1>{{ a['name'] }}</h1>
+        <p class="sub" style="margin-bottom:0;">{{ a['description'] or '' }}{% if a['year'] %} &middot; {{ a['year'] }}{% endif %}{% if a['serial_number'] %} &middot; SN: {{ a['serial_number'] }}{% endif %}</p>
+    </div>
+</div>
+
+<div class="card">
+    <details>
+        <summary style="cursor:pointer; color:var(--gold-light); font-size:13px; font-weight:600;">Edit Name, Description, Serial &amp; Rates</summary>
+        <form method="POST" action="{{ url_for('sitepulse_edit_asset_details', asset_id=a['id']) }}" style="margin-top:14px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label>Name</label>
+            <input type="text" name="name" value="{{ a['name'] }}" required>
+            <label>Description</label>
+            <input type="text" name="description" value="{{ a['description'] or '' }}">
+            <div class="form-row">
+                <div style="flex:1;"><label>Year</label><input type="text" name="year" value="{{ a['year'] or '' }}"></div>
+                <div style="flex:1;"><label>Serial Number</label><input type="text" name="serial_number" value="{{ a['serial_number'] or '' }}"></div>
+            </div>
+            <div class="form-row">
+                <div style="flex:1;"><label>Value</label><input type="text" name="value" value="{{ a['value'] or '' }}"></div>
+                <div style="flex:1;"><label>Daily Rate</label><input type="text" name="daily_rate" value="{{ a['daily_rate'] or '' }}"></div>
+                <div style="flex:1;"><label>Weekly Rate</label><input type="text" name="weekly_rate" value="{{ a['weekly_rate'] or '' }}"></div>
+                <div style="flex:1;"><label>Monthly Rate</label><input type="text" name="monthly_rate" value="{{ a['monthly_rate'] or '' }}"></div>
+            </div>
+            <button type="submit" class="btn btn-gold">Save Details</button>
+        </form>
+    </details>
+</div>
+
+<div class="card">
+    <h2>Status &amp; Location</h2>
+    <form method="POST" action="{{ url_for('sitepulse_update_asset', asset_id=a['id']) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-row">
+            <div style="flex:1;">
+                <label>Status</label>
+                <select name="status">
+                    {% for s in status_options %}<option value="{{ s }}" {{ 'selected' if a['status']==s }}>{{ s }}</option>{% endfor %}
+                </select>
+            </div>
+            <div style="flex:1;">
+                <label>Current Location</label>
+                <input type="text" name="location" value="{{ a['location'] or '' }}">
+            </div>
+            <div style="flex:1;">
+                <label>Hours / Mileage</label>
+                <input type="text" name="hours_mileage" value="{{ a['hours_mileage'] or '' }}">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-gold">Save</button>
+    </form>
+
+    <div style="margin-top:20px; padding-top:16px; border-top:1px solid var(--border);">
+        <h3 style="font-size:14px; color:var(--gold-light); margin-bottom:10px;">Schedule Future Move</h3>
+        {% if a['scheduled_location'] %}
+        <div class="sub" style="margin-bottom:10px;">
+            Scheduled to move to <strong style="color:var(--text-light);">{{ a['scheduled_location'] }}</strong>
+            on {{ a['scheduled_date'] or '?' }}{% if a['scheduled_time'] %} at {{ a['scheduled_time'] }}{% endif %}
+        </div>
+        <form method="POST" action="{{ url_for('sitepulse_clear_scheduled_move', asset_id=a['id']) }}" style="display:inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Cancel Scheduled Move</button>
+        </form>
+        {% else %}
+        <form method="POST" action="{{ url_for('sitepulse_schedule_move', asset_id=a['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-row">
+                <div style="flex:1;"><label>Scheduled Location</label><input type="text" name="scheduled_location"></div>
+                <div style="flex:1;"><label>Scheduled Date</label><input type="date" name="scheduled_date"></div>
+                <div style="flex:1;"><label>Scheduled Time</label><input type="time" name="scheduled_time"></div>
+            </div>
+            <button type="submit" class="btn btn-sm">Schedule Move</button>
+        </form>
+        {% endif %}
+    </div>
+    <div id="asset-map" style="height:220px; border-radius:8px; margin-top:14px; border:1px solid var(--border);"></div>
+    {% if a['value'] or a['daily_rate'] %}
+    <p class="sub" style="margin-top:14px; margin-bottom:0;">
+        {% if a['value'] %}Value: ${{ a['value'] }}{% endif %}
+        {% if a['daily_rate'] %} &middot; Daily: ${{ a['daily_rate'] }}{% endif %}
+        {% if a['weekly_rate'] %} &middot; Weekly: ${{ a['weekly_rate'] }}{% endif %}
+        {% if a['monthly_rate'] %} &middot; Monthly: ${{ a['monthly_rate'] }}{% endif %}
+    </p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Usage Log</h2>
+    <p class="sub">Log it the same way whether it's going to an internal job or an outside rental.</p>
+    <details style="margin-bottom:14px;">
+        <summary style="cursor:pointer; color:var(--gold-light); font-size:13px;">+ Log Usage</summary>
+        <form method="POST" action="{{ url_for('sitepulse_new_usage', asset_id=a['id']) }}" enctype="multipart/form-data" style="margin-top:10px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label>Type</label>
+            <select name="usage_type">
+                {% for t in usage_type_options %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+            </select>
+            <label>Job Name</label>
+            <input type="text" name="job_name">
+            <label>Job Address</label>
+            <input type="text" name="job_address">
+            <label>Client (leave blank for internal jobs)</label>
+            <input type="text" name="client">
+            <div class="form-row">
+                <div style="flex:1;"><label>Out Date</label><input type="date" name="out_date" id="new_out_date"></div>
+                <div style="flex:1;"><label>How Long</label>
+                    <select name="duration_unit" id="new_duration_unit">
+                        <option value="">-- Select --</option>
+                        <option value="Day">1 Day</option>
+                        <option value="Week">1 Week</option>
+                        <option value="Month">1 Month</option>
+                    </select>
+                </div>
+                <div style="flex:1;"><label>Return Date</label><input type="date" name="return_date" id="new_return_date"></div>
+            </div>
+            <label>Notes</label>
+            <textarea name="notes"></textarea>
+            <label>Photo (optional)</label>
+            <input type="file" name="photo" accept="image/*" capture="environment">
+            <button type="submit" class="btn btn-gold">Log Usage (marks asset Out on Job)</button>
+        </form>
+    </details>
+    {% if usage|length == 0 %}
+        <p class="sub" style="margin-bottom:0;">No usage history yet.</p>
+    {% else %}
+    <table>
+        <tr><th>Type</th><th>Job / Client</th><th>Out</th><th>Return</th><th>Photo</th><th></th></tr>
+        {% for u in usage %}
+        <tr>
+            <td>{{ u['usage_type'] }}</td>
+            <td>{{ u['job_name'] or u['client'] or '—' }}</td>
+            <td>{{ u['out_date'] or '—' }}</td>
+            <td>{{ u['return_date'] or '—' }}</td>
+            <td>
+                {% if u['photo_filename'] %}
+                <a href="{{ url_for('uploaded_photo', filename=u['photo_filename']) }}" target="_blank">
+                    <img src="{{ url_for('uploaded_photo', filename=u['photo_filename']) }}" style="width:44px; height:44px; object-fit:cover; border-radius:6px; border:1px solid var(--border);">
+                </a>
+                {% else %}&mdash;{% endif %}
+            </td>
+            <td style="white-space:nowrap;">
+                <details style="display:inline-block;">
+                    <summary style="cursor:pointer; color:var(--gold-light); font-size:12px; display:inline;">Edit</summary>
+                    <form method="POST" action="{{ url_for('sitepulse_update_usage', usage_id=u['id']) }}" enctype="multipart/form-data" style="margin-top:10px; min-width:260px;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <label>Type</label>
+                        <select name="usage_type">
+                            {% for t in usage_type_options %}<option value="{{ t }}" {{ 'selected' if u['usage_type']==t }}>{{ t }}</option>{% endfor %}
+                        </select>
+                        <label>Job Name</label>
+                        <input type="text" name="job_name" value="{{ u['job_name'] or '' }}">
+                        <label>Job Address</label>
+                        <input type="text" name="job_address" value="{{ u['job_address'] or '' }}">
+                        <label>Client</label>
+                        <input type="text" name="client" value="{{ u['client'] or '' }}">
+                        <div class="form-row">
+                            <div style="flex:1;"><label>Out Date</label><input type="date" name="out_date" value="{{ u['out_date'] or '' }}"></div>
+                            <div style="flex:1;"><label>How Long</label>
+                                <select name="duration_unit">
+                                    <option value="">-- Select --</option>
+                                    <option value="Day" {{ 'selected' if u['duration_unit']=='Day' }}>1 Day</option>
+                                    <option value="Week" {{ 'selected' if u['duration_unit']=='Week' }}>1 Week</option>
+                                    <option value="Month" {{ 'selected' if u['duration_unit']=='Month' }}>1 Month</option>
+                                </select>
+                            </div>
+                            <div style="flex:1;"><label>Return Date</label><input type="date" name="return_date" value="{{ u['return_date'] or '' }}"></div>
+                        </div>
+                        <label>Notes</label>
+                        <textarea name="notes">{{ u['notes'] or '' }}</textarea>
+                        <label>Photo{% if u['photo_filename'] %} (uploading a new one replaces it){% endif %}</label>
+                        <input type="file" name="photo" accept="image/*">
+                        <button type="submit" class="btn btn-sm">Save (setting a Return Date marks the asset Available)</button>
+                    </form>
+                </details>
+                <form method="POST" action="{{ url_for('sitepulse_delete_usage', usage_id=u['id']) }}" style="display:inline;" onsubmit="return confirm('Delete this usage entry?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm" style="color:#F87171;">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Maintenance Log</h2>
+    <details style="margin-bottom:14px;">
+        <summary style="cursor:pointer; color:var(--gold-light); font-size:13px;">+ Log Maintenance</summary>
+        <form method="POST" action="{{ url_for('sitepulse_new_maintenance', asset_id=a['id']) }}" enctype="multipart/form-data" style="margin-top:10px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label>Date</label>
+            <input type="date" name="entry_date">
+            <label>Work Done / Issue</label>
+            <textarea name="work_done"></textarea>
+            <label>Parts</label>
+            <input type="text" name="parts">
+            <label>Hours at Service</label>
+            <input type="text" name="hours_at_service">
+            <label><input type="checkbox" name="resolved" style="width:auto; display:inline-block;"> Resolved</label>
+            <label>Photo (optional)</label>
+            <input type="file" name="photo" accept="image/*" capture="environment">
+            <button type="submit" class="btn btn-gold">Log Maintenance</button>
+        </form>
+    </details>
+    {% if maintenance|length == 0 %}
+        <p class="sub" style="margin-bottom:0;">No maintenance history yet.</p>
+    {% else %}
+    <table>
+        <tr><th>Date</th><th>Work / Issue</th><th>Reported By</th><th>Status</th><th>Photo</th><th></th></tr>
+        {% for m in maintenance %}
+        <tr>
+            <td>{{ m['entry_date'] or '—' }}</td>
+            <td>{{ m['work_done'] }}{% if m['parts'] %}<br><span class="sub" style="margin:0;">Parts: {{ m['parts'] }}</span>{% endif %}</td>
+            <td>{{ m['reported_by'] or '—' }}</td>
+            <td>{% if m['resolved'] %}<span class="badge status-awarded">Resolved</span>{% else %}<span class="badge status-pending">Open</span>{% endif %}</td>
+            <td>
+                {% if m['photo_filename'] %}
+                <a href="{{ url_for('uploaded_photo', filename=m['photo_filename']) }}" target="_blank">
+                    <img src="{{ url_for('uploaded_photo', filename=m['photo_filename']) }}" style="width:44px; height:44px; object-fit:cover; border-radius:6px; border:1px solid var(--border);">
+                </a>
+                {% else %}&mdash;{% endif %}
+            </td>
+            <td style="white-space:nowrap;">
+                <details style="display:inline-block;">
+                    <summary style="cursor:pointer; color:var(--gold-light); font-size:12px; display:inline;">Edit</summary>
+                    <form method="POST" action="{{ url_for('sitepulse_update_maintenance', entry_id=m['id']) }}" enctype="multipart/form-data" style="margin-top:10px; min-width:260px;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <label>Date</label>
+                        <input type="date" name="entry_date" value="{{ m['entry_date'] or '' }}">
+                        <label>Work Done / Issue</label>
+                        <textarea name="work_done">{{ m['work_done'] or '' }}</textarea>
+                        <label>Parts</label>
+                        <input type="text" name="parts" value="{{ m['parts'] or '' }}">
+                        <label>Hours at Service</label>
+                        <input type="text" name="hours_at_service" value="{{ m['hours_at_service'] or '' }}">
+                        <label><input type="checkbox" name="resolved" {{ 'checked' if m['resolved'] }} style="width:auto; display:inline-block;"> Resolved</label>
+                        <label>Photo{% if m['photo_filename'] %} (uploading a new one replaces it){% endif %}</label>
+                        <input type="file" name="photo" accept="image/*">
+                        <button type="submit" class="btn btn-sm">Save</button>
+                    </form>
+                </details>
+                <form method="POST" action="{{ url_for('sitepulse_delete_maintenance', entry_id=m['id']) }}" style="display:inline;" onsubmit="return confirm('Delete this maintenance entry?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm" style="color:#F87171;">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h3 style="font-size:16px; margin-bottom:10px;">Mileage Log</h3>
+    <details>
+        <summary class="btn btn-sm" style="display:inline-block; cursor:pointer;">+ Log Mileage Reading</summary>
+        <form method="POST" action="{{ url_for('sitepulse_new_mileage', asset_id=a['id']) }}" style="margin-top:14px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-row">
+                <div style="flex:1;"><label>Date</label><input type="date" name="reading_date"></div>
+                <div style="flex:1;"><label>Odometer Reading</label><input type="text" name="mileage" placeholder="e.g. 45230"></div>
+            </div>
+            <label>Notes</label><input type="text" name="notes">
+            <button type="submit" class="btn btn-gold" style="margin-top:14px;">Log Reading</button>
+        </form>
+    </details>
+
+    {% if monthly_totals|length > 0 %}
+    <h4 style="font-size:13px; color:var(--gold-light); margin-top:18px;">Monthly Summary</h4>
+    <table style="margin-top:8px;">
+        <tr><th>Month</th><th>Last Reading</th></tr>
+        {% for month, reading in monthly_totals %}
+        <tr><td>{{ month }}</td><td>{{ "%.0f"|format(reading) }}</td></tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if mileage_entries|length == 0 %}
+    <p class="sub" style="margin-top:14px;">No mileage history yet.</p>
+    {% else %}
+    <h4 style="font-size:13px; color:var(--gold-light); margin-top:18px;">All Readings</h4>
+    <table style="margin-top:8px;">
+        <tr><th>Date</th><th>Reading</th><th>Notes</th></tr>
+        {% for m in mileage_entries %}
+        <tr><td>{{ m['reading_date'] }}</td><td>{{ m['mileage'] }}</td><td>{{ m['notes'] or '' }}</td></tr>
+        {% endfor %}
+    </table>
+    {% endif %}
+</div>
+
+<a href="{{ url_for('sitepulse_dashboard') }}" class="btn btn-sm">&larr; Back to Equipment List</a>
+{% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('sitepulse_asset_activity_log', asset_id=a['id']) }}" class="btn btn-sm">View Activity Log</a>{% endif %}
+<script>
+(function() {
+    var outDateEl = document.getElementById('new_out_date');
+    var durationEl = document.getElementById('new_duration_unit');
+    var returnDateEl = document.getElementById('new_return_date');
+    if (!outDateEl || !durationEl || !returnDateEl) return;
+
+    function updateReturnDate() {
+        if (!outDateEl.value || !durationEl.value) return;
+        var d = new Date(outDateEl.value + 'T00:00:00');
+        if (durationEl.value === 'Day') d.setDate(d.getDate() + 1);
+        if (durationEl.value === 'Week') d.setDate(d.getDate() + 7);
+        if (durationEl.value === 'Month') d.setMonth(d.getMonth() + 1);
+        var yyyy = d.getFullYear();
+        var mm = String(d.getMonth() + 1).padStart(2, '0');
+        var dd = String(d.getDate()).padStart(2, '0');
+        returnDateEl.value = yyyy + '-' + mm + '-' + dd;
+    }
+    outDateEl.addEventListener('change', updateReturnDate);
+    durationEl.addEventListener('change', updateReturnDate);
+})();
+</script>
+<script>
+(function() {
+    var locationText = "{{ a['location'] or '' }}";
+    console.log("SitePulse map debug — location text:", locationText);
+    if (!locationText.trim()) { console.log("SitePulse map debug — empty location, stopping."); return; }
+
+    var url = "/sitepulse/geocode?address=" + encodeURIComponent(locationText);
+    console.log("SitePulse map debug — fetching:", url);
+
+    fetch(url)
+        .then(function(res) { console.log("SitePulse map debug — response status:", res.status); return res.json(); })
+        .then(function(data) {
+            console.log("SitePulse map debug — results:", data);
+            if (!data.lat || !data.lon) { console.log("SitePulse map debug — zero results, no map drawn."); return; }
+            var lat = data.lat;
+            var lon = data.lon;
+            console.log("SitePulse map debug — drawing map at:", lat, lon);
+
+            var map = L.map('asset-map').setView([lat, lon], 19);
+            L.tileLayer('https://api.maptiler.com/tiles/satellite-v2/{z}/{x}/{y}.jpg?key=wBVofZhV8Z5IFv71Nj61', {
+                attribution: '&copy; MapTiler &copy; OpenStreetMap contributors',
+                maxZoom: 20
+            }).addTo(map);
+            L.marker([lat, lon]).addTo(map);
+        })
+        .catch(function(err) { console.log("SitePulse map debug — fetch error:", err); });
+})();
+</script>
+{% endblock %}

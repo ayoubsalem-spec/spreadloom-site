@@ -1,0 +1,33 @@
+{% extends "sitepulse/base.html" %}
+{% block content %}
+<h1>Log Rental</h1>
+<div class="card">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Equipment</label>
+        <input type="text" name="equipment_description" required autofocus>
+        <label>Vendor</label>
+        <input type="text" name="vendor" required>
+        <label>Job / Site</label>
+        <input type="text" name="job_name">
+        <div class="form-row">
+            <div style="flex:1;"><label>Rate</label><input type="text" name="rate_amount"></div>
+            <div style="flex:1;">
+                <label>Rate Period</label>
+                <select name="rate_period">
+                    <option value="Daily">Daily</option>
+                    <option value="Weekly">Weekly</option>
+                    <option value="Monthly">Monthly</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Rented Date</label><input type="date" name="rented_date" value="{{ today }}" required></div>
+            <div style="flex:1;"><label>Due Back</label><input type="date" name="due_date"></div>
+        </div>
+        <label>Notes</label>
+        <input type="text" name="notes">
+        <button type="submit" class="btn btn-gold">Log Rental</button>
+    </form>
+</div>
+{% endblock %}
