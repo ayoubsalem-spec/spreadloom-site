@@ -50,5 +50,6 @@
 {% endfor %}
 {% endif %}
 
-<a href="{{ url_for('engineering_dashboard') }}" class="btn" style="margin-top:10px; display:inline-block;">&larr; Back to Redline</a>
+<a href="{{ url_for('redline_comments_list', review_id=r['id']) }}" class="btn btn-gold" style="margin-top:10px; display:inline-block;">Permit Comments &rarr;</a>
+<a href="{{ url_for('engineering_dashboard') }}" class="btn" style="margin-top:10px; display:inline-block; margin-left:10px;">&larr; Back to Redline</a>
 {% endblock %}

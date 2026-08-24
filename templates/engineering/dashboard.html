@@ -1,42 +1,176 @@
 {% extends "base.html" %}
 {% block content %}
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
-    <h1 style="margin:0;">Redline</h1>
+{% include "engineering/_styles.html" %}
+
+<div style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:16px; margin-bottom:28px;">
+    <div>
+        <span class="rl-eyebrow">Redline</span>
+        <h1>Engineering Workspace</h1>
+        <p class="sub">Your second set of eyes on a plan set -- before the city gives you theirs.</p>
+    </div>
     <a href="{{ url_for('engineering_new_review') }}" class="btn btn-gold">+ New Plan Review</a>
 </div>
-<p class="sub" style="margin-bottom:24px;">Your second set of eyes on a plan set -- before the city gives you theirs.</p>
 
-{% if reviews %}
-<table>
-    <tr>
-        <th>Project</th>
-        <th>Type</th>
-        <th>Findings</th>
-        <th>Reviewed</th>
-        <th>By</th>
-    </tr>
-    {% for r in reviews %}
-    <tr onclick="window.location='{{ url_for('engineering_view_review', review_id=r['id']) }}'" style="cursor:pointer;">
-        <td>{{ r['project'] }}</td>
-        <td>{{ r['project_type'] }}</td>
-        <td>
-            {% if r['status'] != 'Complete' %}
-                <span class="status-submitted">Failed</span>
-            {% elif r['finding_count'] == 0 %}
-                <span class="sub">No findings</span>
-            {% else %}
-                {% if r['critical_count'] %}<span style="color:#E88;">&#128308; {{ r['critical_count'] }}</span>{% endif %}
-                {% if r['permit_count'] %}<span style="color:#E8A; margin-left:8px;">&#128992; {{ r['permit_count'] }}</span>{% endif %}
-                {% if r['warning_count'] %}<span style="color:#E8C766; margin-left:8px;">&#128993; {{ r['warning_count'] }}</span>{% endif %}
-                {% if r['other_count'] %}<span class="sub" style="margin-left:8px;">+{{ r['other_count'] }}</span>{% endif %}
-            {% endif %}
-        </td>
-        <td>{{ r['created_at']|friendly_short_dt }}</td>
-        <td>{{ r['requested_by'] }}</td>
-    </tr>
-    {% endfor %}
-</table>
-{% else %}
-<p class="sub">No plan reviews yet -- upload a plan set to get started.</p>
+<div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);">
+    <div class="kpi-card"><div class="kpi-value">{{ kpi.total_reviews }}</div><div class="kpi-label">Plan Reviews</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.active_reviews }}</div><div class="kpi-label">Active Reviews</div></div>
+    <div class="kpi-card"><div class="kpi-value">{{ kpi.total_findings }}</div><div class="kpi-label">Total Findings</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.findings_needing_review }}</div><div class="kpi-label">Findings Needing Review</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--teal);">{{ kpi.findings_confirmed }}</div><div class="kpi-label">Confirmed Findings</div></div>
+    <div class="kpi-card"><div class="kpi-value">{{ kpi.total_comments }}</div><div class="kpi-label">City Comments</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.comments_awaiting_engineer }}</div><div class="kpi-label">Awaiting Engineer</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--teal);">{{ kpi.comments_addressed }}</div><div class="kpi-label">Comments Addressed</div></div>
+</div>
+
+{% if needs_attention %}
+<div class="rl-section-title" style="margin-top:8px;">Needs Attention</div>
+{% for item in needs_attention %}
+<div class="rl-attention-card {{ 'warn' if item.level == 'warn' else '' }}">
+    <span class="rl-attention-text">{{ '\U0001F534' if item.level == 'critical' else '\U0001F7E1' }} {{ item.label }}</span>
+    <span class="rl-attention-count">{{ item.count }}</span>
+</div>
+{% endfor %}
 {% endif %}
+
+{% if pipeline %}
+<div style="margin-top:28px;">
+    <p class="rl-section-title">Review Pipeline <span class="dim">where work currently sits</span></p>
+    <div class="rl-pipeline">
+        {% for seg in pipeline %}
+        <div class="rl-pipeline-seg" style="width:{{ seg.pct }}%; background:{{ seg.color }};" title="{{ seg.label }}: {{ seg.count }}">{{ seg.count if seg.pct >= 6 }}</div>
+        {% endfor %}
+    </div>
+    <div class="rl-pipeline-legend">
+        {% for seg in pipeline %}
+        <div class="rl-pipeline-legend-item"><span class="rl-pipeline-legend-swatch" style="background:{{ seg.color }};"></span>{{ seg.label }} ({{ seg.count }})</div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<div class="rl-two-col" style="margin-top:28px;">
+    {% if findings_by_severity %}
+    <div>
+        <p class="rl-section-title">Findings by Severity</p>
+        {% for f in findings_by_severity %}
+        <div class="rl-bar-row">
+            <div class="rl-bar-label">{{ f.label }}</div>
+            <div class="rl-bar-track"><div class="rl-bar-fill" style="width:{{ f.pct }}%;"></div></div>
+            <div class="rl-bar-count">{{ f.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if findings_by_category %}
+    <div>
+        <p class="rl-section-title">Findings by Category</p>
+        {% for f in findings_by_category %}
+        <div class="rl-bar-row">
+            <div class="rl-bar-label">{{ f.label }}</div>
+            <div class="rl-bar-track"><div class="rl-bar-fill" style="width:{{ f.pct }}%;"></div></div>
+            <div class="rl-bar-count">{{ f.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<div class="rl-two-col" style="margin-top:8px;">
+    {% if findings_by_review %}
+    <div>
+        <p class="rl-section-title">Findings by Project</p>
+        {% for f in findings_by_review %}
+        <div class="rl-bar-row">
+            <div class="rl-bar-label">{{ f.label }}</div>
+            <div class="rl-bar-track"><div class="rl-bar-fill" style="width:{{ f.pct }}%;"></div></div>
+            <div class="rl-bar-count">{{ f.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if comments_by_status %}
+    <div>
+        <p class="rl-section-title">Comments by Status</p>
+        {% for c in comments_by_status %}
+        <div class="rl-bar-row">
+            <div class="rl-bar-label">{{ c.label }}</div>
+            <div class="rl-bar-track"><div class="rl-bar-fill" style="width:{{ c.pct }}%;"></div></div>
+            <div class="rl-bar-count">{{ c.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+{% if review_health %}
+<div style="margin-top:28px;">
+    <p class="rl-section-title">Active Review Health</p>
+    <div class="card" style="padding:4px 22px;">
+        {% for h in review_health %}
+        <div class="rl-health-row">
+            <div class="rl-health-title">{{ h.project }}</div>
+            <div class="rl-health-meta">
+                <span>{{ h.findings }} findings</span>
+                {% if h.critical_high %}<span style="color:var(--red);">{{ h.critical_high }} critical/high</span>{% endif %}
+                <span>{{ h.comments }} comments</span>
+                <a href="{{ url_for('engineering_view_review', review_id=h.id) }}" style="color:var(--brass);">View &rarr;</a>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if recent_activity %}
+<div style="margin-top:28px;">
+    <p class="rl-section-title">Recent Activity</p>
+    <div class="card" style="padding:6px 22px;">
+        {% for a in recent_activity %}
+        <div class="rl-feed-item">
+            <span style="color:var(--brass);">{{ a['action']|replace('_', ' ')|title }}</span> &mdash; {{ a['entity_type']|replace('_', ' ')|title }}{% if a['new_value'] %}: {{ a['new_value'][:60] }}{% endif %}
+            <div class="rl-feed-meta">{{ a['created_at']|friendly_short_dt }}{% if a['user_email'] %} &middot; {{ a['user_email'] }}{% endif %}</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<div style="margin-top:32px;">
+    <p class="rl-section-title">All Plan Reviews</p>
+    {% if reviews %}
+    <table>
+        <tr>
+            <th>Project</th>
+            <th>Type</th>
+            <th>Findings</th>
+            <th>Reviewed</th>
+            <th>By</th>
+        </tr>
+        {% for r in reviews %}
+        <tr onclick="window.location='{{ url_for('engineering_view_review', review_id=r['id']) }}'" style="cursor:pointer;">
+            <td>{{ r['project'] }}</td>
+            <td>{{ r['project_type'] }}</td>
+            <td>
+                {% if r['status'] != 'Complete' %}
+                    <span class="status-submitted">Failed</span>
+                {% elif r['finding_count'] == 0 %}
+                    <span class="sub">No findings</span>
+                {% else %}
+                    {% if r['critical_count'] %}<span style="color:#E88;">&#128308; {{ r['critical_count'] }}</span>{% endif %}
+                    {% if r['permit_count'] %}<span style="color:#E8A; margin-left:8px;">&#128992; {{ r['permit_count'] }}</span>{% endif %}
+                    {% if r['warning_count'] %}<span style="color:#E8C766; margin-left:8px;">&#128993; {{ r['warning_count'] }}</span>{% endif %}
+                    {% if r['other_count'] %}<span class="sub" style="margin-left:8px;">+{{ r['other_count'] }}</span>{% endif %}
+                {% endif %}
+            </td>
+            <td>{{ r['created_at']|friendly_short_dt }}</td>
+            <td>{{ r['requested_by'] }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="sub">No plan reviews yet -- upload a plan set to get started.</p>
+    {% endif %}
+</div>
 {% endblock %}

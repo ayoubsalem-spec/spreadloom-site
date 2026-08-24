@@ -664,6 +664,17 @@ def init_db():
             created_at TEXT, updated_at TEXT,
             FOREIGN KEY (review_id) REFERENCES engineering_plan_reviews(id)
         );
+        CREATE TABLE IF NOT EXISTS redline_permit_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, review_id INTEGER NOT NULL,
+            comment_number INTEGER, original_comment TEXT NOT NULL, category TEXT,
+            related_sheet TEXT, related_finding_id INTEGER,
+            related_finding_confirmed INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'New',
+            ai_suggested_response TEXT, engineer_edited_response TEXT, final_approved_response TEXT,
+            engineer_notes TEXT, created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (review_id) REFERENCES engineering_plan_reviews(id),
+            FOREIGN KEY (related_finding_id) REFERENCES redline_findings(id)
+        );
         CREATE TABLE IF NOT EXISTS inventory_concrete_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
             job_site_address TEXT, area_description TEXT, pour_date TEXT NOT NULL,
@@ -2736,7 +2747,125 @@ def engineering_dashboard():
            (SELECT COUNT(*) FROM redline_findings f WHERE f.review_id = r.id AND f.severity NOT IN ('Critical','Permit Risk','Warning')) AS other_count
            FROM engineering_plan_reviews r ORDER BY r.created_at DESC"""
     ).fetchall()
-    return render_template("engineering/dashboard.html", reviews=rows)
+
+    # --- Dashboard data below: every number is a real query against the
+    # actual Redline tables, computed fresh on load. Nothing here is
+    # estimated or hardcoded. ---
+
+    all_findings = db.execute("SELECT * FROM redline_findings").fetchall()
+    all_comments = db.execute("SELECT * FROM redline_permit_comments").fetchall()
+
+    finding_status_counts = {}
+    finding_severity_counts = {}
+    finding_category_counts = {}
+    for f in all_findings:
+        finding_status_counts[f["status"]] = finding_status_counts.get(f["status"], 0) + 1
+        finding_severity_counts[f["severity"]] = finding_severity_counts.get(f["severity"], 0) + 1
+        cat = f["category"] or "Uncategorized"
+        finding_category_counts[cat] = finding_category_counts.get(cat, 0) + 1
+
+    comment_status_counts = {}
+    for c in all_comments:
+        comment_status_counts[c["status"]] = comment_status_counts.get(c["status"], 0) + 1
+
+    # "Active reviews" -- a review with at least one finding still Needs
+    # Review, or at least one comment not yet in a terminal state. This is
+    # a derived definition from real per-review data, not a stored field.
+    active_review_ids = set()
+    for r in rows:
+        open_findings = db.execute(
+            "SELECT COUNT(*) c FROM redline_findings WHERE review_id = ? AND status = 'Needs Review'", (r["id"],)
+        ).fetchone()["c"]
+        open_comments = db.execute(
+            "SELECT COUNT(*) c FROM redline_permit_comments WHERE review_id = ? AND status NOT IN ('Addressed','Not Applicable')",
+            (r["id"],)
+        ).fetchone()["c"]
+        if open_findings or open_comments:
+            active_review_ids.add(r["id"])
+
+    kpi = {
+        "total_reviews": len(rows),
+        "active_reviews": len(active_review_ids),
+        "total_findings": len(all_findings),
+        "findings_needing_review": finding_status_counts.get("Needs Review", 0),
+        "findings_confirmed": finding_status_counts.get("Confirmed", 0),
+        "total_comments": len(all_comments),
+        "comments_awaiting_engineer": comment_status_counts.get("New", 0) + comment_status_counts.get("Reviewing", 0) + comment_status_counts.get("AI Drafted", 0),
+        "comments_addressed": comment_status_counts.get("Addressed", 0),
+    }
+
+    pipeline_defs = [
+        ("Findings: Needs Review", finding_status_counts.get("Needs Review", 0), "#5AC8E0"),
+        ("Findings: Confirmed", finding_status_counts.get("Confirmed", 0), "#C9A24B"),
+        ("Comments: New/Drafting", comment_status_counts.get("New", 0) + comment_status_counts.get("Reviewing", 0) + comment_status_counts.get("AI Drafted", 0), "#8A7238"),
+        ("Comments: Engineer Review", comment_status_counts.get("Engineer Review", 0), "#C9A24B"),
+        ("Comments: Approved", comment_status_counts.get("Approved", 0), "#5EEAD4"),
+        ("Comments: Addressed", comment_status_counts.get("Addressed", 0), "#5EEAD4"),
+    ]
+    pipeline_total = sum(p[1] for p in pipeline_defs) or 1
+    pipeline = [
+        {"label": label, "count": count, "color": color, "pct": round(100 * count / pipeline_total, 1)}
+        for label, count, color in pipeline_defs if count > 0
+    ]
+
+    def to_breakdown(counts_dict, total=None):
+        t = total or sum(counts_dict.values()) or 1
+        return sorted(
+            [{"label": k, "count": v, "pct": round(100 * v / t)} for k, v in counts_dict.items()],
+            key=lambda x: -x["count"]
+        )
+
+    findings_by_severity = to_breakdown(finding_severity_counts)
+    findings_by_category = to_breakdown(finding_category_counts)
+    findings_by_status = to_breakdown(finding_status_counts)
+    comments_by_status = to_breakdown(comment_status_counts)
+
+    findings_by_review = to_breakdown(
+        {r["project"]: r["finding_count"] for r in rows if r["finding_count"]}
+    )
+
+    recent_activity = db.execute(
+        """SELECT * FROM activity_log
+           WHERE entity_type IN ('engineering_plan_review', 'redline_finding', 'redline_permit_comment')
+           ORDER BY created_at DESC LIMIT 10"""
+    ).fetchall()
+
+    needs_attention = []
+    if finding_status_counts.get("Needs Review", 0):
+        crit = db.execute("SELECT COUNT(*) c FROM redline_findings WHERE status='Needs Review' AND severity='Critical'").fetchone()["c"]
+        if crit:
+            needs_attention.append({"label": "Critical findings awaiting review", "count": crit, "level": "critical"})
+        high = db.execute("SELECT COUNT(*) c FROM redline_findings WHERE status='Needs Review' AND severity='Permit Risk'").fetchone()["c"]
+        if high:
+            needs_attention.append({"label": "Permit-risk findings awaiting review", "count": high, "level": "warn"})
+    awaiting = comment_status_counts.get("New", 0) + comment_status_counts.get("Reviewing", 0)
+    if awaiting:
+        needs_attention.append({"label": "City comments awaiting a draft response", "count": awaiting, "level": "warn"})
+    if comment_status_counts.get("AI Drafted", 0):
+        needs_attention.append({"label": "AI drafts awaiting engineer approval", "count": comment_status_counts["AI Drafted"], "level": "warn"})
+    if comment_status_counts.get("Reopened", 0):
+        needs_attention.append({"label": "Reopened comments", "count": comment_status_counts["Reopened"], "level": "critical"})
+
+    # Project/review health -- most important active reviews first.
+    review_health = []
+    for r in rows:
+        if r["id"] not in active_review_ids:
+            continue
+        comment_count = db.execute("SELECT COUNT(*) c FROM redline_permit_comments WHERE review_id = ?", (r["id"],)).fetchone()["c"]
+        review_health.append({
+            "id": r["id"], "project": r["project"], "findings": r["finding_count"],
+            "critical_high": (r["critical_count"] or 0) + (r["permit_count"] or 0),
+            "comments": comment_count, "status": r["status"],
+        })
+
+    return render_template(
+        "engineering/dashboard.html", reviews=rows,
+        kpi=kpi, pipeline=pipeline,
+        findings_by_severity=findings_by_severity, findings_by_category=findings_by_category,
+        findings_by_status=findings_by_status, findings_by_review=findings_by_review,
+        comments_by_status=comments_by_status, recent_activity=recent_activity,
+        needs_attention=needs_attention, review_health=review_health,
+    )
 
 
 @app.route("/engineering/new", methods=["GET", "POST"])
@@ -2756,12 +2885,21 @@ def engineering_new_review():
             flash("Project name and a PDF plan set are both required.", "error")
             return render_template("engineering/new_review.html", project_types=ENGINEERING_PROJECT_TYPES)
 
-        pdf_bytes = pdf_file.read()
-        safe_name = secure_filename(pdf_file.filename)
-        with open(os.path.join(UPLOAD_DIR, safe_name), "wb") as f:
-            f.write(pdf_bytes)
+        try:
+            pdf_bytes = pdf_file.read()
+            safe_name = secure_filename(pdf_file.filename) or f"plan_{uuid.uuid4().hex}.pdf"
+            with open(os.path.join(UPLOAD_DIR, safe_name), "wb") as f:
+                f.write(pdf_bytes)
+        except Exception as e:
+            flash(f"Couldn't save the uploaded file: {str(e)}", "error")
+            return render_template("engineering/new_review.html", project_types=ENGINEERING_PROJECT_TYPES)
 
-        findings, error = call_redline_review(pdf_bytes, project_type, jurisdiction)
+        try:
+            findings, error = call_redline_review(pdf_bytes, project_type, jurisdiction)
+        except Exception as e:
+            flash(f"Review failed unexpectedly: {str(e)}", "error")
+            return render_template("engineering/new_review.html", project_types=ENGINEERING_PROJECT_TYPES)
+
         now = datetime.utcnow().isoformat()
         db = get_db()
         cur = db.execute(
@@ -2772,6 +2910,7 @@ def engineering_new_review():
              current_user.name or current_user.email, now, now)
         )
         review_id = cur.lastrowid
+        log_activity("engineering", "engineering_plan_review", review_id, "created", new_value=project)
         for f in (findings or []):
             db.execute(
                 """INSERT INTO redline_findings
@@ -2838,6 +2977,321 @@ def redline_finding_status(finding_id):
     db.commit()
     review_id = finding["review_id"]
     return redirect(url_for("engineering_view_review", review_id=review_id))
+
+
+# ---------------------------------------------------------------------------
+# Redline -- Permit Comment Response
+# ---------------------------------------------------------------------------
+
+PERMIT_COMMENT_STATUSES = [
+    "New", "Reviewing", "AI Drafted", "Engineer Review", "Approved", "Addressed",
+    "Needs More Information", "Not Applicable", "Reopened",
+]
+
+
+def call_redline_organize_comments(raw_text, review_id, db):
+    """Split a block of pasted city comments into individual tracked items.
+    Also asks Claude to suggest a possibly-related finding for each comment
+    -- but any suggested finding ID is validated server-side against this
+    review's real findings before ever being trusted; a hallucinated or
+    out-of-review ID is silently dropped, never stored. AI output is
+    untrusted input, same rule Atlas and the plan-review feature already
+    follow.
+    Returns (list_of_comment_dicts_or_None, error_or_None).
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None, "ANTHROPIC_API_KEY is not set."
+    if not raw_text or not raw_text.strip():
+        return None, "No comments provided."
+
+    findings = db.execute(
+        "SELECT id, sheet, finding, category FROM redline_findings WHERE review_id = ?", (review_id,)
+    ).fetchall()
+    findings_context = "\n".join(
+        f"- Finding #{f['id']}: {f['finding']} (sheet {f['sheet'] or 'unspecified'}, category {f['category'] or 'unspecified'})"
+        for f in findings
+    ) or "(no findings recorded on this review yet)"
+
+    system = (
+        "You are Redline, inside BuildIQ. A city/municipal reviewer sent back a block "
+        "of comments on a submitted plan set. Split this into individual, separately "
+        "trackable comments -- do not merge or summarize, preserve the reviewer's "
+        "actual wording for each item.\n\n"
+        "For each comment, also check whether it plausibly relates to one of this "
+        "project's existing Redline findings, listed below. Only suggest a match if "
+        "it's genuinely plausible -- if there's no clear connection, leave it blank "
+        "rather than forcing one.\n\n"
+        f"EXISTING FINDINGS ON THIS REVIEW:\n{findings_context}\n\n"
+        "Respond with ONLY a JSON array, no other text before or after. One object "
+        "per comment, in this exact shape:\n"
+        '[{"comment_number": 1, "original_comment": "the reviewer\'s exact wording", '
+        '"category": "e.g. ADA, Drainage, Access, Utility, Parking", '
+        '"related_sheet": "sheet number if the comment mentions one, else empty", '
+        '"possible_related_finding_id": <integer finding id from the list above, or null if none apply>}]'
+    )
+
+    import urllib.request
+    import urllib.error
+    import re
+    body = json.dumps({
+        "model": "claude-sonnet-4-6", "max_tokens": 3000,
+        "system": system,
+        "messages": [{"role": "user", "content": raw_text}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body,
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw = data["content"][0]["text"].strip()
+            match = re.search(r"\[.*\]", raw, re.DOTALL)
+            if not match:
+                return None, "Redline's response wasn't valid JSON -- try again."
+            comments = json.loads(match.group(0))
+            if not isinstance(comments, list):
+                return None, "Redline's response wasn't a list of comments -- try again."
+
+            valid_finding_ids = {f["id"] for f in findings}
+            for c in comments:
+                fid = c.get("possible_related_finding_id")
+                if fid not in valid_finding_ids:
+                    c["possible_related_finding_id"] = None
+            return comments, None
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return None, "Couldn't parse Redline's response -- try again."
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        return None, f"Claude error {e.code}: {detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"Connection error: {str(e)}"
+
+
+def call_redline_draft_response(comment_row, review_row, related_finding_row, engineer_notes):
+    """Generate one professional draft response to a single city comment.
+    Returns (draft_text_or_None, error_or_None). This never writes to the
+    database itself -- the caller decides whether/how to store it."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None, "ANTHROPIC_API_KEY is not set."
+
+    finding_context = ""
+    if related_finding_row:
+        finding_context = (
+            f"\nA related Redline finding exists on this project: {related_finding_row['finding']} "
+            f"(sheet {related_finding_row['sheet'] or 'unspecified'}, status: {related_finding_row['status']})."
+        )
+    notes_context = f"\nEngineer's notes to incorporate: {engineer_notes}" if engineer_notes else ""
+
+    system = (
+        "You are Redline, drafting a response to a single city/municipal plan review "
+        "comment. Write the way the project's own engineer would -- professional, "
+        "confident, not defensive, concise, direct. Either explain how the comment "
+        "was addressed, or explain why the item may not be applicable, while making "
+        "clear that determination requires the engineer's own judgment, not just "
+        "your assertion. This is a DRAFT ONLY -- the engineer will review and "
+        "approve or edit it before it's ever sent anywhere. Do not write as if this "
+        "is already an approved final answer.\n\n"
+        f"Project: {review_row['project']} ({review_row['project_type']})"
+        f"{finding_context}{notes_context}"
+    )
+
+    import urllib.request
+    import urllib.error
+    body = json.dumps({
+        "model": "claude-sonnet-4-6", "max_tokens": 500,
+        "system": system,
+        "messages": [{"role": "user", "content": f"City comment: {comment_row['original_comment']}"}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body,
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["content"][0]["text"].strip(), None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        return None, f"Claude error {e.code}: {detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"Connection error: {str(e)}"
+
+
+@app.route("/engineering/<int:review_id>/comments")
+@login_required
+def redline_comments_list(review_id):
+    if not is_engineering_allowed():
+        flash("Ask Ayoub for access to Engineering.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    review = db.execute("SELECT * FROM engineering_plan_reviews WHERE id = ?", (review_id,)).fetchone()
+    if not review:
+        flash("Review not found.", "error")
+        return redirect(url_for("engineering_dashboard"))
+    comments = db.execute(
+        "SELECT * FROM redline_permit_comments WHERE review_id = ? ORDER BY comment_number, id", (review_id,)
+    ).fetchall()
+    # Attach each comment's related finding (if any and if confirmed/suggested) for display.
+    comments_with_findings = []
+    for c in comments:
+        related = None
+        if c["related_finding_id"]:
+            related = db.execute("SELECT * FROM redline_findings WHERE id = ?", (c["related_finding_id"],)).fetchone()
+        comments_with_findings.append({"c": c, "related": related})
+    return render_template("engineering/permit_comments.html", review=review, comments=comments_with_findings)
+
+
+@app.route("/engineering/<int:review_id>/comments/new", methods=["POST"])
+@login_required
+def redline_comments_new(review_id):
+    if not is_engineering_allowed():
+        return {"error": "not authorized"}, 403
+    db = get_db()
+    review = db.execute("SELECT * FROM engineering_plan_reviews WHERE id = ?", (review_id,)).fetchone()
+    if not review:
+        flash("Review not found.", "error")
+        return redirect(url_for("engineering_dashboard"))
+
+    raw_text = request.form.get("raw_comments", "").strip()
+    if not raw_text:
+        flash("Paste the city's comments before submitting.", "error")
+        return redirect(url_for("redline_comments_list", review_id=review_id))
+
+    try:
+        comments, error = call_redline_organize_comments(raw_text, review_id, db)
+    except Exception as e:
+        flash(f"Comment organization failed unexpectedly: {str(e)}", "error")
+        return redirect(url_for("redline_comments_list", review_id=review_id))
+
+    if error:
+        flash(f"Couldn't organize comments: {error}", "error")
+        return redirect(url_for("redline_comments_list", review_id=review_id))
+
+    now = datetime.utcnow().isoformat()
+    created = 0
+    for c in (comments or []):
+        cur = db.execute(
+            """INSERT INTO redline_permit_comments
+               (review_id, comment_number, original_comment, category, related_sheet,
+                related_finding_id, related_finding_confirmed, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,0,?,?,?)""",
+            (review_id, c.get("comment_number"), c.get("original_comment", ""), c.get("category", ""),
+             c.get("related_sheet", ""), c.get("possible_related_finding_id"), "New", now, now)
+        )
+        log_activity("engineering", "redline_permit_comment", cur.lastrowid, "created")
+        created += 1
+    db.commit()
+    flash(f"Organized {created} comment(s) from the city's response.")
+    return redirect(url_for("redline_comments_list", review_id=review_id))
+
+
+@app.route("/engineering/comment/<int:comment_id>", methods=["POST"])
+@login_required
+def redline_comment_action(comment_id):
+    """Single action-dispatch route for everything an engineer can do to
+    one permit comment -- mirrors the exact pattern already proven on
+    Product Intelligence's detail page (an `action` field routes to one
+    of several safe, server-validated operations). AI never approves its
+    own output here; every state change is a deliberate engineer action."""
+    if not is_engineering_allowed():
+        return {"error": "not authorized"}, 403
+    db = get_db()
+    comment = db.execute("SELECT * FROM redline_permit_comments WHERE id = ?", (comment_id,)).fetchone()
+    if not comment:
+        flash("Comment not found.", "error")
+        return redirect(url_for("engineering_dashboard"))
+    review_id = comment["review_id"]
+    action = request.form.get("action")
+    now = datetime.utcnow().isoformat()
+
+    if action == "generate":
+        review = db.execute("SELECT * FROM engineering_plan_reviews WHERE id = ?", (review_id,)).fetchone()
+        related = None
+        if comment["related_finding_id"]:
+            related = db.execute("SELECT * FROM redline_findings WHERE id = ?", (comment["related_finding_id"],)).fetchone()
+        try:
+            draft, error = call_redline_draft_response(comment, review, related, request.form.get("engineer_notes", comment["engineer_notes"] or ""))
+        except Exception as e:
+            flash(f"Draft generation failed unexpectedly: {str(e)}", "error")
+            return redirect(url_for("redline_comments_list", review_id=review_id))
+        if error:
+            flash(f"Couldn't generate a draft: {error}", "error")
+        else:
+            db.execute(
+                "UPDATE redline_permit_comments SET ai_suggested_response = ?, status = ?, updated_at = ? WHERE id = ?",
+                (draft, "AI Drafted" if comment["status"] in ("New", "Reviewing", "AI Drafted") else comment["status"], now, comment_id)
+            )
+            log_activity("engineering", "redline_permit_comment", comment_id, "ai_response_generated")
+            db.commit()
+            flash("Draft response generated -- review before approving.")
+
+    elif action == "save_edit":
+        # Saving an edit never auto-approves anything -- same separation
+        # already used for Redline findings and Product Intelligence's
+        # "save details never changes status."
+        db.execute(
+            "UPDATE redline_permit_comments SET engineer_edited_response = ?, engineer_notes = ?, "
+            "status = ?, updated_at = ? WHERE id = ?",
+            (request.form.get("engineer_edited_response", ""), request.form.get("engineer_notes", ""),
+             "Engineer Review" if comment["status"] in ("New", "Reviewing", "AI Drafted") else comment["status"],
+             now, comment_id)
+        )
+        db.commit()
+        flash("Response saved.")
+
+    elif action == "approve":
+        final_text = request.form.get("engineer_edited_response", "").strip() or comment["ai_suggested_response"]
+        if not final_text:
+            flash("There's no response text to approve yet.", "error")
+        else:
+            db.execute(
+                "UPDATE redline_permit_comments SET final_approved_response = ?, engineer_edited_response = ?, "
+                "status = 'Approved', updated_at = ? WHERE id = ?",
+                (final_text, final_text, now, comment_id)
+            )
+            log_activity("engineering", "redline_permit_comment", comment_id, "approved")
+            db.commit()
+            flash("Response approved.")
+
+    elif action == "mark_addressed":
+        if comment["status"] != "Approved":
+            flash("Approve the response before marking it addressed.", "error")
+        else:
+            db.execute("UPDATE redline_permit_comments SET status = 'Addressed', updated_at = ? WHERE id = ?", (now, comment_id))
+            log_activity("engineering", "redline_permit_comment", comment_id, "marked_addressed")
+            db.commit()
+            flash("Marked addressed.")
+
+    elif action in ("reopen", "not_applicable", "needs_more_info"):
+        new_status = {"reopen": "Reopened", "not_applicable": "Not Applicable", "needs_more_info": "Needs More Information"}[action]
+        db.execute("UPDATE redline_permit_comments SET status = ?, updated_at = ? WHERE id = ?", (new_status, now, comment_id))
+        log_activity("engineering", "redline_permit_comment", comment_id, "status_changed",
+                     field="status", old_value=comment["status"], new_value=new_status)
+        db.commit()
+        flash(f"Marked {new_status}.")
+
+    elif action == "confirm_related_finding":
+        db.execute("UPDATE redline_permit_comments SET related_finding_confirmed = 1, updated_at = ? WHERE id = ?", (now, comment_id))
+        db.commit()
+        flash("Related finding confirmed.")
+
+    elif action == "reject_related_finding":
+        db.execute(
+            "UPDATE redline_permit_comments SET related_finding_id = NULL, related_finding_confirmed = 0, updated_at = ? WHERE id = ?",
+            (now, comment_id)
+        )
+        db.commit()
+        flash("Related finding removed.")
+
+    else:
+        flash("Unknown action.", "error")
+
+    return redirect(url_for("redline_comments_list", review_id=review_id))
 
 
 REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]

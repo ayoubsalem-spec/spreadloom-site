@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "engineering/_styles.html" %}
+
+<span class="rl-eyebrow">Redline &middot; {{ review['project'] }}</span>
+<h1>Permit Comments</h1>
+<p class="sub" style="margin-bottom:24px;">Turn city review comments into tracked, traceable responses. Every AI draft needs your approval before it's final.</p>
+
+<div class="card">
+    <form method="POST" action="{{ url_for('redline_comments_new', review_id=review['id']) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label style="margin-top:0;">Paste the city's comments</label>
+        <textarea name="raw_comments" rows="5" required placeholder="1. Revise ADA parking.&#10;2. Provide drainage calculations.&#10;3. Clarify driveway access."></textarea>
+        <button type="submit" class="btn btn-gold" style="margin-top:14px;">Organize Comments</button>
+        <p class="sub" style="margin-top:8px; font-size:12px;">Redline will split this into individual tracked items and check for related findings on this review.</p>
+    </form>
+</div>
+
+{% if comments %}
+<p class="rl-section-title" style="margin-top:32px;">Comments <span class="dim">{{ comments|length }} total</span></p>
+
+{% for item in comments %}
+{% set c = item.c %}
+<div class="rl-comment-card">
+    <div style="display:flex; justify-content:space-between; align-items:start; gap:12px;">
+        <span class="rl-comment-num">Comment {{ c['comment_number'] or '#' + c['id']|string }}{% if c['category'] %} &middot; {{ c['category'] }}{% endif %}</span>
+        {% if c['status'] == 'New' %}<span class="rl-badge new">New</span>
+        {% elif c['status'] == 'Approved' %}<span class="rl-badge approved">Approved</span>
+        {% elif c['status'] == 'Addressed' %}<span class="rl-badge addressed">Addressed</span>
+        {% elif c['status'] in ('Not Applicable', 'Needs More Information') %}<span class="rl-badge stalled">{{ c['status'] }}</span>
+        {% elif c['status'] == 'Reopened' %}<span class="rl-badge attention">Reopened</span>
+        {% else %}<span class="rl-badge progress">{{ c['status'] }}</span>{% endif %}
+    </div>
+
+    <div class="rl-comment-flow">
+        <div class="rl-flow-block city">
+            <span class="rl-flow-label">City Comment</span>
+            {{ c['original_comment'] }}
+        </div>
+
+        {% if item.related %}
+        <div class="rl-flow-block finding">
+            <span class="rl-flow-label">Related Finding {% if not c['related_finding_confirmed'] %}(possible &mdash; unconfirmed){% endif %}</span>
+            RL-{{ item.related['id'] }} &middot; {{ item.related['finding'] }}{% if item.related['sheet'] %} &middot; Sheet {{ item.related['sheet'] }}{% endif %}
+            <div style="margin-top:8px;">
+                {% if not c['related_finding_confirmed'] %}
+                <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="action" value="confirm_related_finding">
+                    <button type="submit" class="btn" style="padding:4px 10px; font-size:11px;">Confirm Relationship</button>
+                </form>
+                <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="action" value="reject_related_finding">
+                    <button type="submit" class="btn" style="padding:4px 10px; font-size:11px;">Not Related</button>
+                </form>
+                {% else %}
+                <span class="rl-badge approved" style="font-size:9px;">Confirmed</span>
+                {% endif %}
+            </div>
+        </div>
+        {% elif c['related_sheet'] %}
+        <div class="rl-flow-block finding">
+            <span class="rl-flow-label">Sheet Reference</span>
+            {{ c['related_sheet'] }}
+        </div>
+        {% endif %}
+
+        {% if c['ai_suggested_response'] %}
+        <div class="rl-flow-block ai">
+            <span class="rl-ai-tag">AI DRAFT &mdash; ENGINEER REVIEW REQUIRED</span>
+            <span class="rl-flow-label">AI Suggested Response</span>
+            {{ c['ai_suggested_response'] }}
+        </div>
+        {% endif %}
+
+        <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <label style="margin-top:0;">Your Response {% if c['status'] not in ('Approved', 'Addressed') %}(edit before approving){% endif %}</label>
+            <textarea name="engineer_edited_response" rows="3" {{ 'readonly' if c['status'] in ('Approved', 'Addressed') }}>{{ c['engineer_edited_response'] or c['ai_suggested_response'] or '' }}</textarea>
+            <label>Notes</label>
+            <input type="text" name="engineer_notes" value="{{ c['engineer_notes'] or '' }}" placeholder="Optional -- context for regenerating or for your own record">
+
+            {% if c['status'] not in ('Approved', 'Addressed') %}
+            <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;">
+                <button type="submit" name="action" value="save_edit" class="btn">Save</button>
+                <button type="submit" name="action" value="generate" class="btn">{{ 'Regenerate' if c['ai_suggested_response'] else 'Generate AI Response' }}</button>
+                <button type="submit" name="action" value="approve" class="btn btn-gold">Approve</button>
+            </div>
+            {% endif %}
+        </form>
+
+        {% if c['status'] == 'Approved' %}
+        <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}" style="margin-top:4px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="mark_addressed">
+            <button type="submit" class="btn btn-gold">Mark Addressed (submitted to city)</button>
+        </form>
+        {% endif %}
+
+        {% if c['status'] not in ('Not Applicable', 'Needs More Information', 'Addressed') %}
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="needs_more_info">
+                <button type="submit" class="btn" style="font-size:12px;">Needs More Information</button>
+            </form>
+            <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="not_applicable">
+                <button type="submit" class="btn" style="font-size:12px;">Not Applicable</button>
+            </form>
+        </div>
+        {% elif c['status'] in ('Not Applicable', 'Needs More Information', 'Addressed') %}
+        <form method="POST" action="{{ url_for('redline_comment_action', comment_id=c['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="reopen">
+            <button type="submit" class="btn" style="font-size:12px;">Reopen</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endfor %}
+{% endif %}
+
+<a href="{{ url_for('engineering_view_review', review_id=review['id']) }}" class="btn" style="margin-top:10px; display:inline-block;">&larr; Back to Review</a>
+{% endblock %}
