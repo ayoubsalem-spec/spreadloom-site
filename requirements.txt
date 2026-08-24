@@ -5,3 +5,4 @@ werkzeug
 requests
 openpyxl
 markdown
+reportlab

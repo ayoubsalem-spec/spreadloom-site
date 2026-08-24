@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Users &amp; Departments</h1>
+<p class="sub" style="margin-bottom:24px;">Department is set here only -- employees never edit their own. Every request snapshots whatever's set here at the moment they submit.</p>
+
+<table>
+    <tr>
+        <th>Name</th>
+        <th>Email</th>
+        <th>Department</th>
+        <th></th>
+    </tr>
+    {% for u in users %}
+    <tr>
+        <td>{{ u['name'] or '\u2014' }}</td>
+        <td>{{ u['email'] }}</td>
+        <td colspan="2">
+            <form method="POST" style="display:flex; gap:8px; align-items:center;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="user_id" value="{{ u['id'] }}">
+                <input type="text" name="department" value="{{ u['department'] or '' }}" placeholder="e.g. Procurement, Engineering, Field" style="flex:1;">
+                <button type="submit" class="btn">Save</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endblock %}

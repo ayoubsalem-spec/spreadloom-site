@@ -13,7 +13,7 @@
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Concrete Details</h3>
         <div class="form-row">
             <div style="flex:1;"><label>Date of Pour</label><input type="date" name="pour_date" value="{{ r['pour_date'] }}" required></div>
-            <div style="flex:1;"><label>Time of Pour</label><input type="time" name="pour_time" value="{{ r['pour_time'] or '' }}"></div>
+            <div style="flex:1;"><label>Time of Pour</label><input type="time" name="pour_time" id="pour_time" value="{{ r['pour_time'] or '' }}"></div>
         </div>
         <div class="form-row">
             <div style="flex:1;"><label>Mix Design (PSI)</label><input type="text" name="mix_design_psi" value="{{ r['mix_design_psi'] or '' }}"></div>
@@ -24,37 +24,78 @@
             <div style="flex:1;"><label>Spacing Between Trucks</label><input type="text" name="truck_spacing" value="{{ r['truck_spacing'] or '' }}"></div>
         </div>
         <div class="form-row">
-            <div style="flex:1;"><label>Pump Size (if required)</label><input type="text" name="pump_size" value="{{ r['pump_size'] or '' }}"></div>
-            <div style="flex:1;"><label>Pump Arrival Time</label><input type="text" name="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
+            <div style="flex:1;">
+                <label>Pump Type</label>
+                <select name="pump_type" id="pump_type">
+                    <option value="" {{ 'selected' if not r['pump_type'] }}>None</option>
+                    <option value="Ground Pump" {{ 'selected' if r['pump_type'] == 'Ground Pump' }}>Ground Pump</option>
+                    <option value="Overhead Pump" {{ 'selected' if r['pump_type'] == 'Overhead Pump' }}>Overhead Pump</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>Pump Size</label><input type="text" name="pump_size" id="pump_size" value="{{ r['pump_size'] or '' }}"></div>
+            <div style="flex:1;"><label>Pump Arrival Time</label><input type="time" name="pump_arrival_time" id="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
         </div>
         <div class="form-row">
             <div style="flex:1;"><label>Lab (same time with Concrete)</label>
-                <select name="lab_required">
+                <select name="lab_required" id="lab_required">
                     <option value="No" {{ 'selected' if r['lab_required'] != 'Yes' }}>No</option>
                     <option value="Yes" {{ 'selected' if r['lab_required'] == 'Yes' }}>Yes</option>
                 </select>
             </div>
-            <div style="flex:1;"><label>If yes, Time</label><input type="time" name="lab_time" value="{{ r['lab_time'] or '' }}"></div>
+            <div style="flex:1;" id="lab_time_wrap"><label>Time</label><input type="time" name="lab_time" id="lab_time" value="{{ r['lab_time'] or '' }}"></div>
         </div>
         <div class="form-row">
             <div style="flex:1;"><label>Drilling Company (if required)</label>
-                <select name="drilling_required">
+                <select name="drilling_required" id="drilling_required">
                     <option value="No" {{ 'selected' if r['drilling_required'] != 'Yes' }}>No</option>
                     <option value="Yes" {{ 'selected' if r['drilling_required'] == 'Yes' }}>Yes</option>
                 </select>
             </div>
-            <div style="flex:1;"><label>If yes, Time</label><input type="time" name="drilling_time" value="{{ r['drilling_time'] or '' }}"></div>
+            <div style="flex:1;" id="drilling_time_wrap"><label>Time</label><input type="time" name="drilling_time" id="drilling_time" value="{{ r['drilling_time'] or '' }}"></div>
         </div>
-
+        <style>
+            #lab_time_wrap, #drilling_time_wrap { display: none; }
+            #lab_time_wrap.show, #drilling_time_wrap.show { display: block; }
+        </style>
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Requested By</h3>
         <p class="sub" style="margin-bottom:14px;">{{ r['requested_by'] or '\u2014' }} (original requester &mdash; unchanged on edit)</p>
 
-        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ordered By</h3>
-        <div class="form-row">
-            <div style="flex:1;"><label>Name</label><input type="text" name="ordered_by" value="{{ r['ordered_by'] or '' }}"></div>
-            <div style="flex:1;"><label>Date</label><input type="date" name="ordered_date" value="{{ r['ordered_date'] or '' }}"></div>
-        </div>
         <button type="submit" class="btn btn-gold" style="margin-top:16px;">Save Changes</button>
     </form>
 </div>
+<script>
+    (function () {
+        function minusOneHour(hhmm) {
+            var parts = hhmm.split(':');
+            var d = new Date(2000, 0, 1, parseInt(parts[0], 10), parseInt(parts[1], 10));
+            d.setHours(d.getHours() - 1);
+            return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+        }
+        var pourTime = document.getElementById('pour_time');
+        var pumpArrival = document.getElementById('pump_arrival_time');
+        var drillingTime = document.getElementById('drilling_time');
+        var labTime = document.getElementById('lab_time');
+        if (!pourTime) return;
+        pourTime.addEventListener('change', function () {
+            if (!pourTime.value) return;
+            if (pumpArrival && !pumpArrival.value) pumpArrival.value = minusOneHour(pourTime.value);
+            if (drillingTime && !drillingTime.value) drillingTime.value = minusOneHour(pourTime.value);
+            if (labTime && !labTime.value) labTime.value = pourTime.value;
+        });
+    })();
+
+    // Show the Time field only when its Lab / Drilling select is "Yes".
+    (function () {
+        function wireToggle(selectId, wrapId) {
+            var select = document.getElementById(selectId);
+            var wrap = document.getElementById(wrapId);
+            if (!select || !wrap) return;
+            function sync() { wrap.classList.toggle('show', select.value === 'Yes'); }
+            select.addEventListener('change', sync);
+            sync();
+        }
+        wireToggle('lab_required', 'lab_time_wrap');
+        wireToggle('drilling_required', 'drilling_time_wrap');
+    })();
+</script>
 {% endblock %}

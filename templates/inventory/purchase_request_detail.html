@@ -3,7 +3,7 @@
 <div class="section-row">
     <div>
         <h1>{{ r['job_name'] or 'Purchase Request' }}</h1>
-        <p class="sub">PR# {{ r['pr_number'] or '\u2014' }} &middot; Submitted {{ r['created_at'][:16].replace('T',' ') }}</p>
+        <p class="sub">PR# {{ r['pr_number'] or '\u2014' }} &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
     </div>
     <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
 </div>
@@ -14,7 +14,7 @@
         <tr><td class="sub" style="width:220px;">Job Name</td><td>{{ r['job_name'] or '\u2014' }}</td></tr>
         <tr><td class="sub">Location / Description of Use</td><td>{{ r['location_description'] or '\u2014' }}</td></tr>
         <tr><td class="sub">Requested By</td><td>{{ r['requested_by'] or '\u2014' }}</td></tr>
-        <tr><td class="sub">Needed On</td><td>{{ r['needed_on'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Needed On</td><td>{{ r['needed_on']|friendly_date if r['needed_on'] else '\u2014' }}</td></tr>
         <tr><td class="sub">Source of Supply</td><td>{{ r['source_of_supply'] or '\u2014' }}</td></tr>
     </table>
 </div>
@@ -44,7 +44,7 @@
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Requestor</h3>
     <table>
-        <tr><td class="sub">Date</td><td>{{ r['requestor_date'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Date</td><td>{{ r['requestor_date']|friendly_date if r['requestor_date'] else '\u2014' }}</td></tr>
     </table>
 </div>
 
@@ -52,7 +52,7 @@
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Details</h3>
     <table>
-        <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date'] }}{% endif %}</td></tr>
+        <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date']|friendly_date }}{% endif %}</td></tr>
         {% if r['vendor_company'] %}<tr><td class="sub">Vendor</td><td>{{ r['vendor_company'] }}{% if r['vendor_company_phone'] %} &middot; {{ r['vendor_company_phone'] }}{% endif %}</td></tr>{% endif %}
     </table>
     {% if is_procurement %}

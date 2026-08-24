@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ r['project'] }}</h1>
+<p class="sub" style="margin-bottom:20px;">{{ r['project_type'] }} &middot; Reviewed {{ r['created_at']|friendly_short_dt }} &middot; by {{ r['requested_by'] }}</p>
+
+{% if r['status'] != 'Complete' %}
+<div style="background:rgba(232,136,136,0.1); border:1px solid #E88; border-radius:10px; padding:20px; color:#E88;">
+    This review failed to generate. Try uploading again, or check that the Anthropic API key is configured.
+</div>
+{% elif not findings %}
+<div style="background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px;">
+    No findings on this plan set -- Redline checked everything and came back clean.
+</div>
+{% else %}
+<div style="display:flex; gap:16px; margin-bottom:24px; flex-wrap:wrap;">
+    {% for sev, color, icon in [('Critical','#E88','&#128308;'), ('Permit Risk','#E8A','&#128992;'), ('Warning','#E8C766','&#128993;'), ('Coordination','#7FC7E8','&#128309;'), ('Missing Information','#9AA5B8','&#9898;')] %}
+    {% if counts.get(sev) %}
+    <div style="background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 16px;">
+        <span style="color:{{ color }}; font-weight:700;">{{ icon|safe }} {{ counts.get(sev) }}</span>
+        <span class="sub" style="margin-left:6px;">{{ sev }}</span>
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
+
+{% for f in findings %}
+<div style="background:var(--card); border:1px solid var(--border); border-left:3px solid {% if f['severity'] == 'Critical' %}#E88{% elif f['severity'] == 'Permit Risk' %}#E8A{% elif f['severity'] == 'Warning' %}#E8C766{% elif f['severity'] == 'Coordination' %}#7FC7E8{% else %}#9AA5B8{% endif %}; border-radius:8px; padding:18px 20px; margin-bottom:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:8px;">
+        <div>
+            <span class="sub">{{ f['severity'] }}{% if f['category'] %} &middot; {{ f['category'] }}{% endif %}{% if f['sheet'] %} &middot; Sheet {{ f['sheet'] }}{% endif %}</span>
+            <p style="margin:4px 0 0; font-weight:600;">{{ f['finding'] }}</p>
+        </div>
+        <span class="{{ 'status-awarded' if f['status'] == 'Confirmed' else 'status-submitted' if f['status'] == 'Dismissed' else 'status-pending' }}">{{ f['status'] }}</span>
+    </div>
+    {% if f['why'] %}<p class="sub" style="margin:8px 0 0;"><strong>Why:</strong> {{ f['why'] }}</p>{% endif %}
+    {% if f['evidence'] %}<p class="sub" style="margin:6px 0 0;"><strong>Evidence:</strong> {{ f['evidence'] }}</p>{% endif %}
+    {% if f['recommended_review'] %}<p class="sub" style="margin:6px 0 0;"><strong>Recommended review:</strong> {{ f['recommended_review'] }}</p>{% endif %}
+    {% if f['engineer_notes'] %}<p class="sub" style="margin:6px 0 0;"><strong>Engineer note:</strong> {{ f['engineer_notes'] }}</p>{% endif %}
+
+    <form method="POST" action="{{ url_for('redline_finding_status', finding_id=f['id']) }}" style="margin-top:12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="engineer_notes" placeholder="Reason (optional)" value="{{ f['engineer_notes'] or '' }}" style="flex:1; min-width:180px;">
+        <button type="submit" name="status" value="Confirmed" class="btn" style="background:rgba(94,234,212,0.12); border-color:var(--teal);">Confirm</button>
+        <button type="submit" name="status" value="Dismissed" class="btn">Dismiss</button>
+        {% if f['status'] != 'Needs Review' %}
+        <button type="submit" name="status" value="Needs Review" class="btn">Reopen</button>
+        {% endif %}
+    </form>
+</div>
+{% endfor %}
+{% endif %}
+
+<a href="{{ url_for('engineering_dashboard') }}" class="btn" style="margin-top:10px; display:inline-block;">&larr; Back to Redline</a>
+{% endblock %}

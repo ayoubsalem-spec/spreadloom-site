@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>New Plan Review</h1>
+<p class="sub" style="margin-bottom:20px;">Upload a civil/site plan set (PDF) and get it reviewed against city-reviewer criteria before it goes out.</p>
+
+<form method="POST" enctype="multipart/form-data" style="max-width:640px;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Project</label>
+    <input type="text" name="project" required autofocus>
+
+    <label style="margin-top:14px; display:block;">Project Type</label>
+    <select name="project_type" required>
+        <option value="" disabled selected>Select...</option>
+        {% for t in project_types %}
+        <option value="{{ t }}">{{ t }}</option>
+        {% endfor %}
+    </select>
+
+    <label style="margin-top:14px; display:block;">Jurisdiction (optional)</label>
+    <input type="text" name="jurisdiction" placeholder="e.g. Houston, Harris County, Fort Bend County">
+
+    <label style="margin-top:14px; display:block;">Plan Set (PDF)</label>
+    <input type="file" name="plan_pdf" accept="application/pdf" required>
+
+    <button type="submit" class="btn btn-gold" style="margin-top:20px;">Review Plan Set</button>
+    <p class="sub" style="margin-top:10px;">This can take a minute or two for a full drawing set -- don't navigate away while it's running.</p>
+</form>
+{% endblock %}

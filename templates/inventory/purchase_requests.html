@@ -15,8 +15,8 @@
         <tr>
             <td><strong>{{ r['pr_number'] or '\u2014' }}</strong></td>
             <td>{{ r['job_name'] or '\u2014' }}</td>
-            <td>{{ r['request_date'] }}</td>
-            <td>{{ r['needed_on'] or '\u2014' }}</td>
+            <td>{{ r['request_date']|friendly_date }}</td>
+            <td>{{ r['needed_on']|friendly_date if r['needed_on'] else '\u2014' }}</td>
             <td><span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span></td>
             <td><a href="{{ url_for('inventory_view_purchase', request_id=r['id']) }}" class="btn btn-sm">Open</a></td>
         </tr>

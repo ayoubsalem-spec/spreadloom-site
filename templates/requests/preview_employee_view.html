@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "requests/_styles.html" %}
+
+<div style="background:rgba(201,162,75,0.12); border:1px solid var(--brass); border-radius:6px; padding:10px 16px; margin-bottom:24px; text-align:center; font-family:'IBM Plex Mono',monospace; font-weight:700; letter-spacing:1.5px; color:var(--brass); font-size:12px;">
+    PREVIEW &mdash; EMPLOYEE VIEW{% if preview_email %} ({{ preview_email }}){% endif %}
+</div>
+
+<div class="card" style="margin-bottom:28px;">
+    <label style="margin-top:0;">Preview as</label>
+    <select name="email" onchange="window.location='{{ url_for('product_intelligence_preview') }}?email=' + this.value" style="max-width:320px;">
+        <option value="">Select a user...</option>
+        {% for u in all_users %}
+        <option value="{{ u['email'] }}" {{ 'selected' if preview_email == u['email'] }}>{{ u['name'] or u['email'] }}</option>
+        {% endfor %}
+    </select>
+</div>
+
+{% if preview_email %}
+<div class="rc-hero">
+    <span class="rc-eyebrow">Request Center</span>
+    <h1>Your ideas shape BuildIQ</h1>
+    <p class="sub">This is exactly what {{ preview_email }} sees -- same query, same permission filtering as the real employee view. No Product Intelligence link, no other employee's requests, no internal fields.</p>
+</div>
+{% include "requests/_request_list.html" %}
+{% else %}
+<p class="sub">Pick a user above to preview their Request Center.</p>
+{% endif %}
+
+<a href="{{ url_for('product_intelligence') }}" class="btn" style="margin-top:24px; display:inline-block;">&larr; Back to Product Intelligence</a>
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "requests/_styles.html" %}
+
+<div class="rc-hero">
+    <span class="rc-eyebrow">Request Center</span>
+    <h1>Your ideas shape BuildIQ</h1>
+    <p class="sub">Tell us what you need. Every request gets a real answer -- and if we build it, you'll see it land here.</p>
+</div>
+
+<div class="rc-submit">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label style="margin-top:0;">What do you need?</label>
+        <textarea name="original_request" required placeholder="Describe what you need..."></textarea>
+        <div class="rc-submit-foot">
+            <span class="rc-submit-hint">We review every request personally</span>
+            <button type="submit" class="btn btn-gold">Submit Request</button>
+        </div>
+    </form>
+</div>
+
+{% include "requests/_request_list.html" %}
+{% endblock %}

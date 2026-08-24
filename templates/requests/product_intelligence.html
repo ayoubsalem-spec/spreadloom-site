@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "requests/_styles.html" %}
+
+<div class="rc-hero" style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:16px; margin-bottom:28px;">
+    <div>
+        <span class="rc-eyebrow">Product Intelligence</span>
+        <h1>Command Center</h1>
+        <p class="sub">Every request, its full history, and where BuildIQ is actually spending its build time.</p>
+    </div>
+    <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
+</div>
+
+<div class="kpi-grid" style="grid-template-columns:repeat(6,1fr);">
+    <div class="kpi-card"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Released</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></div>
+</div>
+
+{% if pipeline %}
+<div class="pi-section">
+    <p class="pi-section-title">Request Pipeline <span class="dim">where everything sits right now</span></p>
+    <div class="pi-pipeline">
+        {% for seg in pipeline %}
+        <div class="pi-pipeline-seg" style="width:{{ seg.pct }}%; background:{{ seg.color }};" title="{{ seg.status }}: {{ seg.count }}">{{ seg.count if seg.pct >= 6 }}</div>
+        {% endfor %}
+    </div>
+    <div class="pi-pipeline-legend">
+        {% for seg in pipeline %}
+        <div class="pi-pipeline-legend-item"><span class="pi-pipeline-legend-swatch" style="background:{{ seg.color }};"></span>{{ seg.status }} ({{ seg.count }})</div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<div class="pi-two-col">
+    {% if dept_breakdown %}
+    <div class="pi-section">
+        <p class="pi-section-title">By Department</p>
+        {% for d in dept_breakdown %}
+        <div class="pi-bar-row">
+            <div class="pi-bar-label">{{ d.label }}</div>
+            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ d.pct }}%;"></div></div>
+            <div class="pi-bar-count">{{ d.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if module_breakdown %}
+    <div class="pi-section">
+        <p class="pi-section-title">By BuildIQ Module <span class="dim">from released/tagged requests</span></p>
+        {% for m in module_breakdown %}
+        <div class="pi-bar-row">
+            <div class="pi-bar-label">{{ m.label }}</div>
+            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ m.pct }}%;"></div></div>
+            <div class="pi-bar-count">{{ m.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+{% if recently_released %}
+<div class="pi-section">
+    <p class="pi-section-title">Recently Released</p>
+    <div class="pi-shipped-strip">
+        {% for r in recently_released %}
+        <div class="pi-shipped-card">
+            <div class="req">{{ r['original_request'] }}</div>
+            {% if r['release_note'] %}<div class="note">{{ r['release_note'] }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if recent_activity %}
+<div class="pi-section">
+    <p class="pi-section-title">Recent Activity</p>
+    <div class="card" style="padding:6px 22px;">
+        {% for a in recent_activity %}
+        <div class="pi-feed-item">
+            <span style="color:var(--brass);">{{ a['status'] }}</span> &mdash; {{ a['original_request'][:70] }}{% if a['original_request']|length > 70 %}...{% endif %}
+            <div class="pi-feed-meta">{{ a['changed_at']|friendly_short_dt }}{% if a['changed_by'] %} &middot; {{ a['changed_by'] }}{% endif %}</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<div class="pi-section">
+    <p class="pi-section-title">All Requests</p>
+    <form method="GET" style="display:flex; gap:10px; margin-bottom:16px;">
+        <select name="status" onchange="this.form.submit()">
+            <option value="">All statuses</option>
+            {% for s in statuses %}
+            <option value="{{ s }}" {{ 'selected' if status_filter == s }}>{{ s }}</option>
+            {% endfor %}
+        </select>
+        <select name="department" onchange="this.form.submit()">
+            <option value="">All departments</option>
+            {% for d in departments %}
+            <option value="{{ d }}" {{ 'selected' if department_filter == d }}>{{ d }}</option>
+            {% endfor %}
+        </select>
+    </form>
+
+    {% if requests %}
+    <table>
+        <tr>
+            <th>Requester</th>
+            <th>Department</th>
+            <th>Request</th>
+            <th>Status</th>
+            <th>Submitted</th>
+        </tr>
+        {% for r in requests %}
+        <tr onclick="window.location='{{ url_for('product_intelligence_detail', request_id=r['id']) }}'" style="cursor:pointer;">
+            <td>{{ r['requester_name'] or r['requester_email'] }}</td>
+            <td>{{ r['department'] or '\u2014' }}</td>
+            <td style="max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r['original_request'] }}</td>
+            <td>
+                {% if r['status'] == 'Released' %}<span class="rc-badge b-released">Released</span>
+                {% elif r['status'] in ('On Hold', 'Not Planned') %}<span class="rc-badge b-stalled">{{ r['status'] }}</span>
+                {% elif r['status'] == 'Submitted' %}<span class="rc-badge b-submitted">Submitted</span>
+                {% else %}<span class="rc-badge b-progress">{{ r['status'] }}</span>{% endif %}
+            </td>
+            <td>{{ r['created_at']|friendly_short_dt }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p class="sub">No requests match this filter.</p>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,72 @@
+{% set pipeline_steps = ['Submitted', 'Reviewing', 'Approved', 'Building', 'Testing', 'Released'] %}
+
+{% if not requests_with_history %}
+<div class="rc-submit" style="text-align:center; padding:44px 28px;">
+    <p class="sub" style="font-size:14.5px;">No requests yet -- whatever you ask for shows up here, tracked from the moment you submit it to the day it ships.</p>
+</div>
+{% endif %}
+
+{% set has_active = requests_with_history|map(attribute='r.status')|reject('equalto', 'Released')|list %}
+{% if has_active %}
+<p class="rc-section-label">In Progress <span class="count">{{ has_active|length }}</span></p>
+{% for item in requests_with_history %}
+{% set r = item.r %}
+{% if r['status'] != 'Released' %}
+<div class="req-card">
+    <div class="req-card-top">
+        <p class="req-card-text">{{ r['original_request'] }}</p>
+        {% if r['status'] == 'On Hold' %}
+        <span class="rc-badge b-stalled">On Hold</span>
+        {% elif r['status'] == 'Not Planned' %}
+        <span class="rc-badge b-stalled">Not Planned</span>
+        {% elif r['status'] == 'Submitted' %}
+        <span class="rc-badge b-submitted">Submitted</span>
+        {% else %}
+        <span class="rc-badge b-progress">{{ r['status'] }}</span>
+        {% endif %}
+    </div>
+    <p class="req-card-meta">Submitted {{ r['created_at']|friendly_short_dt }}</p>
+
+    {% if r['status'] in ('On Hold', 'Not Planned') %}
+    <div class="req-offpath">
+        {% if r['status'] == 'On Hold' %}This one's on hold for now -- it'll pick back up when it's ready.{% else %}Not currently planned, but every request helps shape what gets built next.{% endif %}
+    </div>
+    {% else %}
+    <div class="req-timeline">
+        {% for step in pipeline_steps %}
+        {% set reached = item.history|selectattr('status', 'equalto', step)|list %}
+        {% set is_current = r['status'] == step %}
+        <div class="step">
+            <div class="connector {{ 'done' if reached else '' }}"></div>
+            <div class="dot {{ 'done' if reached and not is_current else 'current' if is_current else '' }}"></div>
+            <div class="step-label {{ 'done' if reached and not is_current else 'current' if is_current else '' }}">{{ step }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+{% endfor %}
+{% endif %}
+
+{% set has_released = requests_with_history|map(attribute='r.status')|select('equalto', 'Released')|list %}
+{% if has_released %}
+<p class="rc-section-label" style="margin-top:8px;">Shipped <span class="count">{{ has_released|length }}</span></p>
+{% for item in requests_with_history %}
+{% set r = item.r %}
+{% if r['status'] == 'Released' %}
+{% set release_row = item.history|selectattr('status', 'equalto', 'Released')|list %}
+<div class="req-released">
+    <span class="req-released-badge">&#10003; Shipped</span>
+    <p class="req-released-text">{{ r['original_request'] }}</p>
+    <p class="req-card-meta">Submitted {{ r['created_at']|friendly_short_dt }}</p>
+    {% if release_row and release_row[0]['release_note'] %}
+    <div class="req-released-note">
+        <strong>Now in BuildIQ</strong>
+        {{ release_row[0]['release_note'] }}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+{% endfor %}
+{% endif %}

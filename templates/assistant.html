@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% block content %}
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<div style="max-width:640px; margin:0 auto; text-align:center; padding-top:40px;">
+    <h1 style="margin-bottom:4px;">Atlas</h1>
+    <p class="sub" style="margin-bottom:36px;">Hold the button, ask a question, let go.</p>
+
+    <button id="talk-btn" style="
+        width:180px; height:180px; border-radius:50%; border:none;
+        background: radial-gradient(circle at 35% 30%, #E8C766, #B8860B);
+        color:#0B1220; font-weight:700; font-size:16px; cursor:pointer;
+        box-shadow: 0 0 0 0 rgba(212,165,55,0.5); transition: box-shadow 0.2s;
+        -webkit-user-select:none; user-select:none;
+    ">HOLD TO ASK</button>
+
+    <p id="status-line" class="sub" style="margin-top:24px; min-height:20px;"></p>
+
+    <div id="transcript-box" style="
+        display:none; margin-top:20px; text-align:left; background:var(--card, #141F35);
+        border:1px solid var(--border, #263047); border-radius:10px; padding:18px 20px;
+    ">
+        <p class="sub" style="margin:0 0 6px;">YOU ASKED</p>
+        <p id="question-text" style="margin:0 0 16px; color:var(--text, #E8ECF4);"></p>
+        <p class="sub" style="margin:0 0 6px;">ANSWER</p>
+        <p id="answer-text" style="margin:0; color:var(--text, #E8ECF4);"></p>
+        <button id="replay-btn" style="display:none; margin-top:10px; background:none; border:1px solid var(--border, #263047); color:var(--gold, #D4A537); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px;">
+            🔊 Replay
+        </button>
+        <p id="audio-error" style="display:none; margin-top:8px; color:#E88; font-size:12px;"></p>
+        <p id="submitted-badge" style="display:none; margin:14px 0 0; padding:8px 12px; background:rgba(94,234,212,0.12); border:1px solid var(--teal, #5EEAD4); border-radius:6px; color:var(--teal, #5EEAD4); font-size:13px;">
+            ✓ Concrete request submitted
+        </p>
+    </div>
+
+    <button id="reset-btn" style="display:none; margin-top:16px; background:none; border:1px solid var(--border, #263047); color:var(--sub, #9AA5B8); padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px;">
+        Start Over
+    </button>
+
+    <p class="sub" style="margin-top:30px; font-size:12px;">
+        Uses your browser's free built-in voice recognition when available. On devices where that's not supported (like iPhone), needs a transcription service configured on the server.
+    </p>
+</div>
+
+<script>
+(function () {
+    var btn = document.getElementById('talk-btn');
+    var statusLine = document.getElementById('status-line');
+    var transcriptBox = document.getElementById('transcript-box');
+    var questionText = document.getElementById('question-text');
+    var answerText = document.getElementById('answer-text');
+    var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    // iOS Safari (and every browser on iPhone, since they all use Apple's
+    // engine underneath) exposes the SpeechRecognition object but doesn't
+    // reliably return results from it -- it just hangs on "Listening..."
+    // forever. Feature-detection alone isn't enough; force the recording
+    // fallback on iOS regardless of whether the object exists.
+    var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var recognition = null;
+    if (SpeechRecognition && !isIOS) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+    }
+
+    var hasRecorder = navigator.mediaDevices && window.MediaRecorder;
+    if (!recognition && !hasRecorder) {
+        statusLine.textContent = "Your browser doesn't support voice input -- try Chrome or Safari, latest version.";
+        btn.disabled = true;
+        btn.style.opacity = 0.4;
+        return;
+    }
+
+    var mediaRecorder = null;
+    var audioChunks = [];
+    var listening = false;
+
+    function setStatus(text) { statusLine.textContent = text; }
+
+    function unlockSpeechIfNeeded() {
+        // iOS Safari blocks speechSynthesis.speak() unless it's called
+        // directly inside a user gesture -- an async speak() call after
+        // a fetch() response comes back doesn't count, and fails silently
+        // with no error at all. Speaking one silent utterance here, inside
+        // an actual button press/release, unlocks it for that moment.
+        // Not gated to "once" -- requesting the microphone for recording
+        // appears to reset this unlock on iOS, so it's re-primed on both
+        // press and release rather than assumed to stick for the session.
+        if (!window.speechSynthesis) return;
+        var warm = new SpeechSynthesisUtterance('.');
+        warm.volume = 0;
+        window.speechSynthesis.speak(warm);
+    }
+
+    function speak(text, audioB64) {
+        var errorLine = document.getElementById('audio-error');
+        var replayBtn = document.getElementById('replay-btn');
+        errorLine.style.display = 'none';
+
+        if (audioB64) {
+            var audio = new Audio('data:audio/mpeg;base64,' + audioB64);
+            var playPromise = audio.play();
+            if (playPromise && playPromise.catch) {
+                playPromise.catch(function (err) {
+                    errorLine.textContent = 'Audio blocked by browser (' + err.name + '). Check your mute switch, or tap Replay.';
+                    errorLine.style.display = 'block';
+                });
+            }
+            replayBtn.style.display = 'inline-block';
+            replayBtn.onclick = function () { audio.play(); };
+            return;
+        }
+        if (!window.speechSynthesis) {
+            errorLine.textContent = 'No audio available -- browser does not support speech synthesis and no ElevenLabs audio was returned.';
+            errorLine.style.display = 'block';
+            return;
+        }
+        window.speechSynthesis.cancel();
+        var utter = new SpeechSynthesisUtterance(text);
+        utter.rate = 1.0;
+        utter.onerror = function (e) {
+            errorLine.textContent = 'Browser voice failed to play (' + e.error + ').';
+            errorLine.style.display = 'block';
+        };
+        window.speechSynthesis.speak(utter);
+        replayBtn.style.display = 'inline-block';
+        replayBtn.onclick = function () {
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+        };
+    }
+
+    function askServer(question) {
+        setStatus('Thinking...');
+        fetch('{{ url_for("assistant_ask") }}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            body: JSON.stringify({ question: question })
+        })
+        .then(function (r) { return r.json(); })
+        .then(handleResponse)
+        .catch(function () {
+            setStatus('Something went wrong reaching the assistant.');
+        });
+    }
+
+    function askServerWithAudio(blob) {
+        setStatus('Thinking...');
+        var formData = new FormData();
+        formData.append('audio', blob, 'atlas.webm');
+        fetch('{{ url_for("assistant_ask") }}', {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken },
+            body: formData
+        })
+        .then(function (r) { return r.json(); })
+        .then(handleResponse)
+        .catch(function () {
+            setStatus('Something went wrong reaching the assistant.');
+        });
+    }
+
+    function handleResponse(data) {
+        var answer = data.answer || "I didn't get an answer back.";
+        transcriptBox.style.display = 'block';
+        questionText.textContent = data.question || '(unclear)';
+        answerText.textContent = answer;
+        setStatus('');
+        speak(answer, data.audio);
+        var badge = document.getElementById('submitted-badge');
+        var resetBtn = document.getElementById('reset-btn');
+        var errorLine = document.getElementById('audio-error');
+        if (data.transcribe_error) {
+            errorLine.textContent = 'Could not transcribe: ' + data.transcribe_error;
+            errorLine.style.display = 'block';
+        } else if (data.audio_error) {
+            errorLine.textContent = 'Atlas voice unavailable, using free voice instead: ' + data.audio_error;
+            errorLine.style.display = 'block';
+        }
+        if (data.submitted_id) {
+            badge.style.display = 'block';
+            badge.textContent = '✓ Concrete request #' + data.submitted_id + ' submitted';
+        } else {
+            badge.style.display = 'none';
+        }
+        resetBtn.style.display = (data.mode === 'concrete_request') ? 'inline-block' : 'none';
+    }
+
+    function startListening() {
+        if (listening) return;
+        listening = true;
+        setStatus('Listening...');
+        btn.style.boxShadow = '0 0 0 14px rgba(212,165,55,0.25)';
+
+        if (recognition) {
+            // Free, built-in browser recognition -- zero cost, no server call.
+            // Not reliably supported on iOS Safari, which is why the
+            // MediaRecorder fallback below exists for browsers without it.
+            recognition.onresult = function (event) {
+                var question = event.results[0][0].transcript;
+                askServer(question);
+            };
+            recognition.onerror = function (event) {
+                setStatus('Didn\'t catch that (' + event.error + ') -- try again.');
+                listening = false;
+                btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+            };
+            recognition.onend = function () {
+                listening = false;
+                btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+            };
+            try { recognition.start(); } catch (e) { /* already started, ignore */ }
+            return;
+        }
+
+        // Fallback: record audio and let the server transcribe it (needs
+        // OPENAI_API_KEY or ELEVENLABS_API_KEY configured server-side).
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+            audioChunks = [];
+            var mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+                : MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
+            mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType: mimeType }) : new MediaRecorder(stream);
+            mediaRecorder.addEventListener('dataavailable', function (e) {
+                if (e.data.size > 0) audioChunks.push(e.data);
+            });
+            mediaRecorder.addEventListener('stop', function () {
+                stream.getTracks().forEach(function (t) { t.stop(); });
+                btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+                if (audioChunks.length === 0) {
+                    setStatus('Didn\'t catch that -- try again.');
+                    listening = false;
+                    return;
+                }
+                var blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+                askServerWithAudio(blob);
+                listening = false;
+            });
+            mediaRecorder.start();
+        }).catch(function (err) {
+            setStatus('Microphone access denied or unavailable (' + err.name + ').');
+            listening = false;
+            btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+        });
+    }
+    function stopListening() {
+        if (!listening) return;
+        if (recognition) {
+            recognition.stop();
+            return;
+        }
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    }
+
+    // Press-and-hold on both mouse and touch.
+    btn.addEventListener('mousedown', function () { unlockSpeechIfNeeded(); startListening(); });
+    btn.addEventListener('mouseup', function () { unlockSpeechIfNeeded(); stopListening(); });
+    btn.addEventListener('mouseleave', stopListening);
+    btn.addEventListener('touchstart', function (e) { e.preventDefault(); unlockSpeechIfNeeded(); startListening(); });
+    btn.addEventListener('touchend', function (e) { e.preventDefault(); unlockSpeechIfNeeded(); stopListening(); });
+
+    document.getElementById('reset-btn').addEventListener('click', function () {
+        fetch('{{ url_for("assistant_reset") }}', {
+            method: 'POST',
+            headers: { 'X-CSRFToken': csrfToken }
+        }).then(function () {
+            document.getElementById('reset-btn').style.display = 'none';
+            document.getElementById('submitted-badge').style.display = 'none';
+            setStatus('Started over.');
+        });
+    });
+})();
+</script>
+{% endblock %}

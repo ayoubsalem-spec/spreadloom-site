@@ -14,7 +14,7 @@
         <tr><th>When</th><th>Who</th><th>Type</th><th>Action</th><th>Change</th></tr>
         {% for e in entries %}
         <tr>
-            <td>{{ e['created_at'][:16].replace('T', ' ') }}</td>
+            <td>{{ e['created_at']|friendly_short_dt }}</td>
             <td>{{ e['user_email'] }}</td>
             <td>{{ e['entity_type']|replace('_', ' ')|capitalize }}</td>
             <td>{{ e['action']|capitalize }}</td>

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+    <h1 style="margin:0;">Redline</h1>
+    <a href="{{ url_for('engineering_new_review') }}" class="btn btn-gold">+ New Plan Review</a>
+</div>
+<p class="sub" style="margin-bottom:24px;">Your second set of eyes on a plan set -- before the city gives you theirs.</p>
+
+{% if reviews %}
+<table>
+    <tr>
+        <th>Project</th>
+        <th>Type</th>
+        <th>Findings</th>
+        <th>Reviewed</th>
+        <th>By</th>
+    </tr>
+    {% for r in reviews %}
+    <tr onclick="window.location='{{ url_for('engineering_view_review', review_id=r['id']) }}'" style="cursor:pointer;">
+        <td>{{ r['project'] }}</td>
+        <td>{{ r['project_type'] }}</td>
+        <td>
+            {% if r['status'] != 'Complete' %}
+                <span class="status-submitted">Failed</span>
+            {% elif r['finding_count'] == 0 %}
+                <span class="sub">No findings</span>
+            {% else %}
+                {% if r['critical_count'] %}<span style="color:#E88;">&#128308; {{ r['critical_count'] }}</span>{% endif %}
+                {% if r['permit_count'] %}<span style="color:#E8A; margin-left:8px;">&#128992; {{ r['permit_count'] }}</span>{% endif %}
+                {% if r['warning_count'] %}<span style="color:#E8C766; margin-left:8px;">&#128993; {{ r['warning_count'] }}</span>{% endif %}
+                {% if r['other_count'] %}<span class="sub" style="margin-left:8px;">+{{ r['other_count'] }}</span>{% endif %}
+            {% endif %}
+        </td>
+        <td>{{ r['created_at']|friendly_short_dt }}</td>
+        <td>{{ r['requested_by'] }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% else %}
+<p class="sub">No plan reviews yet -- upload a plan set to get started.</p>
+{% endif %}
+{% endblock %}

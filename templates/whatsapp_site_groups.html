@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>WhatsApp Site Groups</h1>
+<p class="sub">Concrete/purchase requests and equipment notifications get matched against these keywords (case-insensitive, checked against the project/job/location text). First match wins. Nothing matches &rarr; falls back to the default SitePulse group.</p>
+
+<div class="card">
+    <form method="POST" action="{{ url_for('whatsapp_site_groups_new') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-row">
+            <div style="flex:1;">
+                <label>Site Keyword</label>
+                <input type="text" name="keyword" autofocus>
+            </div>
+            <div style="flex:2;">
+                <label>WhatsApp Group Chat ID</label>
+                <input type="text" name="chat_id">
+            </div>
+        </div>
+        <button type="submit" class="btn btn-gold">Add</button>
+    </form>
+</div>
+
+<div class="card" style="margin-top:16px;">
+    <h3 style="font-size:14px; color:var(--gold); margin-bottom:8px;">Test a Chat ID</h3>
+    <p class="sub" style="margin-bottom:10px;">Paste any chat ID here to send a one-off test message before adding it above -- useful for checking a new group's ID is right.</p>
+    <form method="POST" action="{{ url_for('whatsapp_site_groups_test') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="label" value="that chat ID">
+        <div class="form-row">
+            <div style="flex:1;"><input type="text" name="chat_id"></div>
+            <button type="submit" class="btn btn-sm">Send Test</button>
+        </div>
+    </form>
+</div>
+
+<div class="card" style="padding:0; overflow:hidden; margin-top:16px;">
+    <table style="margin:0;">
+        <tr><th>Keyword</th><th>Chat ID</th><th></th></tr>
+        {% for g in groups %}
+        <tr>
+            <td>{{ g['keyword'] }}</td>
+            <td style="font-family:monospace; font-size:12px;">{{ g['chat_id'] }}</td>
+            <td style="white-space:nowrap;">
+                <form method="POST" action="{{ url_for('whatsapp_site_groups_test') }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="chat_id" value="{{ g['chat_id'] }}">
+                    <input type="hidden" name="label" value="{{ g['keyword'] }}">
+                    <button type="submit" class="btn btn-sm">Send Test</button>
+                </form>
+                <form method="POST" action="{{ url_for('whatsapp_site_groups_delete', group_id=g['id']) }}" style="display:inline;"
+                      onsubmit="return confirm('Remove the {{ g['keyword'] }} routing? That site will fall back to the default group.');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm" style="color:var(--red); border-color:var(--red);">Remove</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        {% if groups|length == 0 %}
+        <tr><td colspan="3" class="sub" style="padding:16px;">No site-specific groups yet -- everything goes to the default group.</td></tr>
+        {% endif %}
+    </table>
+</div>
+
+<div style="margin-top:16px; display:flex; align-items:center; gap:10px;">
+    <p class="sub" style="margin:0;">Default group (used when nothing matches): <span style="font-family:monospace;">{{ default_chat_id or 'not set' }}</span></p>
+    {% if default_chat_id %}
+    <form method="POST" action="{{ url_for('whatsapp_site_groups_test') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="chat_id" value="{{ default_chat_id }}">
+        <input type="hidden" name="label" value="the default group">
+        <button type="submit" class="btn btn-sm">Send Test</button>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

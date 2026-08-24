@@ -144,7 +144,7 @@
                 <a href="{{ url_for('home') }}">&larr; BuildIQ</a>
                 <a href="{{ url_for('tracker_dashboard') }}">Dashboard</a>
                 <a href="{{ url_for('tracker_activity_log') }}">Activity Log</a>
-                <a href="{{ url_for('team_list') }}">Team</a>
+                {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('team_list') }}">Team</a>{% endif %}
                 <a href="{{ url_for('tracker_unit_prices') }}">Unit Prices</a>
                 <a href="{{ url_for('tracker_archive') }}">Archive</a>
                 <a href="{{ url_for('logout') }}">Log out</a>

@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "requests/_styles.html" %}
+
+<span class="rc-eyebrow">Request #{{ r['id'] }}</span>
+<h1>{{ r['requester_name'] or r['requester_email'] }}</h1>
+<p class="sub" style="margin-bottom:20px;">{{ r['department'] or 'No department set' }} &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
+
+<div class="card" style="border-left:3px solid var(--brass);">
+    <p class="sub" style="margin:0 0 8px;">Original Request</p>
+    <p style="margin:0; font-size:15px; line-height:1.5;">{{ r['original_request'] }}</p>
+</div>
+
+<div class="pi-two-col" style="margin-top:8px;">
+    <div>
+        <p class="pi-section-title">Status</p>
+        <p style="margin:0 0 16px;">Current:
+            {% if r['status'] == 'Released' %}<span class="rc-badge b-released">Released</span>
+            {% elif r['status'] in ('On Hold', 'Not Planned') %}<span class="rc-badge b-stalled">{{ r['status'] }}</span>
+            {% elif r['status'] == 'Submitted' %}<span class="rc-badge b-submitted">Submitted</span>
+            {% else %}<span class="rc-badge b-progress">{{ r['status'] }}</span>{% endif %}
+        </p>
+
+        {% if r['status'] != 'Released' %}
+        <form method="POST" style="margin-bottom:24px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="change_status">
+            <select name="status" style="max-width:260px; display:inline-block;">
+                {% for s in statuses %}
+                {% if s != 'Released' %}
+                <option value="{{ s }}" {{ 'selected' if r['status'] == s }}>{{ s }}</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+            <button type="submit" class="btn">Update Status</button>
+        </form>
+
+        <p class="pi-section-title" style="margin-top:24px;">Release</p>
+        <form method="POST" class="card" style="background:var(--surface-2);">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="release">
+            <label style="margin-top:0;">Release Note (shown to the requester)</label>
+            <textarea name="release_note" rows="3" required></textarea>
+            <label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-weight:400; text-transform:none; font-family:'Inter',sans-serif; font-size:13px; letter-spacing:normal; color:var(--text-dim);">
+                <input type="checkbox" name="confirm_release" value="yes" required style="width:auto;">
+                Confirm this request is ready to be marked Released
+            </label>
+            <button type="submit" class="btn btn-gold" style="margin-top:14px;">Release</button>
+        </form>
+        {% else %}
+        <div class="req-released" style="margin-bottom:24px;">
+            <span class="req-released-badge">&#10003; Shipped</span>
+            {% set release_row = history|selectattr('status', 'equalto', 'Released')|list %}
+            {% if release_row %}<p style="margin:0; max-width:80%;">{{ release_row[0]['release_note'] }}</p>{% endif %}
+        </div>
+        {% endif %}
+
+        <p class="pi-section-title" style="margin-top:24px;">Status History</p>
+        <div class="card" style="padding:6px 20px;">
+            {% for h in history %}
+            <div class="pi-feed-item">
+                {% if h['status'] == 'Released' %}<span style="color:var(--teal);">{{ h['status'] }}</span>{% else %}<span style="color:var(--brass);">{{ h['status'] }}</span>{% endif %}
+                <div class="pi-feed-meta">{{ h['changed_at']|friendly_short_dt }}{% if h['changed_by'] %} &middot; {{ h['changed_by'] }}{% endif %}</div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div>
+        <p class="pi-section-title">Details <span class="dim">private</span></p>
+        <form method="POST" class="card">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="save_details">
+            <label style="margin-top:0;">BuildIQ Module</label>
+            <input type="text" name="buildiq_module" value="{{ intel['buildiq_module'] if intel else '' }}" placeholder="e.g. Atlas, Redline, SitePulse">
+
+            <label>Internal Notes</label>
+            <textarea name="internal_notes" rows="3">{{ intel['internal_notes'] if intel else '' }}</textarea>
+
+            <label>Solution Built</label>
+            <textarea name="solution_built" rows="3">{{ intel['solution_built'] if intel else '' }}</textarea>
+
+            <label>Testing Notes</label>
+            <textarea name="testing_notes" rows="3">{{ intel['testing_notes'] if intel else '' }}</textarea>
+
+            <label>User Feedback</label>
+            <textarea name="user_feedback" rows="3">{{ intel['user_feedback'] if intel else '' }}</textarea>
+
+            <button type="submit" class="btn" style="margin-top:14px;">Save Details</button>
+        </form>
+        <p class="sub" style="margin-top:10px; font-size:12px;">Saving here never changes the request's status.</p>
+    </div>
+</div>
+
+<a href="{{ url_for('product_intelligence') }}" class="btn" style="margin-top:28px; display:inline-block;">&larr; Back to Product Intelligence</a>
+{% endblock %}

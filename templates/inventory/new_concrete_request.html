@@ -7,50 +7,110 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <h3 style="font-size:15px; color:var(--gold); margin-bottom:6px;">Project Info</h3>
         <label>Project</label><input type="text" name="project" required autofocus>
-        <label>Job Site Address</label><input type="text" name="job_site_address" data-remember="job_site_address">
-        <label>Description of Area to Pour</label><input type="text" name="area_description">
+        <label>Job Site Address</label><input type="text" name="job_site_address" data-remember="job_site_address" required>
+        <label>Description of Area to Pour</label><input type="text" name="area_description" required>
 
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Concrete Details</h3>
         <div class="form-row">
             <div style="flex:1;"><label>Date of Pour</label><input type="date" name="pour_date" value="{{ today }}" required></div>
-            <div style="flex:1;"><label>Time of Pour</label><input type="time" name="pour_time"></div>
+            <div style="flex:1;"><label>Time of Pour</label><input type="time" name="pour_time" id="pour_time" required></div>
         </div>
         <div class="form-row">
-            <div style="flex:1;"><label>Mix Design (PSI)</label><input type="text" name="mix_design_psi"></div>
-            <div style="flex:1;"><label>Mix Slump</label><input type="text" name="mix_slump"></div>
+            <div style="flex:1;"><label>Mix Design (PSI)</label><input type="text" name="mix_design_psi" required></div>
+            <div style="flex:1;"><label>Mix Slump</label><input type="text" name="mix_slump" required></div>
         </div>
         <div class="form-row">
-            <div style="flex:1;"><label>Concrete Amount</label><input type="text" name="concrete_amount"></div>
-            <div style="flex:1;"><label>Spacing Between Trucks</label><input type="text" name="truck_spacing"></div>
+            <div style="flex:1;"><label>Concrete Amount</label><input type="text" name="concrete_amount" required></div>
+            <div style="flex:1;"><label>Spacing Between Trucks</label><input type="text" name="truck_spacing" required></div>
         </div>
         <div class="form-row">
-            <div style="flex:1;"><label>Pump Size (if required)</label><input type="text" name="pump_size"></div>
-            <div style="flex:1;"><label>Pump Arrival Time</label><input type="text" name="pump_arrival_time"></div>
+            <div style="flex:1;">
+                <label>Pump Type</label>
+                <select name="pump_type" id="pump_type" required>
+                    <option value="" disabled selected>Select...</option>
+                    <option value="None">None</option>
+                    <option value="Ground Pump">Ground Pump</option>
+                    <option value="Overhead Pump">Overhead Pump</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>Pump Size</label><input type="text" name="pump_size" id="pump_size"></div>
+            <div style="flex:1;"><label>Pump Arrival Time</label><input type="time" name="pump_arrival_time" id="pump_arrival_time"></div>
         </div>
         <div class="form-row">
             <div style="flex:1;"><label>Lab (same time with Concrete)</label>
-                <select name="lab_required"><option value="No">No</option><option value="Yes">Yes</option></select>
+                <select name="lab_required" id="lab_required" required><option value="No">No</option><option value="Yes">Yes</option></select>
             </div>
-            <div style="flex:1;"><label>If yes, Time</label><input type="time" name="lab_time"></div>
+            <div style="flex:1;" id="lab_time_wrap"><label>Time</label><input type="time" name="lab_time" id="lab_time" required></div>
         </div>
         <div class="form-row">
             <div style="flex:1;"><label>Drilling Company (if required)</label>
-                <select name="drilling_required"><option value="No">No</option><option value="Yes">Yes</option></select>
+                <select name="drilling_required" id="drilling_required" required><option value="No">No</option><option value="Yes">Yes</option></select>
             </div>
-            <div style="flex:1;"><label>If yes, Time</label><input type="time" name="drilling_time"></div>
+            <div style="flex:1;" id="drilling_time_wrap"><label>Time</label><input type="time" name="drilling_time" id="drilling_time" required></div>
         </div>
+        <style>
+            #lab_time_wrap, #drilling_time_wrap { display: none; }
+            #lab_time_wrap.show, #drilling_time_wrap.show { display: block; }
+        </style>
 
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Requested By</h3>
         <p class="sub" style="margin-bottom:14px;">Logged in as: <strong style="color:var(--text);">{{ current_user.name or current_user.email }}</strong></p>
         <div class="form-row">
-            <div style="flex:1;"><label>Date</label><input type="date" name="requested_date" value="{{ today }}"></div>
-        </div>
-        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Ordered By</h3>
-        <div class="form-row">
-            <div style="flex:1;"><label>Name</label><input type="text" name="ordered_by"></div>
-            <div style="flex:1;"><label>Date</label><input type="date" name="ordered_date"></div>
+            <div style="flex:1;"><label>Date</label><input type="date" name="requested_date" value="{{ today }}" required></div>
         </div>
         <button type="submit" class="btn btn-gold" style="margin-top:16px;">Submit Form</button>
     </form>
 </div>
+<script>
+    // Auto-fill pump/drilling/lab times off the pour time -- only fills
+    // blank fields, so it never clobbers something the user already typed.
+    (function () {
+        function minusOneHour(hhmm) {
+            var parts = hhmm.split(':');
+            var d = new Date(2000, 0, 1, parseInt(parts[0], 10), parseInt(parts[1], 10));
+            d.setHours(d.getHours() - 1);
+            return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+        }
+        var pourTime = document.getElementById('pour_time');
+        var pumpArrival = document.getElementById('pump_arrival_time');
+        var drillingTime = document.getElementById('drilling_time');
+        var labTime = document.getElementById('lab_time');
+        if (!pourTime) return;
+        pourTime.addEventListener('change', function () {
+            if (!pourTime.value) return;
+            if (pumpArrival && !pumpArrival.value) pumpArrival.value = minusOneHour(pourTime.value);
+            if (drillingTime && !drillingTime.value) drillingTime.value = minusOneHour(pourTime.value);
+            if (labTime && !labTime.value) labTime.value = pourTime.value;
+        });
+    })();
+
+    // Show the Time field only when its Lab / Drilling select is "Yes".
+    (function () {
+        function wireToggle(selectId, wrapId) {
+            var select = document.getElementById(selectId);
+            var wrap = document.getElementById(wrapId);
+            if (!select || !wrap) return;
+            function sync() { wrap.classList.toggle('show', select.value === 'Yes'); }
+            select.addEventListener('change', sync);
+            sync();
+        }
+        wireToggle('lab_required', 'lab_time_wrap');
+        wireToggle('drilling_required', 'drilling_time_wrap');
+    })();
+    // Pump Size / Pump Arrival Time are only required when an actual pump
+    // is selected -- "None" shouldn't force someone to fill those in.
+    (function () {
+        var pumpType = document.getElementById('pump_type');
+        var pumpSize = document.getElementById('pump_size');
+        var pumpArrival = document.getElementById('pump_arrival_time');
+        if (!pumpType) return;
+        function sync() {
+            var needsPump = pumpType.value === 'Ground Pump' || pumpType.value === 'Overhead Pump';
+            if (pumpSize) pumpSize.required = needsPump;
+            if (pumpArrival) pumpArrival.required = needsPump;
+        }
+        pumpType.addEventListener('change', sync);
+        sync();
+    })();
+</script>
 {% endblock %}

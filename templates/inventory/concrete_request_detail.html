@@ -3,7 +3,7 @@
 <div class="section-row">
     <div>
         <h1>{{ r['project'] }}</h1>
-        <p class="sub">Concrete Checklist Form &middot; Submitted {{ r['created_at'][:16].replace('T',' ') }}</p>
+        <p class="sub">Concrete Checklist Form &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
     </div>
     <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
 </div>
@@ -16,17 +16,24 @@
     </table>
     <h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Concrete Details</h3>
     <table>
-        <tr><td class="sub" style="width:220px;">Date of Pour</td><td>{{ r['pour_date'] }}</td></tr>
+        <tr><td class="sub" style="width:220px;">Date of Pour</td><td>{{ r['pour_date']|friendly_date }}</td></tr>
         <tr><td class="sub">Time of Pour</td><td>{{ r['pour_time'] or '\u2014' }}</td></tr>
         <tr><td class="sub">Mix Design (PSI)</td><td>{{ r['mix_design_psi'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Mix Slump</td><td>{{ r['mix_slump'] or '\u2014' }}</td></tr>
         <tr><td class="sub">Concrete Amount</td><td>{{ r['concrete_amount'] or '\u2014' }}</td></tr>
-        <tr><td class="sub">Lab</td><td>{{ r['lab_required'] }}{% if r['lab_time'] %} &mdash; {{ r['lab_time'] }}{% endif %}</td></tr>
-        <tr><td class="sub">Drilling Company</td><td>{{ r['drilling_required'] }}{% if r['drilling_time'] %} &mdash; {{ r['drilling_time'] }}{% endif %}</td></tr>
+        <tr><td class="sub">Spacing Between Trucks</td><td>{{ r['truck_spacing'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Pump Type</td><td>{{ r['pump_type'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Pump Size</td><td>{{ r['pump_size'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Pump Arrival Time</td><td>{{ r['pump_arrival_time'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Lab Required</td><td>{{ r['lab_required'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Lab Time</td><td>{{ r['lab_time'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Drilling Required</td><td>{{ r['drilling_required'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Drilling Time</td><td>{{ r['drilling_time'] or '\u2014' }}</td></tr>
     </table>
     <h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Requested By</h3>
     <table>
         <tr><td class="sub" style="width:220px;">Name</td><td>{{ r['requested_by'] or '\u2014' }}</td></tr>
-        <tr><td class="sub">Date</td><td>{{ r['requested_date'] or '\u2014' }}</td></tr>
+        <tr><td class="sub">Date</td><td>{{ r['requested_date']|friendly_date if r['requested_date'] else '\u2014' }}</td></tr>
     </table>
 </div>
 
@@ -34,9 +41,9 @@
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Order Details</h3>
     <table>
-        <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date'] }}{% endif %}</td></tr>
-        {% if r['concrete_company'] %}<tr><td class="sub">Concrete Company</td><td>{{ r['concrete_company'] }}{% if r['concrete_company_phone'] %} &middot; {{ r['concrete_company_phone'] }}{% endif %}</td></tr>{% endif %}
-        {% if r['pump_company'] %}<tr><td class="sub">Pump</td><td>{{ r['pump_company'] }}{% if r['pump_company_phone'] %} &middot; {{ r['pump_company_phone'] }}{% endif %}{% if r['pump_arrival_time'] %} &middot; {{ r['pump_arrival_time'] }}{% endif %}</td></tr>{% endif %}
+        <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date']|friendly_date }}{% endif %}</td></tr>
+        {% if r['concrete_company'] %}<tr><td class="sub">Concrete Company</td><td>{{ r['concrete_company'] }}{% if r['concrete_company_phone'] %} &middot; {{ r['concrete_company_phone'] }}{% endif %}{% if r['concrete_arrival_time'] or r['pour_time'] %} &middot; {{ r['concrete_arrival_time'] or r['pour_time'] }}{% endif %}</td></tr>{% endif %}
+        {% if r['pump_company'] %}<tr><td class="sub">{{ r['pump_type'] or 'Pump' }}</td><td>{{ r['pump_company'] }}{% if r['pump_company_phone'] %} &middot; {{ r['pump_company_phone'] }}{% endif %}{% if r['pump_arrival_time'] %} &middot; {{ r['pump_arrival_time'] }}{% endif %}</td></tr>{% endif %}
         {% if r['lab_company'] %}<tr><td class="sub">Lab</td><td>{{ r['lab_company'] }}{% if r['lab_time'] %} &middot; {{ r['lab_time'] }}{% endif %}</td></tr>{% endif %}
         {% if r['drilling_company'] %}<tr><td class="sub">Drilling Company</td><td>{{ r['drilling_company'] }}{% if r['drilling_company_phone'] %} &middot; {{ r['drilling_company_phone'] }}{% endif %}{% if r['drilling_time'] %} &middot; {{ r['drilling_time'] }}{% endif %}</td></tr>{% endif %}
     </table>

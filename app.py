@@ -21,10 +21,17 @@ import sqlite3
 import uuid
 import json
 import secrets
+import base64
+import io
 import requests
 import markdown as md_lib
-from datetime import datetime, date
-from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas as pdf_canvas
+from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -35,17 +42,320 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 csrf = CSRFProtect(app)
 
 
+HOUSTON_TZ = ZoneInfo("America/Chicago")
+
+# --- WhatsApp group notifications (Green API) ------------------------------
+# Set these three in your environment (Railway variables, etc.) once you have
+# a Green API instance linked to a WhatsApp number that's in the procurement
+# group. Left blank, notifications are silently skipped (logged to console)
+# so nothing breaks if they're not configured yet.
+# --- WhatsApp group notifications (Ultramsg) --------------------------------
+# Set these three (four, counting the second group) in your environment
+# (Railway variables, etc.) once you have an Ultramsg instance linked to a
+# WhatsApp number that's in both the procurement and SitePulse groups. Left
+# blank, notifications are silently skipped (logged to console) so nothing
+# breaks if they're not configured yet.
+ULTRAMSG_INSTANCE_ID = os.environ.get("ULTRAMSG_INSTANCE_ID", "")
+ULTRAMSG_TOKEN = os.environ.get("ULTRAMSG_TOKEN", "")
+ULTRAMSG_GROUP_CHAT_ID = os.environ.get("ULTRAMSG_GROUP_CHAT_ID", "")  # e.g. "123456789-987654321@g.us" -- procurement
+ULTRAMSG_SITEPULSE_GROUP_CHAT_ID = os.environ.get("ULTRAMSG_SITEPULSE_GROUP_CHAT_ID", "")  # equipment/SitePulse group
+
+
+def send_whatsapp_group_message(text, chat_id=None):
+    """Post a message into a WhatsApp group via Ultramsg. Defaults to the
+    procurement group if one's configured, otherwise falls back to the
+    SitePulse group -- so if only one group is set up (current setup: just
+    SitePulse), everything lands there. Never raises -- a WhatsApp hiccup
+    should never block someone submitting a request or moving equipment.
+    Failures are printed to the server log instead. Returns (ok, detail) so
+    callers that want to report success/failure (e.g. the test-message
+    button) can, without every other call site needing to check it.
+    """
+    chat_id = chat_id or ULTRAMSG_GROUP_CHAT_ID or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    if not (ULTRAMSG_INSTANCE_ID and ULTRAMSG_TOKEN and chat_id):
+        msg = "Ultramsg not configured -- skipping notification:\n" + text
+        print("[whatsapp] " + msg)
+        return False, "WhatsApp isn't configured yet (missing instance ID, token, or chat ID)."
+    url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/chat"
+    try:
+        resp = requests.post(url, data={"token": ULTRAMSG_TOKEN, "to": chat_id, "body": text}, timeout=10)
+        if resp.status_code >= 300:
+            print(f"[whatsapp] Ultramsg returned {resp.status_code}: {resp.text}")
+            return False, f"Ultramsg returned an error ({resp.status_code})."
+        return True, "Sent."
+    except requests.RequestException as e:
+        print(f"[whatsapp] failed to send notification: {e}")
+        return False, f"Network error reaching Ultramsg: {e}"
+
+
+def whatsapp_chat_id_for_site(*texts):
+    """Match project/job/location text against the configured per-site
+    WhatsApp groups (keyword is a case-insensitive substring match against
+    any of the given texts, e.g. project="Peninsula Job #4" matches
+    keyword="peninsula"). Falls back to the default SitePulse group if
+    nothing matches or no site groups are configured yet.
+    """
+    db = get_db()
+    rows = db.execute("SELECT keyword, chat_id FROM whatsapp_site_groups").fetchall()
+    haystack = " ".join(t for t in texts if t).lower()
+    for row in rows:
+        if row["keyword"].lower() in haystack:
+            return row["chat_id"]
+    return None  # let send_whatsapp_group_message fall back to the default
+
+
+def send_whatsapp_document(pdf_bytes, filename, chat_id=None, caption=None):
+    """Post a PDF (or any small file) into a WhatsApp group via Ultramsg,
+    sent as base64 directly in the request -- no public URL/hosting
+    needed. Same never-raises, (ok, detail) contract as
+    send_whatsapp_group_message. Ultramsg's base64 limit is ~6.5MB of
+    encoded text, plenty for a one-page order summary.
+    """
+    chat_id = chat_id or ULTRAMSG_GROUP_CHAT_ID or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    if not (ULTRAMSG_INSTANCE_ID and ULTRAMSG_TOKEN and chat_id):
+        print(f"[whatsapp] Ultramsg not configured -- skipping document send: {filename}")
+        return False, "WhatsApp isn't configured yet (missing instance ID, token, or chat ID)."
+    url = f"https://api.ultramsg.com/{ULTRAMSG_INSTANCE_ID}/messages/document"
+    b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    data = {"token": ULTRAMSG_TOKEN, "to": chat_id, "document": b64, "filename": filename}
+    if caption:
+        data["caption"] = caption
+    try:
+        resp = requests.post(url, data=data, timeout=20)
+        if resp.status_code >= 300:
+            print(f"[whatsapp] Ultramsg document send returned {resp.status_code}: {resp.text}")
+            return False, f"Ultramsg returned an error ({resp.status_code})."
+        return True, "Sent."
+    except requests.RequestException as e:
+        print(f"[whatsapp] failed to send document: {e}")
+        return False, f"Network error reaching Ultramsg: {e}"
+
+
+def _pdf_write_wrapped(c, text, x, y, max_width, font="Helvetica", size=10, leading=14):
+    """Write text to a reportlab canvas, wrapping at max_width. Returns the
+    y position after the last line, so callers can keep stacking sections."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    c.setFont(font, size)
+    words = text.split(" ")
+    line = ""
+    for word in words:
+        trial = (line + " " + word).strip()
+        if stringWidth(trial, font, size) > max_width and line:
+            c.drawString(x, y, line)
+            y -= leading
+            line = word
+        else:
+            line = trial
+    if line:
+        c.drawString(x, y, line)
+        y -= leading
+    return y
+
+
+def build_concrete_order_pdf(r):
+    """One-page PDF summary of a placed concrete order -- project, pour
+    details, and every vendor/contact, for attaching to the WhatsApp
+    notification and for anyone who wants a printable copy.
+    """
+    buf = io.BytesIO()
+    c = pdf_canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    navy = colors.HexColor("#0B1220")
+    gold = colors.HexColor("#D4A537")
+    x = 0.75 * inch
+    y = height - 0.9 * inch
+
+    c.setFillColor(navy)
+    c.rect(0, height - 1.1 * inch, width, 1.1 * inch, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(x, height - 0.65 * inch, "Concrete Order Confirmation")
+    c.setFont("Helvetica", 10)
+    c.drawString(x, height - 0.9 * inch, f"Darycet International  |  Order placed {date.today().isoformat()}")
+
+    y = height - 1.5 * inch
+    c.setFillColor(navy)
+
+    def section(title):
+        nonlocal y
+        y -= 6
+        c.setFillColor(gold)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(x, y, title)
+        c.setFillColor(navy)
+        y -= 18
+
+    def line(label, value):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(x, y, f"{label}:")
+        c.setFont("Helvetica", 10)
+        c.drawString(x + 1.6 * inch, y, str(value) if value else "\u2014")
+        y -= 16
+
+    section("Project")
+    line("Project", r["project"])
+    line("Job Site Address", r["job_site_address"])
+    line("Pour Date", r["pour_date"] + (f" at {r['pour_time']}" if r["pour_time"] else "") if r["pour_date"] else "")
+    line("Amount / Mix", " ".join(v for v in [r["concrete_amount"], f"{r['mix_design_psi']} PSI" if r["mix_design_psi"] else ""] if v))
+
+    section("Concrete")
+    line("Company", r["concrete_company"])
+    line("Phone", r["concrete_company_phone"])
+    line("Arrival Time", r["concrete_arrival_time"] or r["pour_time"])
+
+    if r["pump_company"] or r["pump_size"]:
+        section(r["pump_type"] if r["pump_type"] else "Pump")
+        line("Type", r["pump_type"])
+        line("Size", r["pump_size"])
+        line("Contact", r["pump_company"])
+        line("Phone", r["pump_company_phone"])
+        line("Arrival Time", r["pump_arrival_time"])
+
+    if r["lab_required"] == "Yes":
+        section("Lab")
+        line("Company", r["lab_company"])
+        line("Time", r["lab_time"])
+
+    if r["drilling_required"] == "Yes":
+        section("Drilling")
+        line("Company", r["drilling_company"])
+        line("Phone", r["drilling_company_phone"])
+        line("Time", r["drilling_time"])
+
+    section("Ordered By")
+    line("Name", r["ordered_by"])
+    line("Date", r["ordered_date"])
+
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(colors.HexColor("#888888"))
+    c.drawString(x, 0.6 * inch, "Generated automatically by BuildIQ / SitePulse")
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+def build_purchase_order_pdf(r, items):
+    """One-page PDF summary of a placed purchase order."""
+    buf = io.BytesIO()
+    c = pdf_canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    navy = colors.HexColor("#0B1220")
+    gold = colors.HexColor("#D4A537")
+    x = 0.75 * inch
+
+    c.setFillColor(navy)
+    c.rect(0, height - 1.1 * inch, width, 1.1 * inch, fill=1, stroke=0)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 18)
+    c.drawString(x, height - 0.65 * inch, "Purchase Order Confirmation")
+    c.setFont("Helvetica", 10)
+    c.drawString(x, height - 0.9 * inch, f"Darycet International  |  Order placed {date.today().isoformat()}")
+
+    y = height - 1.5 * inch
+    c.setFillColor(navy)
+
+    def section(title):
+        nonlocal y
+        y -= 6
+        c.setFillColor(gold)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(x, y, title)
+        c.setFillColor(navy)
+        y -= 18
+
+    def line(label, value):
+        nonlocal y
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(x, y, f"{label}:")
+        c.setFont("Helvetica", 10)
+        c.drawString(x + 1.6 * inch, y, str(value) if value else "\u2014")
+        y -= 16
+
+    section("Job")
+    line("Job Name", r["job_name"])
+    line("Location", r["location_description"])
+    line("PR Number", r["pr_number"])
+    line("Needed By", r["needed_on"])
+
+    section("Vendor")
+    line("Company", r["vendor_company"])
+    line("Phone", r["vendor_company_phone"])
+
+    if items:
+        section("Items")
+        for it in items:
+            desc = " \u2014 ".join(v for v in [it["item"], it["description"]] if v)
+            qty = f" ({it['qty']})" if it["qty"] else ""
+            y = _pdf_write_wrapped(c, f"\u2022 {desc}{qty}", x, y, width - 1.5 * inch, size=10)
+
+    section("Ordered By")
+    line("Name", r["ordered_by"])
+    line("Date", r["ordered_date"])
+
+    c.setFont("Helvetica-Oblique", 8)
+    c.setFillColor(colors.HexColor("#888888"))
+    c.drawString(x, 0.6 * inch, "Generated automatically by BuildIQ / SitePulse")
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
 @app.template_filter("friendly_dt")
 def friendly_dt(iso_str):
-    """'2026-08-18T18:34:33.082104' -> 'August 18, 2026 at 2:34 PM' (UTC as
-    stored -- good enough for movement history, no per-user timezone here)."""
+    """'2026-08-18T19:36:00' (stored UTC) -> 'August 18, 2026 at 2:36 PM'
+    (converted to Houston/Central time, DST-aware)."""
     if not iso_str:
         return ""
     try:
-        dt = datetime.fromisoformat(iso_str)
+        dt = datetime.fromisoformat(iso_str).replace(tzinfo=ZoneInfo("UTC")).astimezone(HOUSTON_TZ)
         return dt.strftime("%B %-d, %Y at %-I:%M %p")
     except ValueError:
         return iso_str
+
+
+@app.template_filter("friendly_date")
+def friendly_date(date_str):
+    """'2026-08-28' -> '08/28/2026'. For plain date fields (no time
+    component) -- pour dates, requested dates, ordered dates, etc.
+    Leaves anything that doesn't parse as a bare YYYY-MM-DD unchanged,
+    rather than erroring, since some callers may pass already-formatted
+    or blank values."""
+    if not date_str:
+        return ""
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").strftime("%m/%d/%Y")
+    except ValueError:
+        return date_str
+
+
+@app.template_filter("friendly_short_dt")
+def friendly_short_dt(iso_str):
+    """'2026-08-19T17:46:00' (stored UTC) -> '08/19/2026 5:46 PM' (Houston
+    time). Same MM/DD/YYYY convention as friendly_date, just for the
+    "Submitted ..." timestamp headers, which also carry a time -- kept
+    separate from friendly_dt (which spells out the month name) so
+    existing month-name displays elsewhere aren't affected."""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_str).replace(tzinfo=ZoneInfo("UTC")).astimezone(HOUSTON_TZ)
+        return dt.strftime("%m/%d/%Y %-I:%M %p")
+    except ValueError:
+        return iso_str
+
+
+def friendly_time(hhmm):
+    """'07:00' -> '7:00 AM'. Used for WhatsApp notifications (not a
+    Jinja filter -- those render in a template, this builds plain text
+    strings), so every notification's time is formatted consistently
+    with what's shown in the app itself."""
+    if not hhmm:
+        return ""
+    try:
+        return datetime.strptime(hhmm, "%H:%M").strftime("%-I:%M %p")
+    except ValueError:
+        return hhmm
 
 
 DB_DIR = os.environ.get("DATA_DIR", ".")
@@ -56,16 +366,23 @@ ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "heic", "webp"}
 MAX_PHOTO_SIZE_MB = 10
 
 ADMIN_EMAILS = ["ayoub@darycet.com"]
-ALLOWED_DOMAIN = "@darycet.com"
-# Extra emails allowed to sign up even though they're outside the main
-# company email domain.
-EXTRA_ALLOWED_SIGNUP_EMAILS = {"hghuneim@nomaengineering.com"}
-# Full access to every section, including Project Hunt.
+# Domains allowed to sign up. Being on this list only grants basic access
+# (Equipment Center / SitePulse) -- Project Hunt and admin tooling stay
+# gated per-email below, never per-domain.
+ALLOWED_SIGNUP_DOMAINS = ["@darycet.com", "@nomaengineering.com"]
+# Extra individual emails allowed to sign up even though they're outside
+# every allowed domain above.
+EXTRA_ALLOWED_SIGNUP_EMAILS = set()
+# Full access to every section, including Project Hunt -- named
+# individuals only, never a whole domain.
 FULL_ACCESS_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", "hghuneim@nomaengineering.com"}
 # Only these can actually place a concrete/material order -- everyone else
 # can submit a request, but "Scheduled/Ordered" plus the vendor/contact
 # details is procurement's call.
 PROCUREMENT_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com"}
+# Who can manage the WhatsApp site-group routing -- narrower than full
+# admin, but wider than just Ayoub.
+WHATSAPP_ADMIN_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com"}
 
 
 def is_project_hunt_allowed():
@@ -74,6 +391,10 @@ def is_project_hunt_allowed():
 
 def is_procurement():
     return current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS
+
+
+def is_whatsapp_admin():
+    return current_user.is_authenticated and current_user.email in WHATSAPP_ADMIN_EMAILS
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -103,6 +424,7 @@ def inject_permissions():
     return {
         "has_project_hunt_access": current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS,
         "is_procurement": current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS,
+        "is_admin_user": is_admin(),
     }
 
 
@@ -162,7 +484,7 @@ def _apply_move(db, move, moved_by, is_auto=False):
     row (never the value from whenever it was scheduled), moves the asset,
     and stamps who/when it actually happened.
     """
-    asset = db.execute("SELECT status, hours_mileage FROM sitepulse_assets WHERE id = ?", (move["asset_id"],)).fetchone()
+    asset = db.execute("SELECT name, status, hours_mileage FROM sitepulse_assets WHERE id = ?", (move["asset_id"],)).fetchone()
     now = datetime.utcnow().isoformat()
     mover_label = f"{moved_by} (auto, scheduled by {move['created_by']})" if is_auto and move["created_by"] else moved_by
     db.execute("UPDATE sitepulse_assets SET location=?, updated_at=? WHERE id=?",
@@ -174,6 +496,13 @@ def _apply_move(db, move, moved_by, is_auto=False):
     )
     log_activity("sitepulse", "move", move["id"], "applied", asset_id=move["asset_id"],
                  field="location", old_value=move["from_location"], new_value=move["to_location"])
+    send_whatsapp_group_message(
+        f"📍 {asset['name']} moved{' (scheduled)' if move['scheduled_date'] else ''}\n"
+        f"{move['from_location'] or '—'} → {move['to_location']}\n"
+        f"Hours/Mileage: {asset['hours_mileage'] or '—'}\n"
+        f"{'Auto-applied, scheduled by ' + move['created_by'] if is_auto and move['created_by'] else 'By: ' + moved_by}",
+        chat_id=whatsapp_chat_id_for_site(move["to_location"], move["from_location"]) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
 
 
 def apply_due_scheduled_moves(asset_id=None):
@@ -227,6 +556,55 @@ def init_db():
             created_at TEXT NOT NULL
         );
 
+        -- Request Center + Product Intelligence. Employees submit a
+        -- request (feature_requests); every status change is logged to
+        -- feature_request_status_history, which is also what the employee
+        -- sees as their timeline. feature_request_intelligence holds the
+        -- admin-only fields (notes, solution, testing, feedback) in a
+        -- genuinely separate table -- not hidden columns on the same
+        -- table -- so no employee-facing query can ever touch it.
+        CREATE TABLE IF NOT EXISTS feature_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            requester_email TEXT NOT NULL,
+            requester_name TEXT,
+            department TEXT,
+            original_request TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Submitted',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS feature_request_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_request_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            release_note TEXT,
+            changed_by TEXT,
+            changed_at TEXT NOT NULL,
+            FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
+        );
+        CREATE TABLE IF NOT EXISTS feature_request_intelligence (
+            feature_request_id INTEGER PRIMARY KEY,
+            buildiq_module TEXT,
+            internal_notes TEXT,
+            solution_built TEXT,
+            testing_notes TEXT,
+            user_feedback TEXT,
+            release_date TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
+        );
+
+        -- Per-site WhatsApp group routing (item 16) -- e.g. anything
+        -- mentioning "Peninsula" posts to the Peninsula group instead of
+        -- the default SitePulse group. Managed from an admin page so new
+        -- sites/groups can be added without a code change.
+        CREATE TABLE IF NOT EXISTS whatsapp_site_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL UNIQUE,
+            chat_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         -- SitePulse: equipment + rentals only. Concrete/materials moved to
         -- Site Inventory below -- this is the "trim SitePulse down" ask.
         CREATE TABLE IF NOT EXISTS sitepulse_assets (
@@ -272,11 +650,25 @@ def init_db():
             site TEXT NOT NULL, quantity TEXT, unit TEXT, shelf_location TEXT,
             notes TEXT, created_at TEXT, updated_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS engineering_plan_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
+            project_type TEXT NOT NULL, filename TEXT, review_text TEXT,
+            status TEXT DEFAULT 'Complete', requested_by TEXT,
+            created_at TEXT, updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS redline_findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, review_id INTEGER NOT NULL,
+            sheet TEXT, finding TEXT NOT NULL, severity TEXT NOT NULL,
+            category TEXT, why TEXT, evidence TEXT, recommended_review TEXT,
+            status TEXT DEFAULT 'Needs Review', engineer_notes TEXT,
+            created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (review_id) REFERENCES engineering_plan_reviews(id)
+        );
         CREATE TABLE IF NOT EXISTS inventory_concrete_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
             job_site_address TEXT, area_description TEXT, pour_date TEXT NOT NULL,
             pour_time TEXT, mix_design_psi TEXT, mix_slump TEXT, concrete_amount TEXT,
-            truck_spacing TEXT, pump_size TEXT, pump_arrival_time TEXT,
+            truck_spacing TEXT, pump_type TEXT, pump_size TEXT, pump_arrival_time TEXT,
             lab_required TEXT, lab_time TEXT, drilling_required TEXT, drilling_time TEXT,
             requested_by TEXT, requested_signature TEXT, requested_date TEXT,
             ordered_by TEXT, ordered_signature TEXT, ordered_date TEXT,
@@ -388,6 +780,10 @@ def init_db():
         "ALTER TABLE sitepulse_usage_log ADD COLUMN moved_by TEXT",
         "ALTER TABLE sitepulse_usage_log ADD COLUMN applied_at TEXT",
         "ALTER TABLE sitepulse_usage_log ADD COLUMN created_by TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN pump_type TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_arrival_time TEXT",
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN full_reminder_sent_at TEXT",
+        "ALTER TABLE users ADD COLUMN department TEXT",
     ]:
         try:
             db.execute(column_sql)
@@ -423,8 +819,8 @@ def load_user(user_id):
 def signup():
     if request.method == "POST":
         email = request.form["email"].strip().lower()
-        if not email.endswith(ALLOWED_DOMAIN) and email not in EXTRA_ALLOWED_SIGNUP_EMAILS:
-            flash(f"Sign up with your {ALLOWED_DOMAIN} email.", "error")
+        if not any(email.endswith(d) for d in ALLOWED_SIGNUP_DOMAINS) and email not in EXTRA_ALLOWED_SIGNUP_EMAILS:
+            flash(f"Sign up with your {' or '.join(ALLOWED_SIGNUP_DOMAINS)} email.", "error")
             return redirect(url_for("signup"))
         db = get_db()
         existing = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
@@ -489,6 +885,73 @@ def delete_team_member(user_id):
     db.commit()
     flash(f"Removed {target['email']} -- they can sign up again with the same email.")
     return redirect(url_for("team_list"))
+
+
+@app.route("/whatsapp-groups")
+@login_required
+def whatsapp_site_groups_list():
+    if not is_whatsapp_admin():
+        return redirect(url_for("home"))
+    db = get_db()
+    groups = db.execute("SELECT * FROM whatsapp_site_groups ORDER BY keyword ASC").fetchall()
+    return render_template("whatsapp_site_groups.html", groups=groups,
+                            default_chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID or ULTRAMSG_GROUP_CHAT_ID)
+
+
+@app.route("/whatsapp-groups/new", methods=["POST"])
+@login_required
+def whatsapp_site_groups_new():
+    if not is_whatsapp_admin():
+        return redirect(url_for("home"))
+    db = get_db()
+    keyword = request.form.get("keyword", "").strip()
+    chat_id = request.form.get("chat_id", "").strip()
+    if not keyword or not chat_id:
+        flash("Both a site keyword and a chat ID are required.", "error")
+        return redirect(url_for("whatsapp_site_groups_list"))
+    try:
+        db.execute("INSERT INTO whatsapp_site_groups (keyword, chat_id, created_at) VALUES (?, ?, ?)",
+                   (keyword, chat_id, datetime.utcnow().isoformat()))
+        db.commit()
+        flash(f'Anything mentioning "{keyword}" now routes to that group.')
+    except sqlite3.IntegrityError:
+        flash(f'"{keyword}" is already mapped to a group -- delete it first if you want to change it.', "error")
+    return redirect(url_for("whatsapp_site_groups_list"))
+
+
+@app.route("/whatsapp-groups/<int:group_id>/delete", methods=["POST"])
+@login_required
+def whatsapp_site_groups_delete(group_id):
+    if not is_whatsapp_admin():
+        return redirect(url_for("home"))
+    db = get_db()
+    db.execute("DELETE FROM whatsapp_site_groups WHERE id = ?", (group_id,))
+    db.commit()
+    flash("Removed -- that site's notifications will fall back to the default group.")
+    return redirect(url_for("whatsapp_site_groups_list"))
+
+
+@app.route("/whatsapp-groups/test", methods=["POST"])
+@login_required
+def whatsapp_site_groups_test():
+    if not is_whatsapp_admin():
+        return redirect(url_for("home"))
+    chat_id = request.form.get("chat_id", "").strip()
+    label = request.form.get("label", "").strip() or "this group"
+    if not chat_id:
+        flash("No chat ID given to test.", "error")
+        return redirect(url_for("whatsapp_site_groups_list"))
+    ok, detail = send_whatsapp_group_message(
+        f"\U0001F9EA Test notification\n"
+        f"This confirms the group is receiving BuildIQ alerts correctly.\n"
+        f"Triggered by: {current_user.name or current_user.email}",
+        chat_id=chat_id
+    )
+    if ok:
+        flash(f"Test message sent to {label} -- check WhatsApp to confirm it landed.")
+    else:
+        flash(f"Couldn't send to {label}: {detail}", "error")
+    return redirect(url_for("whatsapp_site_groups_list"))
 
 
 @app.route("/")
@@ -679,7 +1142,8 @@ def sitepulse_edit_asset_details(asset_id):
 @login_required
 def sitepulse_update_asset(asset_id):
     db = get_db()
-    old = db.execute("SELECT status, location FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
+    old = db.execute("SELECT name, status, location FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
+    asset_name = old["name"]
     new_status = request.form["status"]
     new_location = request.form.get("location", "").strip()
     hours_mileage = request.form.get("hours_mileage", "")
@@ -709,6 +1173,14 @@ def sitepulse_update_asset(asset_id):
         log_activity("sitepulse", "move", cur.lastrowid, "scheduled", asset_id=asset_id,
                      field="location", old_value=old_location, new_value=new_location)
         db.commit()
+        send_whatsapp_group_message(
+            f"📅 Move scheduled: {asset_name}\n"
+            f"{old_location or '—'} → {new_location}\n"
+            f"Date: {schedule_date}{' at ' + schedule_time if schedule_time else ''}\n"
+            + (f"Reason: {move_reason}\n" if move_reason else "")
+            + f"Scheduled by: {mover}",
+            chat_id=whatsapp_chat_id_for_site(new_location, old_location) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        )
         flash(f"Move to {new_location} scheduled for {schedule_date}.")
         return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
 
@@ -725,9 +1197,22 @@ def sitepulse_update_asset(asset_id):
         )
         log_activity("sitepulse", "move", cur.lastrowid, "created", asset_id=asset_id,
                      field="location", old_value=old_location, new_value=new_location)
+        send_whatsapp_group_message(
+            f"📍 {asset_name} moved\n"
+            f"{old_location or '—'} → {new_location}\n"
+            f"Hours/Mileage: {hours_mileage or '—'}\n"
+            f"By: {mover}",
+            chat_id=whatsapp_chat_id_for_site(new_location, old_location) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        )
 
     if old["status"] != new_status:
         log_activity("sitepulse", "asset", asset_id, "updated", field="status", old_value=old["status"], new_value=new_status)
+        send_whatsapp_group_message(
+            f"🔧 {asset_name} status changed\n"
+            f"{old['status']} → {new_status}\n"
+            f"By: {mover}",
+            chat_id=whatsapp_chat_id_for_site(new_location, old_location) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        )
     db.commit()
     flash("Asset updated.")
     return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
@@ -860,6 +1345,14 @@ def sitepulse_new_maintenance(asset_id):
     )
     log_activity("sitepulse", "maintenance", cur.lastrowid, "created", asset_id=asset_id, new_value=request.form.get("work_done", ""))
     db.commit()
+    asset = db.execute("SELECT name, location FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
+    send_whatsapp_group_message(
+        f"🛠️ Maintenance logged: {asset['name']}\n"
+        f"Issue: {request.form.get('work_done', '') or '—'}\n"
+        + (f"Parts: {request.form.get('parts')}\n" if request.form.get('parts') else "")
+        + f"Reported by: {current_user.name or current_user.email}",
+        chat_id=whatsapp_chat_id_for_site(asset["location"]) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
     flash("Maintenance entry logged.")
     return redirect(url_for("sitepulse_view_asset", asset_id=asset_id))
 
@@ -1135,44 +1628,116 @@ def inventory_delete_material(material_id):
     return redirect(url_for("inventory_materials_list"))
 
 
+def send_due_concrete_reminders():
+    """The day before a scheduled pour, send the full order details (the
+    same notification the old immediate-on-schedule message used to be).
+    No cron here -- same pattern as apply_due_scheduled_moves: check for
+    anything due whenever the concrete list page loads, and send it once.
+    """
+    db = get_db()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    due = db.execute(
+        "SELECT * FROM inventory_concrete_requests WHERE status = 'Scheduled' AND pour_date = ? "
+        "AND (full_reminder_sent_at IS NULL OR full_reminder_sent_at = '')",
+        (tomorrow,)
+    ).fetchall()
+    for r in due:
+        order_chat_id = whatsapp_chat_id_for_site(r["project"], r["job_site_address"])
+        send_whatsapp_group_message(
+            "📋 Tomorrow's concrete order:\n\n" + build_concrete_order_notification(r),
+            chat_id=order_chat_id
+        )
+        db.execute(
+            "UPDATE inventory_concrete_requests SET full_reminder_sent_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), r["id"])
+        )
+    if due:
+        db.commit()
+
+
 @app.route("/inventory/concrete")
 @login_required
 def inventory_concrete_list():
+    send_due_concrete_reminders()
     db = get_db()
     rows = db.execute("SELECT * FROM inventory_concrete_requests ORDER BY pour_date DESC").fetchall()
     return render_template("inventory/concrete_requests.html", requests=rows)
+
+
+def create_concrete_request(fields, requested_by):
+    """Shared insert+notify logic for a new concrete request -- used by
+    both the web form and the voice assistant, so both paths behave
+    identically (same notification, same defaults, same activity log).
+    `fields` is a dict of form-field-name -> value; missing keys default
+    the same way request.form.get(..., "") would.
+    """
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+
+    def f(key, default=""):
+        return fields.get(key) or default
+
+    cur = db.execute(
+        """INSERT INTO inventory_concrete_requests (project, job_site_address, area_description,
+           pour_date, pour_time, mix_design_psi, mix_slump, concrete_amount, truck_spacing,
+           pump_type, pump_size, pump_arrival_time, lab_required, lab_time, drilling_required, drilling_time,
+           requested_by, requested_signature, requested_date, ordered_by, ordered_signature,
+           ordered_date, status, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f("project"), f("job_site_address"), f("area_description"), f("pour_date"), f("pour_time"),
+         f("mix_design_psi"), f("mix_slump"), f("concrete_amount"), f("truck_spacing"),
+         f("pump_type"), f("pump_size"), f("pump_arrival_time"), f("lab_required", "No"), f("lab_time"),
+         f("drilling_required", "No"), f("drilling_time"), requested_by, f("requested_signature"),
+         f("requested_date"), f("ordered_by"), f("ordered_signature"), f("ordered_date"),
+         "Submitted", now, now)
+    )
+    log_activity("inventory", "concrete_request", cur.lastrowid, "created", new_value=f("project"))
+    db.commit()
+    send_whatsapp_group_message(
+        f"🧱 New concrete request submitted\n"
+        f"Project: {f('project') or '—'}\n"
+        f"Pour date: {friendly_date(f('pour_date'))}{' at ' + friendly_time(f('pour_time')) if f('pour_time') else ''}\n"
+        f"Amount: {f('concrete_amount') or '—'}\n"
+        f"Requested by: {requested_by}",
+        chat_id=whatsapp_chat_id_for_site(f("project"), f("job_site_address"))
+    )
+    return cur.lastrowid
+
+
+CONCRETE_REQUEST_REQUIRED_FIELDS = [
+    "project", "job_site_address", "area_description", "pour_date", "pour_time",
+    "mix_design_psi", "mix_slump", "concrete_amount", "truck_spacing",
+    "pump_type", "pump_size", "pump_arrival_time", "lab_required", "lab_time",
+    "drilling_required", "drilling_time", "requested_date",
+]
 
 
 @app.route("/inventory/concrete/new", methods=["GET", "POST"])
 @login_required
 def inventory_new_concrete():
     if request.method == "POST":
-        db = get_db()
-        now = datetime.utcnow().isoformat()
-        cur = db.execute(
-            """INSERT INTO inventory_concrete_requests (project, job_site_address, area_description,
-               pour_date, pour_time, mix_design_psi, mix_slump, concrete_amount, truck_spacing,
-               pump_size, pump_arrival_time, lab_required, lab_time, drilling_required, drilling_time,
-               requested_by, requested_signature, requested_date, ordered_by, ordered_signature,
-               ordered_date, status, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (request.form.get("project", ""), request.form.get("job_site_address", ""),
-             request.form.get("area_description", ""), request.form["pour_date"], request.form.get("pour_time", ""),
-             request.form.get("mix_design_psi", ""), request.form.get("mix_slump", ""),
-             request.form.get("concrete_amount", ""), request.form.get("truck_spacing", ""),
-             request.form.get("pump_size", ""), request.form.get("pump_arrival_time", ""),
-             request.form.get("lab_required", "No"), request.form.get("lab_time", ""),
-             request.form.get("drilling_required", "No"), request.form.get("drilling_time", ""),
-             current_user.name or current_user.email, request.form.get("requested_signature", ""),
-             request.form.get("requested_date", ""), request.form.get("ordered_by", ""),
-             request.form.get("ordered_signature", ""), request.form.get("ordered_date", ""),
-             "Submitted", now, now)
-        )
-        log_activity("inventory", "concrete_request", cur.lastrowid, "created", new_value=request.form.get("project", ""))
-        db.commit()
+        needs_pump = request.form.get("pump_type") in ("Ground Pump", "Overhead Pump")
+        required_fields = [f for f in CONCRETE_REQUEST_REQUIRED_FIELDS if needs_pump or f not in ("pump_size", "pump_arrival_time")]
+        missing = [f for f in required_fields if not request.form.get(f, "").strip()]
+        if missing:
+            flash("Please fill in every field on the form before submitting.", "error")
+            return render_template("inventory/new_concrete_request.html", today=date.today().isoformat(), form=request.form)
+        create_concrete_request(request.form.to_dict(), current_user.name or current_user.email)
         flash("Concrete request submitted.")
         return redirect(url_for("inventory_concrete_list"))
     return render_template("inventory/new_concrete_request.html", today=date.today().isoformat())
+
+
+def _time_minus_hours(hhmm, hours):
+    """'08:00' minus 1 hour -> '07:00'. Returns '' if hhmm is blank/unparseable."""
+    if not hhmm:
+        return ""
+    try:
+        t = datetime.strptime(hhmm, "%H:%M")
+        t -= timedelta(hours=hours)
+        return t.strftime("%H:%M")
+    except ValueError:
+        return ""
 
 
 def build_concrete_order_notification(r):
@@ -1215,7 +1780,7 @@ def build_concrete_order_notification(r):
 
     if r["pump_company"] or r["pump_size"]:
         pump_time = fmt_time(r["pump_arrival_time"])
-        pump_line = "Pump"
+        pump_line = r["pump_type"] if r["pump_type"] else "Pump"
         if r["pump_company"]:
             pump_line += f"-{r['pump_company']}"
         if r["pump_company_phone"]:
@@ -1225,9 +1790,10 @@ def build_concrete_order_notification(r):
         lines.append(pump_line)
 
     if r["concrete_company"]:
+        concrete_time = fmt_time(r["concrete_arrival_time"]) or pour_time
         concrete_line = r["concrete_company"]
-        if pour_time:
-            concrete_line += f" @{pour_time}"
+        if concrete_time:
+            concrete_line += f" @{concrete_time}"
         if r["concrete_company_phone"]:
             concrete_line += f" #{r['concrete_company_phone']}"
         lines.append(concrete_line)
@@ -1275,18 +1841,17 @@ def inventory_edit_concrete(request_id):
         db.execute(
             """UPDATE inventory_concrete_requests SET project=?, job_site_address=?, area_description=?,
                pour_date=?, pour_time=?, mix_design_psi=?, mix_slump=?, concrete_amount=?, truck_spacing=?,
-               pump_size=?, pump_arrival_time=?, lab_required=?, lab_time=?, drilling_required=?,
-               drilling_time=?, ordered_by=?, ordered_signature=?, ordered_date=?, updated_at=?
+               pump_type=?, pump_size=?, pump_arrival_time=?, lab_required=?, lab_time=?, drilling_required=?,
+               drilling_time=?, updated_at=?
                WHERE id=?""",
             (request.form.get("project", ""), request.form.get("job_site_address", ""),
              request.form.get("area_description", ""), request.form["pour_date"], request.form.get("pour_time", ""),
              request.form.get("mix_design_psi", ""), request.form.get("mix_slump", ""),
              request.form.get("concrete_amount", ""), request.form.get("truck_spacing", ""),
-             request.form.get("pump_size", ""), request.form.get("pump_arrival_time", ""),
+             request.form.get("pump_type", ""), request.form.get("pump_size", ""), request.form.get("pump_arrival_time", ""),
              request.form.get("lab_required", "No"), request.form.get("lab_time", ""),
              request.form.get("drilling_required", "No"), request.form.get("drilling_time", ""),
-             request.form.get("ordered_by", ""), request.form.get("ordered_signature", ""),
-             request.form.get("ordered_date", ""), datetime.utcnow().isoformat(), request_id)
+             datetime.utcnow().isoformat(), request_id)
         )
         log_activity("inventory", "concrete_request", request_id, "updated", new_value=request.form.get("project", ""))
         db.commit()
@@ -1310,12 +1875,12 @@ def inventory_place_concrete_order(request_id):
         now = datetime.utcnow().isoformat()
         db.execute(
             """UPDATE inventory_concrete_requests SET
-               concrete_company=?, concrete_company_phone=?, pump_company=?, pump_company_phone=?,
+               concrete_company=?, concrete_company_phone=?, concrete_arrival_time=?, pump_company=?, pump_company_phone=?,
                pump_arrival_time=?, lab_company=?, lab_time=?, drilling_company=?, drilling_company_phone=?,
                drilling_time=?, ordered_by=?, ordered_date=?, status='Scheduled', updated_at=?
                WHERE id=?""",
             (request.form.get("concrete_company", ""), request.form.get("concrete_company_phone", ""),
-             request.form.get("pump_company", ""), request.form.get("pump_company_phone", ""),
+             request.form.get("concrete_arrival_time", ""), request.form.get("pump_company", ""), request.form.get("pump_company_phone", ""),
              request.form.get("pump_arrival_time", ""), request.form.get("lab_company", ""),
              request.form.get("lab_time", ""), request.form.get("drilling_company", ""),
              request.form.get("drilling_company_phone", ""), request.form.get("drilling_time", ""),
@@ -1324,9 +1889,22 @@ def inventory_place_concrete_order(request_id):
         log_activity("inventory", "concrete_request", request_id, "updated", field="status",
                      old_value=r["status"], new_value="Scheduled")
         db.commit()
+        updated_r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
+        order_chat_id = whatsapp_chat_id_for_site(updated_r["project"], updated_r["job_site_address"])
+        pour_date_display = friendly_date(updated_r["pour_date"])
+        pour_time_display = " at " + friendly_time(updated_r["pour_time"]) if updated_r["pour_time"] else ""
+        send_whatsapp_group_message(
+            f"Concrete Scheduled for {pour_date_display}{pour_time_display}",
+            chat_id=order_chat_id
+        )
         flash("Order placed and marked Scheduled.")
         return redirect(url_for("inventory_view_concrete", request_id=request_id))
-    return render_template("inventory/place_concrete_order.html", r=r, today=date.today().isoformat())
+    return render_template(
+        "inventory/place_concrete_order.html", r=r, today=date.today().isoformat(),
+        default_pump_arrival=_time_minus_hours(r["pour_time"], 1) if not r["pump_arrival_time"] else "",
+        default_drilling_time=_time_minus_hours(r["pour_time"], 1) if not r["drilling_time"] else "",
+        default_lab_time=r["pour_time"] if not r["lab_time"] else "",
+    )
 
 
 @app.route("/inventory/concrete/<int:request_id>/status", methods=["POST"])
@@ -1403,6 +1981,15 @@ def inventory_new_purchase():
                 )
         log_activity("inventory", "purchase_request", pr_id, "created", new_value=request.form.get("job_name", ""))
         db.commit()
+        item_summary = "; ".join(i.strip() for i in items if i.strip())[:200]
+        send_whatsapp_group_message(
+            f"🛒 New purchase request submitted\n"
+            f"Job: {request.form.get('job_name', '') or '—'}\n"
+            f"Needed by: {request.form.get('needed_on', '') or '—'}\n"
+            f"Items: {item_summary or '—'}\n"
+            f"Requested by: {current_user.name or current_user.email}",
+            chat_id=whatsapp_chat_id_for_site(request.form.get("job_name", ""), request.form.get("location_description", ""))
+        )
         flash("Purchase request submitted.")
         return redirect(url_for("inventory_purchase_list"))
     return render_template("inventory/new_purchase_request.html", today=date.today().isoformat())
@@ -1549,6 +2136,26 @@ def inventory_place_purchase_order(request_id):
         log_activity("inventory", "purchase_request", request_id, "updated", field="status",
                      old_value=r["status"], new_value="Scheduled")
         db.commit()
+        updated_r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
+        order_chat_id = whatsapp_chat_id_for_site(updated_r["job_name"], updated_r["location_description"])
+        send_whatsapp_group_message(
+            f"✅ Purchase order placed by {current_user.name or current_user.email}\n"
+            f"Job: {updated_r['job_name'] or '—'}\n"
+            f"Vendor: {updated_r['vendor_company'] or '—'}"
+            + (f" #{updated_r['vendor_company_phone']}" if updated_r['vendor_company_phone'] else ""),
+            chat_id=order_chat_id
+        )
+        try:
+            items = db.execute(
+                "SELECT * FROM inventory_purchase_request_items WHERE purchase_request_id = ?", (request_id,)
+            ).fetchall()
+            pdf_bytes = build_purchase_order_pdf(updated_r, items)
+            send_whatsapp_document(
+                pdf_bytes, f"Purchase_Order_{request_id}.pdf",
+                chat_id=order_chat_id, caption="Purchase order details"
+            )
+        except Exception as e:
+            print(f"[whatsapp] failed to build/send purchase order PDF: {e}")
         flash("Order placed and marked Scheduled.")
         return redirect(url_for("inventory_view_purchase", request_id=request_id))
     return render_template("inventory/place_purchase_order.html", r=r, today=date.today().isoformat())
@@ -1633,15 +2240,203 @@ def tr_format_phone(value):
     return value
 
 
-def tr_call_claude(prompt, max_tokens=800):
+def gather_business_snapshot():
+    """Pull a compact, current snapshot of the business for the voice
+    assistant to answer questions against -- equipment status, open
+    requests, and active bids. Kept short on purpose: this gets stuffed
+    into every assistant prompt, so it's a summary, not a full export.
+    """
+    db = get_db()
+    lines = []
+
+    assets = db.execute("SELECT name, status, location FROM sitepulse_assets ORDER BY name").fetchall()
+    status_counts = {}
+    for a in assets:
+        status_counts[a["status"]] = status_counts.get(a["status"], 0) + 1
+    lines.append("EQUIPMENT (" + ", ".join(f"{v} {k}" for k, v in status_counts.items()) + f", {len(assets)} total):")
+    for a in assets:
+        if a["status"] != "Available":
+            lines.append(f"  - {a['name']}: {a['status']}" + (f" @ {a['location']}" if a["location"] else ""))
+
+    open_concrete = db.execute(
+        "SELECT project, pour_date, status FROM inventory_concrete_requests WHERE status != 'Completed' ORDER BY pour_date"
+    ).fetchall()
+    lines.append(f"\nCONCRETE REQUESTS (open, {len(open_concrete)}):")
+    for r in open_concrete[:15]:
+        lines.append(f"  - {r['project'] or 'Untitled'}: {r['status']}, pour {r['pour_date'] or 'TBD'}")
+
+    open_purchase = db.execute(
+        "SELECT job_name, needed_on, status FROM inventory_purchase_requests WHERE status != 'Completed' ORDER BY needed_on"
+    ).fetchall()
+    lines.append(f"\nPURCHASE REQUESTS (open, {len(open_purchase)}):")
+    for r in open_purchase[:15]:
+        lines.append(f"  - {r['job_name'] or 'Untitled'}: {r['status']}, needed {r['needed_on'] or 'TBD'}")
+
+    try:
+        projects = db.execute(
+            "SELECT name, client, status, bid_due_date FROM tracker_projects WHERE status != 'Lost' AND status != 'Archived' ORDER BY bid_due_date"
+        ).fetchall()
+        lines.append(f"\nBID TRACKER (active, {len(projects)}):")
+        for p in projects[:15]:
+            lines.append(f"  - {p['name']}" + (f" ({p['client']})" if p["client"] else "") + f": {p['status']}, due {p['bid_due_date'] or 'TBD'}")
+    except sqlite3.OperationalError:
+        pass
+
+    return "\n".join(lines)
+
+
+CONCRETE_REQUEST_FIELDS = """
+- project (text, REQUIRED) -- the job/project name
+- job_site_address (text, REQUIRED) -- delivery address
+- area_description (text, REQUIRED) -- what area/scope is being poured
+- pour_date (date, REQUIRED) -- format YYYY-MM-DD
+- pour_time (time, REQUIRED) -- format HH:MM 24-hour
+- mix_design_psi (text, REQUIRED) -- e.g. "4000"
+- mix_slump (text, REQUIRED) -- e.g. "4 inch"
+- concrete_amount (text, REQUIRED) -- e.g. "130 yds"
+- truck_spacing (text, REQUIRED) -- spacing between trucks, e.g. "15 min"
+- pump_type (REQUIRED) -- one of: None, Ground Pump, Overhead Pump
+- pump_size (text, REQUIRED only if pump_type is Ground Pump or Overhead Pump -- skip asking if pump_type is None)
+- pump_arrival_time (time, REQUIRED only if pump_type is Ground Pump or Overhead Pump -- skip asking if pump_type is None) -- format HH:MM 24-hour
+- lab_required (Yes/No, REQUIRED)
+- lab_time (time, REQUIRED) -- format HH:MM 24-hour, even if lab_required is No
+- drilling_required (Yes/No, REQUIRED)
+- drilling_time (time, REQUIRED) -- format HH:MM 24-hour, even if drilling_required is No
+""".strip()
+
+# The one field on the web form NOT asked about by voice -- "requested_date"
+# is the date the request itself was made, which is filled in automatically
+# with today's date at submission time. Asking someone "what's today's
+# date" out loud would be a strange thing for Atlas to ask.
+VOICE_REQUIRED_FIELDS = [f for f in CONCRETE_REQUEST_REQUIRED_FIELDS if f != "requested_date"]
+
+
+def _parse_assistant_reply(raw_text):
+    """Split Claude's raw response into the spoken part and the trailing
+    <state>...</state> JSON block. Falls back gracefully if the model
+    didn't include a state block (treats it as a plain chat answer)."""
+    import re
+    match = re.search(r"<state>(.*?)</state>", raw_text, re.DOTALL)
+    if not match:
+        return raw_text.strip(), {"mode": "chat", "fields": {}, "action": "none"}
+    spoken = raw_text[:match.start()].strip()
+    try:
+        state = json.loads(match.group(1))
+    except (json.JSONDecodeError, ValueError):
+        state = {"mode": "chat", "fields": {}, "action": "none"}
+    return spoken, state
+
+
+ATLAS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")  # No hardcoded fallback -- unset means "use the free browser voice," not "use some baked-in voice."
+
+
+def generate_atlas_speech(text):
+    """Generate speech audio for the assistant's reply via ElevenLabs,
+    using the "Atlas" voice. Returns (base64_audio_or_None, error_or_None).
+    Callers fall back to the browser's free built-in voice when audio is
+    None, but the error string is still surfaced to the page so failures
+    are visible instead of silently swallowed.
+
+    If no ELEVENLABS_VOICE_ID is configured, this skips calling ElevenLabs
+    entirely (not just falls back after a failed call) -- so leaving the
+    voice ID unset costs zero ElevenLabs credits for the talking side,
+    not just zero dollars.
+    """
+    if not ATLAS_VOICE_ID:
+        return None, None
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        return None, "ELEVENLABS_VOICE_ID is set but ELEVENLABS_API_KEY is not."
+    if not text:
+        return None, None
+    import urllib.request
+    import urllib.error
+    import base64
+    body = json.dumps({
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{ATLAS_VOICE_ID}",
+        data=body,
+        headers={"Content-Type": "application/json", "xi-api-key": api_key, "Accept": "audio/mpeg"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            audio_bytes = resp.read()
+            return base64.b64encode(audio_bytes).decode("ascii"), None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        return None, f"ElevenLabs error {e.code}: {detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"ElevenLabs connection error: {str(e)}"
+
+
+def call_claude_assistant_turn(user_text, draft):
+    """One turn of the voice assistant. `draft` is the session's running
+    state: {"mode": "chat"|"concrete_request", "fields": {...}, "history": [...]}.
+    Returns (spoken_reply, updated_draft, submitted_id_or_None).
+
+    The model is given the field spec for a concrete request and asked to
+    hold a normal conversation, asking only for whatever's still missing,
+    then to emit a small JSON "state" block alongside its spoken reply so
+    the server knows what it decided -- without that, there'd be no
+    reliable way to tell "still collecting info" from "ready to submit"
+    apart from re-parsing free text every turn.
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return "[No ANTHROPIC_API_KEY set.]"
+        return "This assistant isn't set up yet -- ask Ayoub to add an Anthropic API key.", draft, None
+
+    snapshot = gather_business_snapshot()
+    history = draft.get("history", [])
+    history_text = "\n".join(f"{h['role']}: {h['text']}" for h in history[-10:])
+
+    system = (
+        "You are Atlas, the voice assistant inside BuildIQ. If asked your "
+        "name, say Atlas. "
+        "People talk to you hands-free, often on a job site, instead of "
+        "filling out a form. You'll be read out loud by text-to-speech --  "
+        "keep replies short and conversational, no markdown, no lists "
+        "unless truly needed.\n\n"
+        "You can do two things:\n"
+        "1. Answer questions about the current state of the business using "
+        "the snapshot below.\n"
+        "2. Help someone submit a new concrete request by asking for "
+        "whatever's still missing, one or two things at a time -- never "
+        "more than that in one turn. A concrete request has these fields:\n"
+        f"{CONCRETE_REQUEST_FIELDS}\n\n"
+        "Rules for filling out a request:\n"
+        "- Only ask about fields that are still blank in the current draft.\n"
+        "- Never invent or assume a value the person didn't actually say.\n"
+        "- Once every REQUIRED field is filled, read back a short spoken "
+        "summary of the whole request and ask them to confirm before "
+        "submitting anything.\n"
+        "- Only submit (action=submit) on the turn where they clearly "
+        "confirm (yes / go ahead / submit it / that's right) AND every "
+        "required field is already filled in the draft.\n"
+        "- If they ask an unrelated question mid-request, just answer it "
+        "normally -- don't force them back to the form.\n"
+        "- If they say cancel/never mind/start over, clear the fields and "
+        "set mode back to chat.\n\n"
+        "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
+        "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
+        + json.dumps(draft.get("fields", {})) + "\n\n"
+        "CONVERSATION SO FAR:\n" + (history_text or "(nothing yet)") + "\n\n"
+        "Respond in exactly two parts:\n"
+        "1. Your natural spoken reply.\n"
+        "2. On its own line, a state block in EXACTLY this format:\n"
+        '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit"}</state>'
+    )
+
     import urllib.request
     import urllib.error
     body = json.dumps({
-        "model": "claude-sonnet-4-6", "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}]
+        "model": "claude-sonnet-4-6", "max_tokens": 600,
+        "system": system,
+        "messages": [{"role": "user", "content": user_text}],
     }).encode("utf-8")
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages", data=body,
@@ -1649,13 +2444,673 @@ def tr_call_claude(prompt, max_tokens=800):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            return data["content"][0]["text"]
+            raw_text = data["content"][0]["text"]
     except urllib.error.HTTPError as e:
-        return f"[AI generation error: {e.code} {e.reason}]"
+        return f"I hit an error talking to Claude: {e.code} {e.reason}.", draft, None
     except Exception as e:
-        return f"[AI generation error: {str(e)}]"
+        return f"I hit an error: {str(e)}.", draft, None
+
+    spoken, state = _parse_assistant_reply(raw_text)
+    mode = state.get("mode", "chat")
+    fields = state.get("fields", {}) if mode == "concrete_request" else {}
+    action = state.get("action", "none")
+
+    new_draft = {"mode": mode, "fields": fields, "history": history + [
+        {"role": "user", "text": user_text}, {"role": "assistant", "text": spoken}
+    ]}
+
+    submitted_id = None
+    if action == "submit":
+        needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
+        required_now = [f for f in VOICE_REQUIRED_FIELDS if needs_pump or f not in ("pump_size", "pump_arrival_time")]
+        missing = [f for f in required_now if not str(fields.get(f, "")).strip()]
+        required_ok = not missing
+        if required_ok:
+            fields["requested_date"] = date.today().isoformat()
+            submitted_id = create_concrete_request(fields, current_user.name or current_user.email)
+            new_draft = {"mode": "chat", "fields": {}, "history": []}
+        else:
+            spoken += " Actually, I'm still missing something required -- let's finish that first."
+
+    return spoken, new_draft, submitted_id
+
+
+@app.route("/assistant")
+@login_required
+def assistant_page():
+    if not is_project_hunt_allowed():
+        flash("Ask Ayoub for access to the office assistant.", "error")
+        return redirect(url_for("home"))
+    return render_template("assistant.html")
+
+
+def transcribe_via_whisper(audio_bytes, mime_type):
+    """Transcribe recorded audio via OpenAI's Whisper API. Preferred over
+    ElevenLabs for listening -- Whisper costs roughly $0.006/minute versus
+    ElevenLabs' ~330 credits/minute, which burns through the free 10,000
+    credit/month allowance fast on its own. Keeping listening off
+    ElevenLabs leaves the full credit allowance for the voice (talking
+    back), which is the part actually worth paying for.
+    Returns (text_or_None, error_or_None).
+    """
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return None, None  # Not configured -- caller falls back to ElevenLabs, not an error.
+    if not audio_bytes:
+        return None, "No audio received."
+    import urllib.request
+    import urllib.error
+    import uuid
+
+    boundary = uuid.uuid4().hex
+    ext = "webm" if "webm" in (mime_type or "") else "mp4" if "mp4" in (mime_type or "") else "wav"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n'
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="atlas.{ext}"\r\n'
+        f"Content-Type: {mime_type or 'audio/webm'}\r\n\r\n"
+    ).encode("utf-8") + audio_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/audio/transcriptions",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("text", "").strip(), None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        return None, f"Whisper transcription error {e.code}: {detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"Whisper connection error: {str(e)}"
+
+
+def transcribe_via_elevenlabs(audio_bytes, mime_type):
+    """Transcribe recorded audio via ElevenLabs Speech-to-Text. Fallback
+    used only when OPENAI_API_KEY isn't set -- see transcribe_via_whisper
+    for why Whisper is preferred when available. Returns
+    (text_or_None, error_or_None).
+    """
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        return None, "Neither OPENAI_API_KEY nor ELEVENLABS_API_KEY is set."
+    if not audio_bytes:
+        return None, "No audio received."
+    import urllib.request
+    import urllib.error
+    import uuid
+
+    boundary = uuid.uuid4().hex
+    ext = "webm" if "webm" in (mime_type or "") else "mp4" if "mp4" in (mime_type or "") else "wav"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model_id"\r\n\r\nscribe_v1\r\n'
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="atlas.{ext}"\r\n'
+        f"Content-Type: {mime_type or 'audio/webm'}\r\n\r\n"
+    ).encode("utf-8") + audio_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/speech-to-text",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "xi-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("text", "").strip(), None
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        return None, f"ElevenLabs transcription error {e.code}: {detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"Transcription connection error: {str(e)}"
+
+
+@app.route("/assistant/ask", methods=["POST"])
+@login_required
+def assistant_ask():
+    if not is_project_hunt_allowed():
+        return {"error": "not authorized"}, 403
+
+    if request.content_type and "multipart/form-data" in request.content_type:
+        audio_file = request.files.get("audio")
+        if not audio_file:
+            return {"answer": "I didn't receive any audio."}
+        audio_bytes, mime_type = audio_file.read(), audio_file.mimetype
+        question, transcribe_error = transcribe_via_whisper(audio_bytes, mime_type)
+        if question is None and transcribe_error is None:
+            # Whisper not configured -- fall back to ElevenLabs.
+            question, transcribe_error = transcribe_via_elevenlabs(audio_bytes, mime_type)
+        if transcribe_error:
+            return {"answer": "I couldn't hear that clearly -- try again.", "transcribe_error": transcribe_error}
+        question = (question or "").strip()
+    else:
+        question = (request.get_json(silent=True) or {}).get("question", "").strip()
+
+    if not question:
+        return {"answer": "I didn't catch a question."}
+
+    draft = session.get("voice_draft") or {"mode": "chat", "fields": {}, "history": []}
+    answer, new_draft, submitted_id = call_claude_assistant_turn(question, draft)
+    session["voice_draft"] = new_draft
+
+    audio_b64, audio_error = generate_atlas_speech(answer)
+
+    return {"question": question, "answer": answer, "submitted_id": submitted_id, "mode": new_draft.get("mode"), "audio": audio_b64, "audio_error": audio_error}
+
+
+@app.route("/assistant/reset", methods=["POST"])
+@login_required
+def assistant_reset():
+    session.pop("voice_draft", None)
+    return {"ok": True}
+
+
+
+ENGINEERING_PROJECT_TYPES = {
+    "Gas Station": "canopy layout, vehicle circulation, and truck turning radius",
+    "Strip Center / Retail": "site plan issues that could affect zoning/TIRZ approval, parking layout, and access/driveways",
+    "Restaurant": "kitchen layout and code compliance risks, plus drive-thru circulation if applicable",
+    "Specialty / Other": "structural feasibility and HVAC/MEP feasibility for the specific use",
+}
+
+
+REDLINE_SEVERITIES = ["Critical", "Warning", "Coordination", "Missing Information", "Permit Risk"]
+
+
+def call_redline_review(pdf_bytes, project_type, jurisdiction):
+    """Review an uploaded civil/site plan PDF the way a city reviewer
+    would, returning a list of individual structured findings (not a
+    prose review) -- each finding becomes its own trackable record in
+    the database, the same way Atlas's <state> block turns a
+    conversation into a real database action rather than just text.
+    Returns (findings_list_or_None, error_or_None). Each finding dict has
+    keys: sheet, finding, severity, category, why, evidence, recommended_review.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None, "ANTHROPIC_API_KEY is not set."
+    if not pdf_bytes:
+        return None, "No PDF received."
+
+    type_focus = ENGINEERING_PROJECT_TYPES.get(project_type, "")
+    jurisdiction_line = f"This is being reviewed for {jurisdiction}.\n\n" if jurisdiction else ""
+
+    system = (
+        "You are Redline, a senior civil/site engineering reviewer inside "
+        "BuildIQ. You are a second set of eyes, not a replacement for the "
+        "engineer -- your job is to give them enough evidence to decide "
+        "quickly whether each finding is real. Review this plan set the "
+        "way a city reviewer would -- be critical, specific, and cite what "
+        "you actually see on the sheets rather than generic advice.\n\n"
+        + jurisdiction_line +
+        "Check for:\n"
+        "- Drainage issues\n"
+        "- Access / driveways\n"
+        "- ADA compliance\n"
+        "- Parking layout\n"
+        "- Utility conflicts\n"
+        "- Anything else that could trigger a city review comment\n"
+        + (f"\nFor this project type ({project_type}), also specifically check: {type_focus}.\n" if type_focus else "") +
+        "\nRespond with ONLY a JSON array, no other text before or after. "
+        "One object per finding, in this exact shape:\n"
+        '[{"sheet": "C-302", "finding": "short one-line summary", '
+        '"severity": "Critical|Warning|Coordination|Missing Information|Permit Risk", '
+        '"category": "e.g. Drainage, ADA, Parking, Utility Conflict, Access", '
+        '"why": "why this was flagged", '
+        '"evidence": "what specifically on the sheet supports this", '
+        '"recommended_review": "what the engineer should check/do next"}]\n\n'
+        "If a checked category looks clean, do not create a finding for "
+        "it -- only report actual findings, not confirmations that "
+        "something is fine. If the plan set is genuinely clean, return an "
+        "empty array []."
+    )
+
+    import urllib.request
+    import urllib.error
+    import re
+    b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    body = json.dumps({
+        "model": "claude-sonnet-4-6", "max_tokens": 4000,
+        "system": system,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+                {"type": "text", "text": "Review this plan set and return the findings as a JSON array."},
+            ],
+        }],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages", data=body,
+        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw_text = data["content"][0]["text"].strip()
+            match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+            if not match:
+                return None, "Redline's response wasn't valid JSON -- try again."
+            findings = json.loads(match.group(0))
+            if not isinstance(findings, list):
+                return None, "Redline's response wasn't a list of findings -- try again."
+            for f in findings:
+                if f.get("severity") not in REDLINE_SEVERITIES:
+                    f["severity"] = "Warning"
+            return findings, None
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return None, "Couldn't parse Redline's findings -- try again."
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:300]
+        return None, f"Claude error {e.code}: {detail}"
+    except (urllib.error.URLError, TimeoutError) as e:
+        return None, f"Connection error: {str(e)}"
+
+
+def is_engineering_allowed():
+    return current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS
+
+
+@app.route("/engineering")
+@login_required
+def engineering_dashboard():
+    if not is_engineering_allowed():
+        flash("Ask Ayoub for access to Engineering.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    rows = db.execute(
+        """SELECT r.*,
+           (SELECT COUNT(*) FROM redline_findings f WHERE f.review_id = r.id) AS finding_count,
+           (SELECT COUNT(*) FROM redline_findings f WHERE f.review_id = r.id AND f.severity = 'Critical') AS critical_count,
+           (SELECT COUNT(*) FROM redline_findings f WHERE f.review_id = r.id AND f.severity = 'Permit Risk') AS permit_count,
+           (SELECT COUNT(*) FROM redline_findings f WHERE f.review_id = r.id AND f.severity = 'Warning') AS warning_count,
+           (SELECT COUNT(*) FROM redline_findings f WHERE f.review_id = r.id AND f.severity NOT IN ('Critical','Permit Risk','Warning')) AS other_count
+           FROM engineering_plan_reviews r ORDER BY r.created_at DESC"""
+    ).fetchall()
+    return render_template("engineering/dashboard.html", reviews=rows)
+
+
+@app.route("/engineering/new", methods=["GET", "POST"])
+@login_required
+def engineering_new_review():
+    if not is_engineering_allowed():
+        flash("Ask Ayoub for access to Engineering.", "error")
+        return redirect(url_for("home"))
+
+    if request.method == "POST":
+        project = request.form.get("project", "").strip()
+        project_type = request.form.get("project_type", "")
+        jurisdiction = request.form.get("jurisdiction", "").strip()
+        pdf_file = request.files.get("plan_pdf")
+
+        if not project or not pdf_file or not pdf_file.filename:
+            flash("Project name and a PDF plan set are both required.", "error")
+            return render_template("engineering/new_review.html", project_types=ENGINEERING_PROJECT_TYPES)
+
+        pdf_bytes = pdf_file.read()
+        safe_name = secure_filename(pdf_file.filename)
+        with open(os.path.join(UPLOAD_DIR, safe_name), "wb") as f:
+            f.write(pdf_bytes)
+
+        findings, error = call_redline_review(pdf_bytes, project_type, jurisdiction)
+        now = datetime.utcnow().isoformat()
+        db = get_db()
+        cur = db.execute(
+            """INSERT INTO engineering_plan_reviews
+               (project, project_type, filename, status, requested_by, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (project, project_type, safe_name, "Complete" if findings is not None else "Failed",
+             current_user.name or current_user.email, now, now)
+        )
+        review_id = cur.lastrowid
+        for f in (findings or []):
+            db.execute(
+                """INSERT INTO redline_findings
+                   (review_id, sheet, finding, severity, category, why, evidence,
+                    recommended_review, status, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (review_id, f.get("sheet", ""), f.get("finding", ""), f.get("severity", "Warning"),
+                 f.get("category", ""), f.get("why", ""), f.get("evidence", ""),
+                 f.get("recommended_review", ""), "Needs Review", now, now)
+            )
+        db.commit()
+        if error:
+            flash(f"Review could not be generated: {error}", "error")
+        elif not findings:
+            flash("Plan review complete -- no issues found.")
+        else:
+            flash(f"Plan review complete -- {len(findings)} finding(s).")
+        return redirect(url_for("engineering_view_review", review_id=review_id))
+
+    return render_template("engineering/new_review.html", project_types=ENGINEERING_PROJECT_TYPES)
+
+
+@app.route("/engineering/<int:review_id>")
+@login_required
+def engineering_view_review(review_id):
+    if not is_engineering_allowed():
+        flash("Ask Ayoub for access to Engineering.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    r = db.execute("SELECT * FROM engineering_plan_reviews WHERE id = ?", (review_id,)).fetchone()
+    if not r:
+        flash("Review not found.", "error")
+        return redirect(url_for("engineering_dashboard"))
+    findings = db.execute(
+        "SELECT * FROM redline_findings WHERE review_id = ? ORDER BY "
+        "CASE severity WHEN 'Critical' THEN 0 WHEN 'Permit Risk' THEN 1 WHEN 'Warning' THEN 2 "
+        "WHEN 'Coordination' THEN 3 WHEN 'Missing Information' THEN 4 ELSE 5 END, id",
+        (review_id,)
+    ).fetchall()
+    counts = {}
+    for f in findings:
+        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+    return render_template("engineering/review_detail.html", r=r, findings=findings, counts=counts)
+
+
+@app.route("/engineering/finding/<int:finding_id>/status", methods=["POST"])
+@login_required
+def redline_finding_status(finding_id):
+    if not is_engineering_allowed():
+        return {"error": "not authorized"}, 403
+    new_status = request.form.get("status", "")
+    if new_status not in ("Confirmed", "Dismissed", "Needs Review"):
+        return {"error": "invalid status"}, 400
+    db = get_db()
+    finding = db.execute("SELECT * FROM redline_findings WHERE id = ?", (finding_id,)).fetchone()
+    if not finding:
+        return {"error": "not found"}, 404
+    db.execute(
+        "UPDATE redline_findings SET status = ?, engineer_notes = ?, updated_at = ? WHERE id = ?",
+        (new_status, request.form.get("engineer_notes", ""), datetime.utcnow().isoformat(), finding_id)
+    )
+    log_activity("engineering", "redline_finding", finding_id, "status_changed",
+                 field="status", old_value=finding["status"], new_value=new_status)
+    db.commit()
+    review_id = finding["review_id"]
+    return redirect(url_for("engineering_view_review", review_id=review_id))
+
+
+REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
+
+
+def _log_request_status(db, request_id, status, changed_by, release_note=None):
+    """Write one row to the employee-visible status timeline. This is the
+    single source of truth both the employee's "My Requests" timeline and
+    the admin's status history read from -- there's no separate "current
+    status" tracking logic to keep in sync, the latest row here always
+    reflects the truth (and feature_requests.status is kept in step
+    alongside it for fast filtering/display).
+    """
+    now = datetime.utcnow().isoformat()
+    db.execute(
+        "INSERT INTO feature_request_status_history (feature_request_id, status, release_note, changed_by, changed_at) VALUES (?,?,?,?,?)",
+        (request_id, status, release_note, changed_by, now)
+    )
+    db.execute("UPDATE feature_requests SET status = ?, updated_at = ? WHERE id = ?", (status, now, request_id))
+
+
+@app.route("/requests", methods=["GET", "POST"])
+@login_required
+def request_center():
+    db = get_db()
+    if request.method == "POST":
+        text = request.form.get("original_request", "").strip()
+        if not text:
+            flash("Please describe what you need before submitting.", "error")
+        else:
+            user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
+            department = user_row["department"] if user_row else None
+            now = datetime.utcnow().isoformat()
+            cur = db.execute(
+                "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                (current_user.email, current_user.name or current_user.email, department, text, "Submitted", now, now)
+            )
+            db.commit()
+            _log_request_status(db, cur.lastrowid, "Submitted", current_user.email)
+            db.commit()
+            flash("Request submitted.")
+        return redirect(url_for("request_center"))
+
+    my_requests = db.execute(
+        "SELECT * FROM feature_requests WHERE requester_email = ? ORDER BY created_at DESC",
+        (current_user.email,)
+    ).fetchall()
+    requests_with_history = []
+    for r in my_requests:
+        history = db.execute(
+            "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
+            (r["id"],)
+        ).fetchall()
+        requests_with_history.append({"r": r, "history": history})
+    return render_template("requests/my_requests.html", requests_with_history=requests_with_history)
+
+
+def _render_my_requests_for(db, email):
+    """Shared by the real employee view and the admin's PREVIEW mode --
+    same query, same filtering, so preview is a genuine test of the real
+    access control rather than a separately-maintained mockup.
+    """
+    my_requests = db.execute(
+        "SELECT * FROM feature_requests WHERE requester_email = ? ORDER BY created_at DESC", (email,)
+    ).fetchall()
+    requests_with_history = []
+    for r in my_requests:
+        history = db.execute(
+            "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
+            (r["id"],)
+        ).fetchall()
+        requests_with_history.append({"r": r, "history": history})
+    return requests_with_history
+
+
+@app.route("/admin/product-intelligence")
+@login_required
+def product_intelligence():
+    if not is_admin():
+        flash("Product Intelligence is restricted to admins.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    status_filter = request.args.get("status", "")
+    department_filter = request.args.get("department", "")
+    conditions, params = [], []
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if department_filter:
+        conditions.append("department = ?")
+        params.append(department_filter)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(f"SELECT * FROM feature_requests {where} ORDER BY created_at DESC", params).fetchall()
+    departments = [d["department"] for d in db.execute(
+        "SELECT DISTINCT department FROM feature_requests WHERE department IS NOT NULL AND department != ''"
+    ).fetchall()]
+
+    # Dashboard data -- all real aggregate queries against feature_requests
+    # and its related tables, computed fresh every load. Nothing here is
+    # fabricated or estimated; every number traces back to an actual row.
+    all_requests = db.execute("SELECT * FROM feature_requests").fetchall()
+    status_counts = {}
+    for r in all_requests:
+        status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
+    total_requests = len(all_requests)
+    kpi = {
+        "total": total_requests,
+        "new_reviewing": status_counts.get("Submitted", 0) + status_counts.get("Reviewing", 0),
+        "building": status_counts.get("Building", 0),
+        "testing": status_counts.get("Testing", 0),
+        "released": status_counts.get("Released", 0),
+        "stalled": status_counts.get("On Hold", 0) + status_counts.get("Not Planned", 0),
+    }
+
+    pipeline_order = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
+    pipeline_colors = {
+        "Submitted": "#5AC8E0", "Reviewing": "#8A7238", "Approved": "#C9A24B", "Building": "#C9A24B",
+        "Testing": "#C9A24B", "Released": "#5EEAD4", "On Hold": "#4A5D70", "Not Planned": "#4A5D70",
+    }
+    pipeline = [
+        {"status": s, "count": status_counts.get(s, 0), "color": pipeline_colors[s],
+         "pct": round(100 * status_counts.get(s, 0) / total_requests, 1) if total_requests else 0}
+        for s in pipeline_order if status_counts.get(s, 0) > 0
+    ]
+
+    dept_counts = {}
+    for r in all_requests:
+        d = r["department"] or "Unassigned"
+        dept_counts[d] = dept_counts.get(d, 0) + 1
+    dept_breakdown = sorted(
+        [{"label": k, "count": v, "pct": round(100 * v / total_requests) if total_requests else 0} for k, v in dept_counts.items()],
+        key=lambda x: -x["count"]
+    )
+
+    module_rows = db.execute(
+        "SELECT buildiq_module, COUNT(*) as c FROM feature_request_intelligence "
+        "WHERE buildiq_module IS NOT NULL AND buildiq_module != '' GROUP BY buildiq_module"
+    ).fetchall()
+    module_total = sum(m["c"] for m in module_rows) or 1
+    module_breakdown = sorted(
+        [{"label": m["buildiq_module"], "count": m["c"], "pct": round(100 * m["c"] / module_total)} for m in module_rows],
+        key=lambda x: -x["count"]
+    )
+
+    recent_activity = db.execute(
+        """SELECT h.status, h.changed_by, h.changed_at, f.original_request, f.id as request_id
+           FROM feature_request_status_history h JOIN feature_requests f ON f.id = h.feature_request_id
+           ORDER BY h.changed_at DESC LIMIT 8"""
+    ).fetchall()
+
+    recently_released = db.execute(
+        """SELECT f.id, f.original_request, h.release_note, h.changed_at
+           FROM feature_requests f JOIN feature_request_status_history h ON h.feature_request_id = f.id
+           WHERE f.status = 'Released' AND h.status = 'Released'
+           ORDER BY h.changed_at DESC LIMIT 5"""
+    ).fetchall()
+
+    return render_template(
+        "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
+        departments=departments, status_filter=status_filter, department_filter=department_filter,
+        kpi=kpi, pipeline=pipeline, dept_breakdown=dept_breakdown, module_breakdown=module_breakdown,
+        recent_activity=recent_activity, recently_released=recently_released
+    )
+
+
+@app.route("/admin/product-intelligence/<int:request_id>", methods=["GET", "POST"])
+@login_required
+def product_intelligence_detail(request_id):
+    if not is_admin():
+        flash("Product Intelligence is restricted to admins.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    r = db.execute("SELECT * FROM feature_requests WHERE id = ?", (request_id,)).fetchone()
+    if not r:
+        flash("Request not found.", "error")
+        return redirect(url_for("product_intelligence"))
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        now = datetime.utcnow().isoformat()
+
+        if action == "save_details":
+            # Saves the admin-only intelligence fields WITHOUT touching
+            # status at all -- exactly the separation asked for.
+            db.execute(
+                """INSERT INTO feature_request_intelligence
+                   (feature_request_id, buildiq_module, internal_notes, solution_built, testing_notes, user_feedback, updated_at)
+                   VALUES (?,?,?,?,?,?,?)
+                   ON CONFLICT(feature_request_id) DO UPDATE SET
+                   buildiq_module=excluded.buildiq_module, internal_notes=excluded.internal_notes,
+                   solution_built=excluded.solution_built, testing_notes=excluded.testing_notes,
+                   user_feedback=excluded.user_feedback, updated_at=excluded.updated_at""",
+                (request_id, request.form.get("buildiq_module", ""), request.form.get("internal_notes", ""),
+                 request.form.get("solution_built", ""), request.form.get("testing_notes", ""),
+                 request.form.get("user_feedback", ""), now)
+            )
+            db.commit()
+            flash("Details saved.")
+
+        elif action == "change_status":
+            new_status = request.form.get("status", "")
+            if new_status in REQUEST_STATUSES and new_status != "Released":
+                _log_request_status(db, request_id, new_status, current_user.email)
+                db.commit()
+                flash(f"Status moved to {new_status}.")
+            else:
+                flash("Invalid status change.", "error")
+
+        elif action == "release":
+            # Deliberate, separate action -- requires a note, confirmed
+            # via the checkbox on the form. This is the only path that
+            # can ever set status to Released.
+            release_note = request.form.get("release_note", "").strip()
+            confirmed = request.form.get("confirm_release") == "yes"
+            if not release_note or not confirmed:
+                flash("A release note and confirmation are both required to release a request.", "error")
+            else:
+                _log_request_status(db, request_id, "Released", current_user.email, release_note=release_note)
+                db.execute(
+                    """INSERT INTO feature_request_intelligence (feature_request_id, release_date, updated_at)
+                       VALUES (?,?,?)
+                       ON CONFLICT(feature_request_id) DO UPDATE SET release_date=excluded.release_date, updated_at=excluded.updated_at""",
+                    (request_id, now, now)
+                )
+                db.commit()
+                flash("Request released.")
+
+        return redirect(url_for("product_intelligence_detail", request_id=request_id))
+
+    history = db.execute(
+        "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
+        (request_id,)
+    ).fetchall()
+    intel = db.execute("SELECT * FROM feature_request_intelligence WHERE feature_request_id = ?", (request_id,)).fetchone()
+    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel, statuses=REQUEST_STATUSES)
+
+
+@app.route("/admin/product-intelligence/preview")
+@login_required
+def product_intelligence_preview():
+    if not is_admin():
+        flash("Product Intelligence is restricted to admins.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    preview_email = request.args.get("email", "")
+    all_users = db.execute("SELECT email, name FROM users ORDER BY name").fetchall()
+    requests_with_history = _render_my_requests_for(db, preview_email) if preview_email else []
+    return render_template(
+        "requests/preview_employee_view.html", requests_with_history=requests_with_history,
+        all_users=all_users, preview_email=preview_email
+    )
+
+
+@app.route("/admin/users", methods=["GET", "POST"])
+@login_required
+def admin_users():
+    if not is_admin():
+        flash("This page is restricted to admins.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    if request.method == "POST":
+        user_id = request.form.get("user_id")
+        department = request.form.get("department", "").strip()
+        db.execute("UPDATE users SET department = ? WHERE id = ?", (department, user_id))
+        db.commit()
+        flash("Department updated.")
+        return redirect(url_for("admin_users"))
+    users = db.execute("SELECT id, name, email, department FROM users ORDER BY name").fetchall()
+    return render_template("requests/admin_users.html", users=users)
+
+
+def tr_call_claude(prompt, max_tokens=800):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
 
 
 def tr_build_rfq_prompt(quote, project):

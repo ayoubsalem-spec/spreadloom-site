@@ -1,0 +1,148 @@
+<style>
+    /* Request Center + Product Intelligence -- scoped to this module only.
+       Built entirely from BuildIQ's existing tokens (--ink, --surface,
+       --brass, --teal, --line, --text-dim, Space Grotesk / IBM Plex Mono)
+       -- no new palette introduced, nothing here touches base.html or any
+       other module's styles. */
+
+    .rc-hero { margin-bottom:32px; }
+    .rc-eyebrow {
+        font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--brass);
+        text-transform:uppercase; letter-spacing:1.5px; margin-bottom:8px; display:block;
+    }
+    .rc-hero h1 { margin-bottom:6px; }
+    .rc-hero .sub { font-size:14.5px; max-width:520px; }
+
+    /* --- Submit box --- */
+    .rc-submit {
+        background:var(--surface); border:1px solid var(--line); border-radius:8px;
+        padding:26px 28px; margin-bottom:40px; position:relative; overflow:hidden;
+    }
+    .rc-submit::before {
+        content:''; position:absolute; top:0; left:0; width:3px; height:100%;
+        background:linear-gradient(var(--brass), var(--brass-dim));
+    }
+    .rc-submit textarea {
+        font-size:15px; min-height:76px; resize:vertical;
+    }
+    .rc-submit-foot { display:flex; justify-content:space-between; align-items:center; margin-top:14px; }
+    .rc-submit-hint { font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--text-faint); }
+
+    /* --- Section headers within the requests list --- */
+    .rc-section-label {
+        font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-dim);
+        text-transform:uppercase; letter-spacing:1px; margin:0 0 16px; display:flex;
+        align-items:center; gap:10px;
+    }
+    .rc-section-label .count {
+        background:var(--surface-2); border:1px solid var(--line); border-radius:10px;
+        padding:1px 9px; color:var(--text-dim); font-size:10.5px;
+    }
+
+    /* --- Active request card with connected pipeline timeline --- */
+    .req-card {
+        background:var(--surface); border:1px solid var(--line); border-radius:8px;
+        padding:22px 24px; margin-bottom:16px; transition:border-color 0.2s ease;
+    }
+    .req-card:hover { border-color:var(--brass-dim); }
+    .req-card-top { display:flex; justify-content:space-between; align-items:start; gap:16px; }
+    .req-card-text { margin:0; font-size:15px; line-height:1.5; max-width:75%; }
+    .req-card-meta { color:var(--text-faint); font-size:11.5px; margin-top:8px; font-family:'IBM Plex Mono',monospace; }
+
+    .req-timeline { display:flex; align-items:flex-start; margin-top:22px; padding:0 4px; }
+    .req-timeline .step { display:flex; flex-direction:column; align-items:center; flex:1; position:relative; }
+    .req-timeline .connector {
+        position:absolute; top:5px; left:-50%; width:100%; height:2px; background:var(--line); z-index:1;
+    }
+    .req-timeline .step:first-child .connector { display:none; }
+    .req-timeline .connector.done { background:var(--brass); }
+    .req-timeline .dot {
+        width:11px; height:11px; border-radius:50%; background:var(--ink); border:2px solid var(--line);
+        z-index:2; transition:all 0.3s ease;
+    }
+    .req-timeline .dot.done { background:var(--brass); border-color:var(--brass); }
+    .req-timeline .dot.current {
+        border-color:var(--brass); background:var(--ink);
+        animation:rc-pulse 2s ease-in-out infinite;
+    }
+    @keyframes rc-pulse {
+        0%, 100% { box-shadow:0 0 0 4px rgba(201,162,75,0.18); }
+        50% { box-shadow:0 0 0 8px rgba(201,162,75,0.05); }
+    }
+    .req-timeline .step-label {
+        font-family:'IBM Plex Mono',monospace; font-size:9px; text-transform:uppercase;
+        letter-spacing:0.5px; color:var(--text-faint); margin-top:9px; text-align:center;
+    }
+    .req-timeline .step-label.done, .req-timeline .step-label.current { color:var(--brass); font-weight:600; }
+
+    .req-offpath {
+        margin-top:16px; padding:10px 14px; border-radius:6px; font-size:13px;
+        background:var(--surface-2); color:var(--text-dim); border:1px solid var(--line);
+    }
+
+    /* --- Released / shipped showcase --- */
+    .req-released {
+        background:linear-gradient(135deg, rgba(94,234,212,0.07), rgba(94,234,212,0.015));
+        border:1px solid var(--teal); border-radius:8px; padding:22px 24px; margin-bottom:16px;
+        position:relative;
+    }
+    .req-released-badge {
+        position:absolute; top:18px; right:20px; font-family:'IBM Plex Mono',monospace;
+        font-size:9.5px; font-weight:700; letter-spacing:1px; color:var(--teal);
+        border:1px solid var(--teal); border-radius:2px; padding:3px 8px;
+    }
+    .req-released-text { margin:0; font-size:15px; line-height:1.5; max-width:75%; color:var(--text-dim); }
+    .req-released-note {
+        margin-top:14px; padding-top:14px; border-top:1px solid rgba(94,234,212,0.2);
+        color:var(--text); font-size:14px; line-height:1.55;
+    }
+    .req-released-note strong { color:var(--teal); font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:0.8px; display:block; margin-bottom:6px; }
+
+    /* --- Status badges (used in Product Intelligence table + preview) --- */
+    .rc-badge {
+        font-family:'IBM Plex Mono',monospace; font-size:9.5px; font-weight:600; letter-spacing:0.8px;
+        text-transform:uppercase; padding:3px 9px; border-radius:2px; border:1.5px solid; display:inline-block;
+    }
+    .rc-badge.b-submitted { color:var(--cyan); border-color:var(--cyan); }
+    .rc-badge.b-progress { color:var(--brass); border-color:var(--brass); }
+    .rc-badge.b-released { color:var(--teal); border-color:var(--teal); }
+    .rc-badge.b-stalled { color:var(--text-faint); border-color:var(--text-faint); }
+
+    /* --- Product Intelligence dashboard --- */
+    .pi-section { margin-bottom:36px; }
+    .pi-section-title {
+        font-family:'Space Grotesk',sans-serif; font-size:15px; font-weight:700; margin-bottom:14px;
+        display:flex; align-items:center; gap:8px;
+    }
+    .pi-section-title .dim { color:var(--text-faint); font-weight:500; font-size:12px; font-family:'IBM Plex Mono',monospace; }
+
+    .pi-pipeline { display:flex; height:34px; border-radius:5px; overflow:hidden; border:1px solid var(--line); }
+    .pi-pipeline-seg { display:flex; align-items:center; justify-content:center; font-family:'IBM Plex Mono',monospace; font-size:10.5px; font-weight:600; color:var(--ink); min-width:2px; transition:opacity 0.2s; }
+    .pi-pipeline-seg:hover { opacity:0.85; }
+    .pi-pipeline-legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:12px; }
+    .pi-pipeline-legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); }
+    .pi-pipeline-legend-swatch { width:10px; height:10px; border-radius:2px; }
+
+    .pi-bar-row { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+    .pi-bar-label { width:140px; font-size:13px; color:var(--text-dim); flex-shrink:0; }
+    .pi-bar-track { flex:1; height:8px; background:var(--surface-2); border-radius:4px; overflow:hidden; }
+    .pi-bar-fill { height:100%; background:linear-gradient(90deg, var(--brass-dim), var(--brass)); border-radius:4px; }
+    .pi-bar-count { width:28px; text-align:right; font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--text-dim); flex-shrink:0; }
+
+    .pi-two-col { display:grid; grid-template-columns:1fr 1fr; gap:28px; }
+    @media (max-width:860px) { .pi-two-col { grid-template-columns:1fr; } }
+
+    .pi-feed-item { padding:10px 0; border-bottom:1px solid var(--line); font-size:13px; }
+    .pi-feed-item:last-child { border-bottom:none; }
+    .pi-feed-meta { color:var(--text-faint); font-size:11px; font-family:'IBM Plex Mono',monospace; margin-top:3px; }
+
+    .pi-shipped-strip { display:flex; gap:14px; overflow-x:auto; padding-bottom:6px; }
+    .pi-shipped-card {
+        min-width:260px; background:linear-gradient(135deg, rgba(94,234,212,0.06), transparent);
+        border:1px solid var(--teal); border-radius:8px; padding:16px 18px; flex-shrink:0;
+    }
+    .pi-shipped-card .req { font-size:13px; color:var(--text-dim); margin-bottom:8px; line-height:1.4; }
+    .pi-shipped-card .note { font-size:13px; color:var(--text); line-height:1.4; }
+
+    .pi-preview-btn { position:relative; }
+</style>

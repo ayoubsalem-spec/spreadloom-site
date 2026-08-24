@@ -23,7 +23,7 @@
         </tr>
         {% for e in entries %}
         <tr>
-            <td>{{ e['created_at'][:16].replace('T', ' ') }}</td>
+            <td>{{ e['created_at']|friendly_short_dt }}</td>
             <td>{{ e['user_email'] }}</td>
             {% if not asset %}<td>{{ e['asset_name'] or '—' }}</td>{% endif %}
             <td>{{ e['entity_type']|capitalize }}</td>
