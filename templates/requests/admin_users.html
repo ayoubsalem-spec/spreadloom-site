@@ -18,7 +18,15 @@
             <form method="POST" style="display:flex; gap:8px; align-items:center;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="user_id" value="{{ u['id'] }}">
-                <input type="text" name="department" value="{{ u['department'] or '' }}" placeholder="e.g. Procurement, Engineering, Field" style="flex:1;">
+                <select name="department" style="flex:1;">
+                    <option value="">&mdash; None &mdash;</option>
+                    {% for opt in department_options %}
+                    <option value="{{ opt }}" {{ 'selected' if u['department'] == opt }}>{{ opt }}</option>
+                    {% endfor %}
+                    {% if u['department'] and u['department'] not in department_options %}
+                    <option value="{{ u['department'] }}" selected>{{ u['department'] }} (custom)</option>
+                    {% endif %}
+                </select>
                 <button type="submit" class="btn">Save</button>
             </form>
         </td>

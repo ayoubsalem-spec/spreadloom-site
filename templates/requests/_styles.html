@@ -156,33 +156,48 @@
 
     /* --- Recently Resolved: compact card list --- */
     .pi-resolved-item {
-        background:var(--surface); border:1px solid var(--line); border-radius:7px;
-        padding:14px 16px; margin-bottom:10px; display:flex; gap:12px; align-items:flex-start;
-        transition:border-color 0.15s ease;
+        position:relative; background:linear-gradient(135deg, rgba(94,234,212,0.055), var(--surface) 60%);
+        border:1px solid var(--line); border-left:3px solid var(--teal); border-radius:6px;
+        padding:14px 16px 14px 15px; margin-bottom:10px; display:flex; gap:12px; align-items:flex-start;
+        transition:border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
     }
-    .pi-resolved-item:hover { border-color:var(--teal); }
+    .pi-resolved-item:hover {
+        border-color:var(--teal); transform:translateY(-1px);
+        box-shadow:0 0 0 1px rgba(94,234,212,0.14), 0 6px 16px rgba(0,0,0,0.25);
+    }
     .pi-resolved-icon {
-        width:28px; height:28px; border-radius:50%; background:rgba(94,234,212,0.12);
-        border:1px solid var(--teal); color:var(--teal); flex-shrink:0;
-        display:flex; align-items:center; justify-content:center; font-size:13px; margin-top:1px;
+        width:26px; height:26px; border-radius:50%; flex-shrink:0; margin-top:2px;
+        background:radial-gradient(circle at 35% 30%, rgba(94,234,212,0.4), rgba(94,234,212,0.12));
+        border:1px solid var(--teal); color:var(--teal);
+        display:flex; align-items:center; justify-content:center; font-size:12px;
+        box-shadow:0 0 9px rgba(94,234,212,0.28);
     }
     .pi-resolved-body { flex:1; min-width:0; }
+    .pi-resolved-eyebrow {
+        font-family:'IBM Plex Mono',monospace; font-size:9px; font-weight:700; letter-spacing:0.9px;
+        color:var(--teal); text-transform:uppercase; margin-bottom:4px; display:block;
+    }
     .pi-resolved-top { display:flex; justify-content:space-between; align-items:start; gap:10px; }
     .pi-resolved-title { font-size:13.5px; font-weight:600; line-height:1.4; }
     .pi-resolved-module {
         font-family:'IBM Plex Mono',monospace; font-size:9px; text-transform:uppercase; letter-spacing:0.6px;
-        color:var(--teal); background:rgba(94,234,212,0.1); border-radius:3px; padding:2px 6px; flex-shrink:0;
+        color:var(--teal); background:rgba(94,234,212,0.1); border:1px solid rgba(94,234,212,0.28);
+        border-radius:3px; padding:2px 7px; flex-shrink:0; white-space:nowrap;
     }
-    .pi-resolved-note { font-size:12.5px; color:var(--text-dim); line-height:1.45; margin-top:4px; }
-    .pi-resolved-meta { display:flex; align-items:center; gap:8px; margin-top:9px; }
+    .pi-resolved-note { font-size:12.5px; color:var(--text-dim); line-height:1.5; margin-top:5px; }
+    .pi-resolved-meta {
+        display:flex; align-items:center; gap:9px; margin-top:11px; padding-top:10px;
+        border-top:1px solid rgba(255,255,255,0.045);
+    }
+    .pi-resolved-meta-text { font-size:11px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
     .pi-avatar {
         width:18px; height:18px; border-radius:50%; background:var(--brass-dim); color:var(--ink);
         font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0;
     }
-    .pi-resolved-meta-text { font-size:11px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
 
     /* --- Recent Activity: compact icon feed --- */
-    .pi-activity-item { display:flex; gap:11px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--line); }
+    .pi-activity-item { display:flex; gap:11px; align-items:flex-start; padding:9px 6px; border-bottom:1px solid var(--line); border-radius:4px; margin:0 -6px; transition:background 0.15s ease; }
+    .pi-activity-item:hover { background:rgba(255,255,255,0.02); }
     .pi-activity-item:last-child { border-bottom:none; }
     .pi-activity-icon {
         width:26px; height:26px; border-radius:50%; flex-shrink:0; margin-top:1px;
@@ -201,6 +216,12 @@
     .pi-table-toolbar select { width:auto; min-width:170px; flex:0 0 auto; }
     .pi-req-title { font-weight:600; font-size:13.5px; }
     .pi-req-id { font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--text-faint); margin-top:2px; }
+
+    /* --- Final polish pass: KPI active state, table row hover, section rhythm --- */
+    .kpi-active { border-color:var(--brass); box-shadow:0 0 0 1px rgba(201,162,75,0.25); }
+    .pi-section table tr:not(:first-child):hover td { background:rgba(255,255,255,0.025); }
+    .pi-section table tr:not(:first-child) { transition:background 0.12s ease; }
+    .pi-section-title { letter-spacing:0.2px; }
 
     .pi-preview-btn { position:relative; }
 </style>

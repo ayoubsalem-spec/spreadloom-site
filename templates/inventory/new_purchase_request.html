@@ -6,9 +6,25 @@
     <form method="POST">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
-            <div style="flex:1;"><label>PR#</label><input type="text" name="pr_number"></div>
             <div style="flex:1;"><label>Date</label><input type="date" name="request_date" value="{{ today }}" required></div>
         </div>
+        <p class="sub" style="margin-top:-8px; margin-bottom:14px;">PR# is generated automatically when you submit.</p>
+        {% if procurement_users %}
+        <div class="form-row">
+            <div style="flex:1;">
+                <label>Requestor</label>
+                <select name="requestor_override">
+                    <option value="">Me ({{ current_user.name or current_user.email }})</option>
+                    {% for u in procurement_users %}
+                    {% if u['email'] != current_user.email %}
+                    <option value="{{ u['email'] }}">{{ u['name'] or u['email'] }}</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        <p class="sub" style="margin-top:-8px; margin-bottom:14px;">Filling this out on behalf of another procurement teammate? Pick them here.</p>
+        {% endif %}
         <div class="form-row">
             <div style="flex:1;"><label>Job Name</label><input type="text" name="job_name" autofocus data-remember="job_name"></div>
             <div style="flex:1;"><label>Location / Description of Use</label><input type="text" name="location_description" data-remember="location_description"></div>

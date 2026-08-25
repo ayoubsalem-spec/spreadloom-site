@@ -25,13 +25,16 @@
 </div>
 
 <div class="kpi-grid pi-kpi-grid">
-    <div class="kpi-card"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></div>
-    <div class="kpi-card"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></div>
-    <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></div>
-    <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></div>
-    <div class="kpi-card"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></div>
-    <div class="kpi-card"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></div>
+    <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
+    <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>
+    <a href="{{ url_for('product_intelligence', status='Building') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Building' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></a>
+    <a href="{{ url_for('product_intelligence', status='Testing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Testing' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></a>
+    <a href="{{ url_for('product_intelligence', status='Released') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Released' }}"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></a>
+    <a href="{{ url_for('product_intelligence', status='On Hold,Not Planned') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'On Hold,Not Planned' }}"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></a>
 </div>
+{% if status_filter %}
+<p class="sub" style="margin-top:-14px; margin-bottom:26px; font-size:12px;">Filtered by KPI &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
+{% endif %}
 
 {% if pipeline %}
 <div class="pi-section">
@@ -85,6 +88,7 @@
         <div class="pi-resolved-item">
             <div class="pi-resolved-icon">&#10003;</div>
             <div class="pi-resolved-body">
+                <span class="pi-resolved-eyebrow">Resolved</span>
                 <div class="pi-resolved-top">
                     <div class="pi-resolved-title">{{ r['original_request'] }}</div>
                     {% if r['buildiq_module'] %}<span class="pi-resolved-module">{{ r['buildiq_module'] }}</span>{% endif %}

@@ -3,7 +3,7 @@
 <meta name="csrf-token" content="{{ csrf_token() }}">
 <div style="max-width:640px; margin:0 auto; text-align:center; padding-top:40px;">
     <h1 style="margin-bottom:4px;">Atlas</h1>
-    <p class="sub" style="margin-bottom:36px;">Hold the button, ask a question, let go.</p>
+    <p class="sub" style="margin-bottom:36px;">Tap the button, ask a question, tap again when you're done.</p>
 
     <button id="talk-btn" style="
         width:180px; height:180px; border-radius:50%; border:none;
@@ -76,6 +76,8 @@
     var mediaRecorder = null;
     var audioChunks = [];
     var listening = false;
+    var silenceCheckInterval = null;
+    var silenceAudioCtx = null;
 
     function setStatus(text) { statusLine.textContent = text; }
 
@@ -104,8 +106,9 @@
             var playPromise = audio.play();
             if (playPromise && playPromise.catch) {
                 playPromise.catch(function (err) {
-                    errorLine.textContent = 'Audio blocked by browser (' + err.name + '). Check your mute switch, or tap Replay.';
+                    errorLine.textContent = 'Audio blocked by browser -- it\'ll play automatically as soon as you tap anywhere, or tap Replay now.';
                     errorLine.style.display = 'block';
+                    armAutoReplayOnNextTap(function () { audio.play().catch(function () {}); });
                 });
             }
             replayBtn.style.display = 'inline-block';
@@ -121,8 +124,12 @@
         var utter = new SpeechSynthesisUtterance(text);
         utter.rate = 1.0;
         utter.onerror = function (e) {
-            errorLine.textContent = 'Browser voice failed to play (' + e.error + ').';
+            errorLine.textContent = 'Audio blocked by browser -- it\'ll play automatically as soon as you tap anywhere, or tap Replay now.';
             errorLine.style.display = 'block';
+            armAutoReplayOnNextTap(function () {
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+            });
         };
         window.speechSynthesis.speak(utter);
         replayBtn.style.display = 'inline-block';
@@ -130,6 +137,27 @@
             window.speechSynthesis.cancel();
             window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
         };
+    }
+
+    // iOS blocks audio that isn't triggered by a direct tap -- no amount
+    // of pre-priming reliably works around that, it's an Apple platform
+    // rule, not a bug in this code. Rather than force a precise tap on
+    // the small Replay button, treat literally the NEXT tap anywhere on
+    // the page (which usually happens naturally -- tapping the mic again
+    // to ask something else) as that direct gesture, and use it to play
+    // the answer that got blocked.
+    var autoReplayArmed = false;
+    function armAutoReplayOnNextTap(playFn) {
+        if (autoReplayArmed) return;
+        autoReplayArmed = true;
+        function onNextTap() {
+            document.removeEventListener('touchend', onNextTap, true);
+            document.removeEventListener('click', onNextTap, true);
+            autoReplayArmed = false;
+            playFn();
+        }
+        document.addEventListener('touchend', onNextTap, true);
+        document.addEventListener('click', onNextTap, true);
     }
 
     function askServer(question) {
@@ -228,6 +256,7 @@
             mediaRecorder.addEventListener('stop', function () {
                 stream.getTracks().forEach(function (t) { t.stop(); });
                 btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+                stopSilenceWatch();
                 if (audioChunks.length === 0) {
                     setStatus('Didn\'t catch that -- try again.');
                     listening = false;
@@ -238,12 +267,61 @@
                 listening = false;
             });
             mediaRecorder.start();
+            watchForSilence(stream);
         }).catch(function (err) {
             setStatus('Microphone access denied or unavailable (' + err.name + ').');
             listening = false;
             btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
         });
     }
+
+    // Like ChatGPT's voice mode: once you've started talking, stop
+    // listening automatically after a beat of silence -- no second tap
+    // needed. Only applies to the iOS/MediaRecorder path; the desktop
+    // browser recognition path already does this natively on its own
+    // (continuous = false stops it as soon as it detects you're done).
+    function watchForSilence(stream) {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return; // no silence auto-stop available -- manual tap-to-stop still works
+        silenceAudioCtx = new AudioCtx();
+        var source = silenceAudioCtx.createMediaStreamSource(stream);
+        var analyser = silenceAudioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+        var data = new Uint8Array(analyser.frequencyBinCount);
+
+        var SILENCE_THRESHOLD = 8;      // average frequency amplitude below this counts as quiet
+        var SILENCE_HOLD_MS = 1300;     // how long it has to stay quiet before auto-stopping
+        var MAX_DURATION_MS = 30000;    // safety cap regardless of silence detection
+        var hasSpokenYet = false;
+        var silenceStartedAt = null;
+        var recordingStartedAt = Date.now();
+
+        silenceCheckInterval = setInterval(function () {
+            if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+            analyser.getByteFrequencyData(data);
+            var sum = 0;
+            for (var i = 0; i < data.length; i++) sum += data[i];
+            var avgVolume = sum / data.length;
+
+            if (avgVolume > SILENCE_THRESHOLD) {
+                hasSpokenYet = true;
+                silenceStartedAt = null;
+            } else if (hasSpokenYet) {
+                if (silenceStartedAt === null) silenceStartedAt = Date.now();
+                if (Date.now() - silenceStartedAt > SILENCE_HOLD_MS) {
+                    stopListening();
+                    return;
+                }
+            }
+            if (Date.now() - recordingStartedAt > MAX_DURATION_MS) stopListening();
+        }, 150);
+    }
+    function stopSilenceWatch() {
+        if (silenceCheckInterval) { clearInterval(silenceCheckInterval); silenceCheckInterval = null; }
+        if (silenceAudioCtx) { silenceAudioCtx.close().catch(function () {}); silenceAudioCtx = null; }
+    }
+
     function stopListening() {
         if (!listening) return;
         if (recognition) {
@@ -253,12 +331,13 @@
         if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     }
 
-    // Press-and-hold on both mouse and touch.
-    btn.addEventListener('mousedown', function () { unlockSpeechIfNeeded(); startListening(); });
-    btn.addEventListener('mouseup', function () { unlockSpeechIfNeeded(); stopListening(); });
-    btn.addEventListener('mouseleave', stopListening);
-    btn.addEventListener('touchstart', function (e) { e.preventDefault(); unlockSpeechIfNeeded(); startListening(); });
-    btn.addEventListener('touchend', function (e) { e.preventDefault(); unlockSpeechIfNeeded(); stopListening(); });
+    // Tap once to start, tap again to stop -- no more holding the button.
+    function toggleListening() {
+        if (listening) stopListening();
+        else startListening();
+    }
+    btn.addEventListener('click', function () { unlockSpeechIfNeeded(); toggleListening(); });
+    btn.addEventListener('touchend', function (e) { e.preventDefault(); unlockSpeechIfNeeded(); toggleListening(); });
 
     document.getElementById('reset-btn').addEventListener('click', function () {
         fetch('{{ url_for("assistant_reset") }}', {

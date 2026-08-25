@@ -63,6 +63,7 @@
             <th><a href="{{ url_for('tracker_dashboard', sort='status', dir='desc' if sort_by=='status' and sort_dir=='asc' else 'asc', client=client_filter, status=status_filter) }}" style="color:inherit;">Status {% if sort_by=='status' %}{{ '↑' if sort_dir=='asc' else '↓' }}{% endif %}</a></th>
             <th><a href="{{ url_for('tracker_dashboard', sort='value', dir='desc' if sort_by=='value' and sort_dir=='asc' else 'asc', client=client_filter, status=status_filter) }}" style="color:inherit;">Value {% if sort_by=='value' %}{{ '↑' if sort_dir=='asc' else '↓' }}{% endif %}</a></th>
             <th><a href="{{ url_for('tracker_dashboard', sort='due', dir='desc' if sort_by=='due' and sort_dir=='asc' else 'asc', client=client_filter, status=status_filter) }}" style="color:inherit;">Due {% if sort_by=='due' %}{{ '↑' if sort_dir=='asc' else '↓' }}{% endif %}</a></th>
+            <th>Days Left</th>
             <th>Notes</th>
             <th></th>
         </tr>
@@ -73,6 +74,8 @@
             <td><span class="badge {{ p['status']|statusclass }}">{{ p['status'] }}</span></td>
             <td>{{ p['estimated_value'] or '—' }}</td>
             <td>{{ p['bid_due_date'] or '—' }}</td>
+            {% set dl = p['bid_due_date']|daysleft %}
+            <td>{% if dl is not none %}<span style="color: {{ '#F87171' if dl <= 3 else '#FDE047' if dl <= 14 else 'inherit' }}; font-weight:700;">{{ dl }} day{{ 's' if dl != 1 else '' }}</span>{% else %}—{% endif %}</td>
             <td style="max-width:220px; white-space:normal;">{{ p['notes'] or '—' }}</td>
             <td><a href="{{ url_for('tracker_view_project', project_id=p['id']) }}">Open →</a></td>
         </tr>
@@ -92,22 +95,6 @@
             <td>{{ q['trade'] }}</td>
             <td>{{ q['vendor_name'] or '—' }}{% if q['vendor_phone'] %} — {{ q['vendor_phone'] }}{% endif %}</td>
             <td style="color: {{ '#F87171' if days >= 7 else '#FDE047' }}; font-weight:700;">{{ days }} days</td>
-        </tr>
-        {% endfor %}
-    </table>
-</div>
-{% endif %}
-
-{% if upcoming|length > 0 %}
-<div class="card">
-    <h2>Upcoming Deadlines</h2>
-    <table>
-        <tr><th>Project</th><th>Days Left</th><th>Due Date</th></tr>
-        {% for proj, dl in upcoming %}
-        <tr>
-            <td><a href="{{ url_for('tracker_view_project', project_id=proj['id']) }}">{{ proj['name'] }}</a></td>
-            <td style="color: {{ '#F87171' if dl <= 3 else '#FDE047' }}; font-weight:700;">{{ dl }} day{{ 's' if dl != 1 else '' }}</td>
-            <td>{{ proj['bid_due_date'] }}</td>
         </tr>
         {% endfor %}
     </table>

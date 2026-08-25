@@ -54,11 +54,11 @@
         </div>
         <label>Schedule for a Future Date (optional)</label>
         <div class="form-row">
-            <div style="flex:1;"><input type="date" name="schedule_date" min="{{ today }}"></div>
+            <div style="flex:1;"><input type="date" name="schedule_date"></div>
             <div style="flex:1;"><input type="time" name="schedule_time" placeholder="Time"></div>
             <div style="flex:2;"><input type="text" name="move_reason" placeholder="Reason / Job (optional)"></div>
         </div>
-        <p class="sub" style="margin-top:4px;">Leave the date blank to move it now. Set a date and the location above will apply automatically once that date arrives &mdash; the current location stays put until then.</p>
+        <p class="sub" style="margin-top:4px;">Leave the date blank to move it now. A future date schedules the move for later -- the current location stays put until then. A past or today's date backdates an already-happened move to that date.</p>
         <button type="submit" class="btn btn-gold">Save</button>
     </form>
     {% if scheduled_moves|length > 0 %}

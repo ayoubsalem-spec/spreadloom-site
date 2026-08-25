@@ -96,12 +96,9 @@
         <a href="{{ url_for('inventory_materials_list') }}" class="{{ 'active' if request.path.startswith('/inventory') }}">SitePulse</a>
         {% if has_project_hunt_access %}
         <a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>
-        {% if has_project_hunt_access %}
-        <a href="{{ url_for('engineering_dashboard') }}" class="{{ 'active' if request.path.startswith('/engineering') }}">Redline</a>
         <a href="{{ url_for('request_center') }}" class="{{ 'active' if request.path == '/requests' }}">Requests</a>
         {% if is_admin_user %}
         <a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>
-        {% endif %}
         {% endif %}
         {% endif %}
         {% if current_user.email == "ayoub@darycet.com" %}

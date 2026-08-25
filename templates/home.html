@@ -20,8 +20,6 @@
             <p class="sub" style="min-height:40px;">Company-wide bids, vendor quotes, and deadlines.</p>
             {% if current_user.is_authenticated %}
             <a href="{{ url_for('tracker_dashboard') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
-            {% else %}
-            <a href="{{ url_for('login') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Log In &rarr;</a>
             {% endif %}
         </div>
     </div>
@@ -38,8 +36,6 @@
             <p class="sub" style="min-height:40px;">Equipment tracking, status, location, and outside rentals.</p>
             {% if current_user.is_authenticated %}
             <a href="{{ url_for('sitepulse_dashboard') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
-            {% else %}
-            <a href="{{ url_for('login') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Log In &rarr;</a>
             {% endif %}
         </div>
     </div>
@@ -55,8 +51,6 @@
             <p class="sub" style="min-height:40px;">Concrete requests and material inventory across every site.</p>
             {% if current_user.is_authenticated %}
             <a href="{{ url_for('inventory_home') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
-            {% else %}
-            <a href="{{ url_for('login') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Log In &rarr;</a>
             {% endif %}
         </div>
     </div>
@@ -65,7 +59,8 @@
 
 {% if not current_user.is_authenticated %}
 <div style="text-align:center; padding-bottom:40px;">
-    <a href="{{ url_for('signup') }}" class="sub" style="text-decoration:underline;">No account yet? Sign up</a>
+    <a href="{{ url_for('login') }}" class="btn btn-gold" style="padding:12px 40px; display:inline-block;">Log In &rarr;</a>
+    <p class="sub" style="margin-top:16px;"><a href="{{ url_for('signup') }}" class="sub" style="text-decoration:underline;">No account yet? Sign up</a></p>
 </div>
 {% endif %}
 {% endblock %}
