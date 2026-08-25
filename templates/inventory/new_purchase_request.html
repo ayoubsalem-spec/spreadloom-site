@@ -23,7 +23,12 @@
                 </select>
             </div>
         </div>
-        <p class="sub" style="margin-top:-8px; margin-bottom:14px;">Filling this out on behalf of another procurement teammate? Pick them here.</p>
+        {% set other_procurement = procurement_users|selectattr('email', 'ne', current_user.email)|list %}
+        <p class="sub" style="margin-top:-8px; margin-bottom:14px;">
+            {% if other_procurement %}Filling this out on behalf of another procurement teammate? Pick them here.
+            {% else %}Filling this out on behalf of another teammate.
+            {% endif %}
+        </p>
         {% endif %}
         <div class="form-row">
             <div style="flex:1;"><label>Job Name</label><input type="text" name="job_name" autofocus data-remember="job_name"></div>
