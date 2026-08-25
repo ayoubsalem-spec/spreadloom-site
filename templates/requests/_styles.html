@@ -48,6 +48,9 @@
     .req-card-top { display:flex; justify-content:space-between; align-items:start; gap:16px; }
     .req-card-text { margin:0; font-size:15px; line-height:1.5; max-width:75%; }
     .req-card-meta { color:var(--text-faint); font-size:11.5px; margin-top:8px; font-family:'IBM Plex Mono',monospace; }
+    .req-attachments { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+    .req-attachments img { width:72px; height:72px; object-fit:cover; border-radius:5px; border:1px solid var(--line); transition:border-color 0.2s; }
+    .req-attachments a:hover img { border-color:var(--brass-dim); }
 
     .req-timeline { display:flex; align-items:flex-start; margin-top:22px; padding:0 4px; }
     .req-timeline .step { display:flex; flex-direction:column; align-items:center; flex:1; position:relative; }
@@ -107,9 +110,16 @@
     .rc-badge.b-progress { color:var(--brass); border-color:var(--brass); }
     .rc-badge.b-released { color:var(--teal); border-color:var(--teal); }
     .rc-badge.b-stalled { color:var(--text-faint); border-color:var(--text-faint); }
+    .rc-badge.b-reviewing { color:var(--cyan); border-color:var(--cyan); }
+    .rc-badge.b-approved { color:var(--brass-dim); border-color:var(--brass-dim); }
+    .rc-badge.b-testing { color:#5AC8E0; border-color:#5AC8E0; }
+    .rc-badge.b-attention { color:var(--red); border-color:var(--red); }
 
     /* --- Product Intelligence dashboard --- */
     .pi-section { margin-bottom:36px; }
+    .pi-kpi-grid { grid-template-columns:repeat(6,1fr); }
+    @media (max-width:860px) { .pi-kpi-grid { grid-template-columns:repeat(3,1fr); } }
+    @media (max-width:520px) { .pi-kpi-grid { grid-template-columns:repeat(2,1fr); } }
     .pi-section-title {
         font-family:'Space Grotesk',sans-serif; font-size:15px; font-weight:700; margin-bottom:14px;
         display:flex; align-items:center; gap:8px;
@@ -143,6 +153,54 @@
     }
     .pi-shipped-card .req { font-size:13px; color:var(--text-dim); margin-bottom:8px; line-height:1.4; }
     .pi-shipped-card .note { font-size:13px; color:var(--text); line-height:1.4; }
+
+    /* --- Recently Resolved: compact card list --- */
+    .pi-resolved-item {
+        background:var(--surface); border:1px solid var(--line); border-radius:7px;
+        padding:14px 16px; margin-bottom:10px; display:flex; gap:12px; align-items:flex-start;
+        transition:border-color 0.15s ease;
+    }
+    .pi-resolved-item:hover { border-color:var(--teal); }
+    .pi-resolved-icon {
+        width:28px; height:28px; border-radius:50%; background:rgba(94,234,212,0.12);
+        border:1px solid var(--teal); color:var(--teal); flex-shrink:0;
+        display:flex; align-items:center; justify-content:center; font-size:13px; margin-top:1px;
+    }
+    .pi-resolved-body { flex:1; min-width:0; }
+    .pi-resolved-top { display:flex; justify-content:space-between; align-items:start; gap:10px; }
+    .pi-resolved-title { font-size:13.5px; font-weight:600; line-height:1.4; }
+    .pi-resolved-module {
+        font-family:'IBM Plex Mono',monospace; font-size:9px; text-transform:uppercase; letter-spacing:0.6px;
+        color:var(--teal); background:rgba(94,234,212,0.1); border-radius:3px; padding:2px 6px; flex-shrink:0;
+    }
+    .pi-resolved-note { font-size:12.5px; color:var(--text-dim); line-height:1.45; margin-top:4px; }
+    .pi-resolved-meta { display:flex; align-items:center; gap:8px; margin-top:9px; }
+    .pi-avatar {
+        width:18px; height:18px; border-radius:50%; background:var(--brass-dim); color:var(--ink);
+        font-size:9.5px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0;
+    }
+    .pi-resolved-meta-text { font-size:11px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
+
+    /* --- Recent Activity: compact icon feed --- */
+    .pi-activity-item { display:flex; gap:11px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--line); }
+    .pi-activity-item:last-child { border-bottom:none; }
+    .pi-activity-icon {
+        width:26px; height:26px; border-radius:50%; flex-shrink:0; margin-top:1px;
+        display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700;
+        background:var(--surface-2); border:1px solid var(--line);
+    }
+    .pi-activity-body { flex:1; min-width:0; display:flex; justify-content:space-between; gap:10px; align-items:start; }
+    .pi-activity-status { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; }
+    .pi-activity-title { font-size:12.5px; color:var(--text); margin-top:2px; line-height:1.4; }
+    .pi-activity-right { text-align:right; flex-shrink:0; }
+    .pi-activity-time { font-size:10.5px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
+    .pi-activity-user { font-size:10.5px; color:var(--text-dim); margin-top:2px; }
+
+    /* --- All Requests: premium table --- */
+    .pi-table-toolbar { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+    .pi-table-toolbar select { width:auto; min-width:170px; flex:0 0 auto; }
+    .pi-req-title { font-weight:600; font-size:13.5px; }
+    .pi-req-id { font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--text-faint); margin-top:2px; }
 
     .pi-preview-btn { position:relative; }
 </style>

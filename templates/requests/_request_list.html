@@ -26,6 +26,13 @@
         {% endif %}
     </div>
     <p class="req-card-meta">Submitted {{ r['created_at']|friendly_short_dt }}</p>
+    {% if item.attachments %}
+    <div class="req-attachments">
+        {% for att in item.attachments %}
+        <a href="{{ url_for('uploaded_photo', filename=att['filename']) }}" target="_blank"><img src="{{ url_for('uploaded_photo', filename=att['filename']) }}" alt="Screenshot"></a>
+        {% endfor %}
+    </div>
+    {% endif %}
 
     {% if r['status'] in ('On Hold', 'Not Planned') %}
     <div class="req-offpath">
@@ -51,15 +58,22 @@
 
 {% set has_released = requests_with_history|map(attribute='r.status')|select('equalto', 'Released')|list %}
 {% if has_released %}
-<p class="rc-section-label" style="margin-top:8px;">Shipped <span class="count">{{ has_released|length }}</span></p>
+<p class="rc-section-label" style="margin-top:8px;">Resolved <span class="count">{{ has_released|length }}</span></p>
 {% for item in requests_with_history %}
 {% set r = item.r %}
 {% if r['status'] == 'Released' %}
 {% set release_row = item.history|selectattr('status', 'equalto', 'Released')|list %}
 <div class="req-released">
-    <span class="req-released-badge">&#10003; Shipped</span>
+    <span class="req-released-badge">&#10003; Resolved</span>
     <p class="req-released-text">{{ r['original_request'] }}</p>
     <p class="req-card-meta">Submitted {{ r['created_at']|friendly_short_dt }}</p>
+    {% if item.attachments %}
+    <div class="req-attachments">
+        {% for att in item.attachments %}
+        <a href="{{ url_for('uploaded_photo', filename=att['filename']) }}" target="_blank"><img src="{{ url_for('uploaded_photo', filename=att['filename']) }}" alt="Screenshot"></a>
+        {% endfor %}
+    </div>
+    {% endif %}
     {% if release_row and release_row[0]['release_note'] %}
     <div class="req-released-note">
         <strong>Now in BuildIQ</strong>

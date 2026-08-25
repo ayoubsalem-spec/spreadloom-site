@@ -26,7 +26,7 @@
     <p class="sub" style="margin:0;">No items listed.</p>
     {% else %}
     <table>
-        <tr><th>Item</th><th>Description</th><th>Supplier</th><th>Qty</th></tr>
+        <tr><th>Item</th><th>Description</th><th>Supplier</th><th>Qty</th><th>Unit</th></tr>
         {% for it in items %}
         {% if it['item'] or it['description'] %}
         <tr>
@@ -34,6 +34,7 @@
             <td>{{ it['description'] or '\u2014' }}</td>
             <td>{{ it['supplier'] or '\u2014' }}</td>
             <td>{{ it['qty'] or '\u2014' }}</td>
+            <td>{{ it['unit'] or '\u2014' }}</td>
         </tr>
         {% endif %}
         {% endfor %}

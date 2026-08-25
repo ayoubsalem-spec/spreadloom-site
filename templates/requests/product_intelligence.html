@@ -2,6 +2,19 @@
 {% block content %}
 {% include "requests/_styles.html" %}
 
+{% macro status_meta(status) %}
+{%- if status == 'Submitted' -%}b-submitted|S
+{%- elif status == 'Reviewing' -%}b-reviewing|R
+{%- elif status == 'Approved' -%}b-approved|A
+{%- elif status == 'Building' -%}b-progress|B
+{%- elif status == 'Testing' -%}b-testing|T
+{%- elif status == 'Released' -%}b-released|&#10003;
+{%- elif status == 'On Hold' -%}b-stalled|H
+{%- elif status == 'Not Planned' -%}b-stalled|&ndash;
+{%- else -%}b-stalled|?
+{%- endif -%}
+{% endmacro %}
+
 <div class="rc-hero" style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:16px; margin-bottom:28px;">
     <div>
         <span class="rc-eyebrow">Product Intelligence</span>
@@ -11,12 +24,12 @@
     <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
 </div>
 
-<div class="kpi-grid" style="grid-template-columns:repeat(6,1fr);">
+<div class="kpi-grid pi-kpi-grid">
     <div class="kpi-card"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></div>
     <div class="kpi-card"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></div>
     <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></div>
     <div class="kpi-card"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></div>
-    <div class="kpi-card"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Released</div></div>
+    <div class="kpi-card"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></div>
     <div class="kpi-card"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></div>
 </div>
 
@@ -25,12 +38,12 @@
     <p class="pi-section-title">Request Pipeline <span class="dim">where everything sits right now</span></p>
     <div class="pi-pipeline">
         {% for seg in pipeline %}
-        <div class="pi-pipeline-seg" style="width:{{ seg.pct }}%; background:{{ seg.color }};" title="{{ seg.status }}: {{ seg.count }}">{{ seg.count if seg.pct >= 6 }}</div>
+        <div class="pi-pipeline-seg" style="width:{{ seg.pct }}%; background:{{ seg.color }};" title="{{ seg.status|replace('Released','Resolved') }}: {{ seg.count }}">{{ seg.count if seg.pct >= 6 }}</div>
         {% endfor %}
     </div>
     <div class="pi-pipeline-legend">
         {% for seg in pipeline %}
-        <div class="pi-pipeline-legend-item"><span class="pi-pipeline-legend-swatch" style="background:{{ seg.color }};"></span>{{ seg.status }} ({{ seg.count }})</div>
+        <div class="pi-pipeline-legend-item"><span class="pi-pipeline-legend-swatch" style="background:{{ seg.color }};"></span>{{ seg.status|replace('Released','Resolved') }} ({{ seg.count }})</div>
         {% endfor %}
     </div>
 </div>
@@ -64,41 +77,67 @@
     {% endif %}
 </div>
 
-{% if recently_released %}
-<div class="pi-section">
-    <p class="pi-section-title">Recently Released</p>
-    <div class="pi-shipped-strip">
+<div class="pi-two-col">
+    <div class="pi-section">
+        <p class="pi-section-title" style="display:flex; justify-content:space-between;">Recently Resolved</p>
+        {% if recently_released %}
         {% for r in recently_released %}
-        <div class="pi-shipped-card">
-            <div class="req">{{ r['original_request'] }}</div>
-            {% if r['release_note'] %}<div class="note">{{ r['release_note'] }}</div>{% endif %}
+        <div class="pi-resolved-item">
+            <div class="pi-resolved-icon">&#10003;</div>
+            <div class="pi-resolved-body">
+                <div class="pi-resolved-top">
+                    <div class="pi-resolved-title">{{ r['original_request'] }}</div>
+                    {% if r['buildiq_module'] %}<span class="pi-resolved-module">{{ r['buildiq_module'] }}</span>{% endif %}
+                </div>
+                {% if r['release_note'] %}<div class="pi-resolved-note">{{ r['release_note'] }}</div>{% endif %}
+                <div class="pi-resolved-meta">
+                    <div class="pi-avatar">{{ (r['requester_name'] or r['requester_email'] or '?')[0]|upper }}</div>
+                    <span class="pi-resolved-meta-text">{{ r['requester_name'] or r['requester_email'] }} &middot; {{ r['changed_at']|friendly_short_dt }}</span>
+                </div>
+            </div>
         </div>
         {% endfor %}
+        {% else %}
+        <p class="sub">Nothing resolved yet.</p>
+        {% endif %}
     </div>
-</div>
-{% endif %}
 
-{% if recent_activity %}
-<div class="pi-section">
-    <p class="pi-section-title">Recent Activity</p>
-    <div class="card" style="padding:6px 22px;">
-        {% for a in recent_activity %}
-        <div class="pi-feed-item">
-            <span style="color:var(--brass);">{{ a['status'] }}</span> &mdash; {{ a['original_request'][:70] }}{% if a['original_request']|length > 70 %}...{% endif %}
-            <div class="pi-feed-meta">{{ a['changed_at']|friendly_short_dt }}{% if a['changed_by'] %} &middot; {{ a['changed_by'] }}{% endif %}</div>
+    <div class="pi-section">
+        <p class="pi-section-title">Recent Activity</p>
+        {% if recent_activity %}
+        <div class="card" style="padding:2px 18px;">
+            {% for a in recent_activity %}
+            {% set meta = status_meta(a['status'])|trim %}
+            {% set badge_class = meta.split('|')[0] %}
+            {% set icon = meta.split('|')[1] %}
+            <div class="pi-activity-item">
+                <div class="pi-activity-icon rc-badge {{ badge_class }}" style="border-radius:50%;">{{ icon|safe }}</div>
+                <div class="pi-activity-body">
+                    <div>
+                        <div class="pi-activity-status rc-badge {{ badge_class }}" style="border:none; padding:0; background:none;">{{ a['status']|replace('Released','Resolved') }}</div>
+                        <div class="pi-activity-title">{{ a['original_request'][:60] }}{% if a['original_request']|length > 60 %}&hellip;{% endif %}</div>
+                    </div>
+                    <div class="pi-activity-right">
+                        <div class="pi-activity-time">{{ a['changed_at']|friendly_short_dt }}</div>
+                        {% if a['changed_by'] %}<div class="pi-activity-user">{{ a['changed_by'] }}</div>{% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
         </div>
-        {% endfor %}
+        {% else %}
+        <p class="sub">No activity yet.</p>
+        {% endif %}
     </div>
 </div>
-{% endif %}
 
 <div class="pi-section">
     <p class="pi-section-title">All Requests</p>
-    <form method="GET" style="display:flex; gap:10px; margin-bottom:16px;">
+    <form method="GET" class="pi-table-toolbar">
         <select name="status" onchange="this.form.submit()">
             <option value="">All statuses</option>
             {% for s in statuses %}
-            <option value="{{ s }}" {{ 'selected' if status_filter == s }}>{{ s }}</option>
+            <option value="{{ s }}" {{ 'selected' if status_filter == s }}>{{ s|replace('Released','Resolved') }}</option>
             {% endfor %}
         </select>
         <select name="department" onchange="this.form.submit()">
@@ -112,22 +151,29 @@
     {% if requests %}
     <table>
         <tr>
-            <th>Requester</th>
-            <th>Department</th>
             <th>Request</th>
+            <th>Department</th>
             <th>Status</th>
+            <th>Requester</th>
             <th>Submitted</th>
         </tr>
         {% for r in requests %}
         <tr onclick="window.location='{{ url_for('product_intelligence_detail', request_id=r['id']) }}'" style="cursor:pointer;">
-            <td>{{ r['requester_name'] or r['requester_email'] }}</td>
+            <td style="max-width:400px;">
+                <div class="pi-req-title" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r['original_request'] }}</div>
+                <div class="pi-req-id">REQ-{{ '%03d'|format(r['id']) }}</div>
+            </td>
             <td>{{ r['department'] or '\u2014' }}</td>
-            <td style="max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r['original_request'] }}</td>
             <td>
-                {% if r['status'] == 'Released' %}<span class="rc-badge b-released">Released</span>
-                {% elif r['status'] in ('On Hold', 'Not Planned') %}<span class="rc-badge b-stalled">{{ r['status'] }}</span>
-                {% elif r['status'] == 'Submitted' %}<span class="rc-badge b-submitted">Submitted</span>
-                {% else %}<span class="rc-badge b-progress">{{ r['status'] }}</span>{% endif %}
+                {% set meta = status_meta(r['status'])|trim %}
+                {% set badge_class = meta.split('|')[0] %}
+                <span class="rc-badge {{ badge_class }}">{{ r['status']|replace('Released','Resolved') }}</span>
+            </td>
+            <td>
+                <div style="display:flex; align-items:center; gap:7px;">
+                    <div class="pi-avatar">{{ (r['requester_name'] or r['requester_email'] or '?')[0]|upper }}</div>
+                    {{ r['requester_name'] or r['requester_email'] }}
+                </div>
             </td>
             <td>{{ r['created_at']|friendly_short_dt }}</td>
         </tr>

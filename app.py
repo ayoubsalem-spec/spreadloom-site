@@ -286,7 +286,7 @@ def build_purchase_order_pdf(r, items):
         section("Items")
         for it in items:
             desc = " \u2014 ".join(v for v in [it["item"], it["description"]] if v)
-            qty = f" ({it['qty']})" if it["qty"] else ""
+            qty = f" ({it['qty']}{' ' + it['unit'] if it['unit'] else ''})" if it["qty"] else ""
             y = _pdf_write_wrapped(c, f"\u2022 {desc}{qty}", x, y, width - 1.5 * inch, size=10)
 
     section("Ordered By")
@@ -365,7 +365,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "heic", "webp"}
 MAX_PHOTO_SIZE_MB = 10
 
-ADMIN_EMAILS = ["ayoub@darycet.com"]
+ADMIN_EMAILS = ["ayoub@darycet.com", "rebecca@darycet.com"]
 # Domains allowed to sign up. Being on this list only grants basic access
 # (Equipment Center / SitePulse) -- Project Hunt and admin tooling stay
 # gated per-email below, never per-domain.
@@ -593,6 +593,14 @@ def init_db():
             updated_at TEXT,
             FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
         );
+        CREATE TABLE IF NOT EXISTS feature_request_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_request_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            uploaded_by TEXT,
+            created_at TEXT,
+            FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
+        );
 
         -- Per-site WhatsApp group routing (item 16) -- e.g. anything
         -- mentioning "Peninsula" posts to the Peninsula group instead of
@@ -705,7 +713,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS inventory_purchase_request_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT, purchase_request_id INTEGER NOT NULL,
-            item TEXT, description TEXT, supplier TEXT, qty TEXT,
+            item TEXT, description TEXT, supplier TEXT, qty TEXT, unit TEXT,
             FOREIGN KEY (purchase_request_id) REFERENCES inventory_purchase_requests (id)
         );
 
@@ -795,6 +803,7 @@ def init_db():
         "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_arrival_time TEXT",
         "ALTER TABLE inventory_concrete_requests ADD COLUMN full_reminder_sent_at TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
+        "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
     ]:
         try:
             db.execute(column_sql)
@@ -1688,6 +1697,10 @@ def create_concrete_request(fields, requested_by):
     def f(key, default=""):
         return fields.get(key) or default
 
+    pump_size = f("pump_size") if f("pump_type") in ("Ground Pump", "Overhead Pump") else ""
+    pump_arrival_time = f("pump_arrival_time") if f("pump_type") in ("Ground Pump", "Overhead Pump") else ""
+    drilling_time = f("drilling_time") if f("drilling_required") == "Yes" else ""
+
     cur = db.execute(
         """INSERT INTO inventory_concrete_requests (project, job_site_address, area_description,
            pour_date, pour_time, mix_design_psi, mix_slump, concrete_amount, truck_spacing,
@@ -1697,8 +1710,8 @@ def create_concrete_request(fields, requested_by):
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (f("project"), f("job_site_address"), f("area_description"), f("pour_date"), f("pour_time"),
          f("mix_design_psi"), f("mix_slump"), f("concrete_amount"), f("truck_spacing"),
-         f("pump_type"), f("pump_size"), f("pump_arrival_time"), f("lab_required", "No"), f("lab_time"),
-         f("drilling_required", "No"), f("drilling_time"), requested_by, f("requested_signature"),
+         f("pump_type"), pump_size, pump_arrival_time, f("lab_required", "No"), f("lab_time"),
+         f("drilling_required", "No"), drilling_time, requested_by, f("requested_signature"),
          f("requested_date"), f("ordered_by"), f("ordered_signature"), f("ordered_date"),
          "Submitted", now, now)
     )
@@ -1728,7 +1741,12 @@ CONCRETE_REQUEST_REQUIRED_FIELDS = [
 def inventory_new_concrete():
     if request.method == "POST":
         needs_pump = request.form.get("pump_type") in ("Ground Pump", "Overhead Pump")
-        required_fields = [f for f in CONCRETE_REQUEST_REQUIRED_FIELDS if needs_pump or f not in ("pump_size", "pump_arrival_time")]
+        needs_drilling = request.form.get("drilling_required") == "Yes"
+        required_fields = [
+            f for f in CONCRETE_REQUEST_REQUIRED_FIELDS
+            if (needs_pump or f not in ("pump_size", "pump_arrival_time"))
+            and (needs_drilling or f != "drilling_time")
+        ]
         missing = [f for f in required_fields if not request.form.get(f, "").strip()]
         if missing:
             flash("Please fill in every field on the form before submitting.", "error")
@@ -1849,6 +1867,12 @@ def inventory_edit_concrete(request_id):
         flash("Request not found.", "error")
         return redirect(url_for("inventory_concrete_list"))
     if request.method == "POST":
+        pump_type_val = request.form.get("pump_type", "")
+        needs_pump = pump_type_val in ("Ground Pump", "Overhead Pump")
+        pump_size_val = request.form.get("pump_size", "") if needs_pump else ""
+        pump_arrival_val = request.form.get("pump_arrival_time", "") if needs_pump else ""
+        drilling_required_val = request.form.get("drilling_required", "No")
+        drilling_time_val = request.form.get("drilling_time", "") if drilling_required_val == "Yes" else ""
         db.execute(
             """UPDATE inventory_concrete_requests SET project=?, job_site_address=?, area_description=?,
                pour_date=?, pour_time=?, mix_design_psi=?, mix_slump=?, concrete_amount=?, truck_spacing=?,
@@ -1859,9 +1883,9 @@ def inventory_edit_concrete(request_id):
              request.form.get("area_description", ""), request.form["pour_date"], request.form.get("pour_time", ""),
              request.form.get("mix_design_psi", ""), request.form.get("mix_slump", ""),
              request.form.get("concrete_amount", ""), request.form.get("truck_spacing", ""),
-             request.form.get("pump_type", ""), request.form.get("pump_size", ""), request.form.get("pump_arrival_time", ""),
+             pump_type_val, pump_size_val, pump_arrival_val,
              request.form.get("lab_required", "No"), request.form.get("lab_time", ""),
-             request.form.get("drilling_required", "No"), request.form.get("drilling_time", ""),
+             drilling_required_val, drilling_time_val,
              datetime.utcnow().isoformat(), request_id)
         )
         log_activity("inventory", "concrete_request", request_id, "updated", new_value=request.form.get("project", ""))
@@ -1984,11 +2008,12 @@ def inventory_new_purchase():
         descriptions = request.form.getlist("description[]")
         suppliers = request.form.getlist("supplier[]")
         qtys = request.form.getlist("qty[]")
-        for item, desc, sup, qty in zip(items, descriptions, suppliers, qtys):
+        units = request.form.getlist("unit[]")
+        for item, desc, sup, qty, unit in zip(items, descriptions, suppliers, qtys, units):
             if item.strip() or desc.strip():
                 db.execute(
-                    "INSERT INTO inventory_purchase_request_items (purchase_request_id, item, description, supplier, qty) VALUES (?,?,?,?,?)",
-                    (pr_id, item, desc, sup, qty)
+                    "INSERT INTO inventory_purchase_request_items (purchase_request_id, item, description, supplier, qty, unit) VALUES (?,?,?,?,?,?)",
+                    (pr_id, item, desc, sup, qty, unit)
                 )
         log_activity("inventory", "purchase_request", pr_id, "created", new_value=request.form.get("job_name", ""))
         db.commit()
@@ -2090,11 +2115,12 @@ def inventory_edit_purchase(request_id):
         descriptions = request.form.getlist("description[]")
         suppliers = request.form.getlist("supplier[]")
         qtys = request.form.getlist("qty[]")
-        for item, desc, sup, qty in zip(items, descriptions, suppliers, qtys):
+        units = request.form.getlist("unit[]")
+        for item, desc, sup, qty, unit in zip(items, descriptions, suppliers, qtys, units):
             if item.strip() or desc.strip():
                 db.execute(
-                    "INSERT INTO inventory_purchase_request_items (purchase_request_id, item, description, supplier, qty) VALUES (?,?,?,?,?)",
-                    (request_id, item, desc, sup, qty)
+                    "INSERT INTO inventory_purchase_request_items (purchase_request_id, item, description, supplier, qty, unit) VALUES (?,?,?,?,?,?)",
+                    (request_id, item, desc, sup, qty, unit)
                 )
         log_activity("inventory", "purchase_request", request_id, "updated", new_value=request.form.get("job_name", ""))
         db.commit()
@@ -2475,7 +2501,12 @@ def call_claude_assistant_turn(user_text, draft):
     submitted_id = None
     if action == "submit":
         needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
-        required_now = [f for f in VOICE_REQUIRED_FIELDS if needs_pump or f not in ("pump_size", "pump_arrival_time")]
+        needs_drilling = fields.get("drilling_required") == "Yes"
+        required_now = [
+            f for f in VOICE_REQUIRED_FIELDS
+            if (needs_pump or f not in ("pump_size", "pump_arrival_time"))
+            and (needs_drilling or f != "drilling_time")
+        ]
         missing = [f for f in required_now if not str(fields.get(f, "")).strip()]
         required_ok = not missing
         if required_ok:
@@ -3329,8 +3360,16 @@ def request_center():
                 "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
                 (current_user.email, current_user.name or current_user.email, department, text, "Submitted", now, now)
             )
+            request_id = cur.lastrowid
             db.commit()
-            _log_request_status(db, cur.lastrowid, "Submitted", current_user.email)
+            _log_request_status(db, request_id, "Submitted", current_user.email)
+            for screenshot in request.files.getlist("screenshots"):
+                saved_name = save_photo(screenshot)
+                if saved_name:
+                    db.execute(
+                        "INSERT INTO feature_request_attachments (feature_request_id, filename, uploaded_by, created_at) VALUES (?,?,?,?)",
+                        (request_id, saved_name, current_user.email, now)
+                    )
             db.commit()
             flash("Request submitted.")
         return redirect(url_for("request_center"))
@@ -3345,7 +3384,11 @@ def request_center():
             "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
             (r["id"],)
         ).fetchall()
-        requests_with_history.append({"r": r, "history": history})
+        attachments = db.execute(
+            "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id",
+            (r["id"],)
+        ).fetchall()
+        requests_with_history.append({"r": r, "history": history, "attachments": attachments})
     return render_template("requests/my_requests.html", requests_with_history=requests_with_history)
 
 
@@ -3363,7 +3406,11 @@ def _render_my_requests_for(db, email):
             "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
             (r["id"],)
         ).fetchall()
-        requests_with_history.append({"r": r, "history": history})
+        attachments = db.execute(
+            "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id",
+            (r["id"],)
+        ).fetchall()
+        requests_with_history.append({"r": r, "history": history, "attachments": attachments})
     return requests_with_history
 
 
@@ -3443,8 +3490,11 @@ def product_intelligence():
     ).fetchall()
 
     recently_released = db.execute(
-        """SELECT f.id, f.original_request, h.release_note, h.changed_at
-           FROM feature_requests f JOIN feature_request_status_history h ON h.feature_request_id = f.id
+        """SELECT f.id, f.original_request, f.requester_name, f.requester_email, f.department,
+           h.release_note, h.changed_at, i.buildiq_module
+           FROM feature_requests f
+           JOIN feature_request_status_history h ON h.feature_request_id = f.id
+           LEFT JOIN feature_request_intelligence i ON i.feature_request_id = f.id
            WHERE f.status = 'Released' AND h.status = 'Released'
            ORDER BY h.changed_at DESC LIMIT 5"""
     ).fetchall()
@@ -3526,7 +3576,10 @@ def product_intelligence_detail(request_id):
         (request_id,)
     ).fetchall()
     intel = db.execute("SELECT * FROM feature_request_intelligence WHERE feature_request_id = ?", (request_id,)).fetchone()
-    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel, statuses=REQUEST_STATUSES)
+    attachments = db.execute(
+        "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id", (request_id,)
+    ).fetchall()
+    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel, statuses=REQUEST_STATUSES, attachments=attachments)
 
 
 @app.route("/admin/product-intelligence/preview")

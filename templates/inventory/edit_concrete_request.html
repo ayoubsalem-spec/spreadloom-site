@@ -32,8 +32,8 @@
                     <option value="Overhead Pump" {{ 'selected' if r['pump_type'] == 'Overhead Pump' }}>Overhead Pump</option>
                 </select>
             </div>
-            <div style="flex:1;"><label>Pump Size</label><input type="text" name="pump_size" id="pump_size" value="{{ r['pump_size'] or '' }}"></div>
-            <div style="flex:1;"><label>Pump Arrival Time</label><input type="time" name="pump_arrival_time" id="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
+            <div style="flex:1;" id="pump_size_wrap"><label>Pump Size</label><input type="text" name="pump_size" id="pump_size" value="{{ r['pump_size'] or '' }}"></div>
+            <div style="flex:1;" id="pump_arrival_wrap"><label>Pump Arrival Time</label><input type="time" name="pump_arrival_time" id="pump_arrival_time" value="{{ r['pump_arrival_time'] or '' }}"></div>
         </div>
         <div class="form-row">
             <div style="flex:1;"><label>Lab (same time with Concrete)</label>
@@ -54,8 +54,8 @@
             <div style="flex:1;" id="drilling_time_wrap"><label>Time</label><input type="time" name="drilling_time" id="drilling_time" value="{{ r['drilling_time'] or '' }}"></div>
         </div>
         <style>
-            #lab_time_wrap, #drilling_time_wrap { display: none; }
-            #lab_time_wrap.show, #drilling_time_wrap.show { display: block; }
+            #lab_time_wrap, #drilling_time_wrap, #pump_size_wrap, #pump_arrival_wrap { display: none; }
+            #lab_time_wrap.show, #drilling_time_wrap.show, #pump_size_wrap.show, #pump_arrival_wrap.show { display: block; }
         </style>
         <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Requested By</h3>
         <p class="sub" style="margin-bottom:14px;">{{ r['requested_by'] or '\u2014' }} (original requester &mdash; unchanged on edit)</p>
@@ -96,6 +96,30 @@
         }
         wireToggle('lab_required', 'lab_time_wrap');
         wireToggle('drilling_required', 'drilling_time_wrap');
+    })();
+
+    // Pump Size / Pump Arrival Time only show (and are only required) when
+    // an actual pump is selected -- "None" shouldn't show or force a time.
+    (function () {
+        var pumpType = document.getElementById('pump_type');
+        var pumpSize = document.getElementById('pump_size');
+        var pumpArrival = document.getElementById('pump_arrival_time');
+        var sizeWrap = document.getElementById('pump_size_wrap');
+        var arrivalWrap = document.getElementById('pump_arrival_wrap');
+        if (!pumpType) return;
+        function sync() {
+            var needsPump = pumpType.value === 'Ground Pump' || pumpType.value === 'Overhead Pump';
+            if (pumpSize) pumpSize.required = needsPump;
+            if (pumpArrival) pumpArrival.required = needsPump;
+            if (sizeWrap) sizeWrap.classList.toggle('show', needsPump);
+            if (arrivalWrap) arrivalWrap.classList.toggle('show', needsPump);
+            if (!needsPump) {
+                if (pumpSize) pumpSize.value = '';
+                if (pumpArrival) pumpArrival.value = '';
+            }
+        }
+        pumpType.addEventListener('change', sync);
+        sync();
     })();
 </script>
 {% endblock %}

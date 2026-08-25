@@ -9,6 +9,13 @@
 <div class="card" style="border-left:3px solid var(--brass);">
     <p class="sub" style="margin:0 0 8px;">Original Request</p>
     <p style="margin:0; font-size:15px; line-height:1.5;">{{ r['original_request'] }}</p>
+    {% if attachments %}
+    <div class="req-attachments" style="margin-top:16px;">
+        {% for att in attachments %}
+        <a href="{{ url_for('uploaded_photo', filename=att['filename']) }}" target="_blank"><img src="{{ url_for('uploaded_photo', filename=att['filename']) }}" alt="Screenshot" style="width:120px; height:120px;"></a>
+        {% endfor %}
+    </div>
+    {% endif %}
 </div>
 
 <div class="pi-two-col" style="margin-top:8px;">
@@ -49,7 +56,7 @@
         </form>
         {% else %}
         <div class="req-released" style="margin-bottom:24px;">
-            <span class="req-released-badge">&#10003; Shipped</span>
+            <span class="req-released-badge">&#10003; Resolved</span>
             {% set release_row = history|selectattr('status', 'equalto', 'Released')|list %}
             {% if release_row %}<p style="margin:0; max-width:80%;">{{ release_row[0]['release_note'] }}</p>{% endif %}
         </div>
