@@ -1997,21 +1997,7 @@ def inventory_new_purchase():
     if request.method == "POST":
         db = get_db()
         now = datetime.utcnow().isoformat()
-
-        # Only procurement can submit "on behalf of" another procurement
-        # person -- the override is only ever trusted if the person
-        # actually submitting is procurement themselves. Anyone else's
-        # submitted override value is ignored, and requested_by falls
-        # back to their own account exactly as before.
-        requestor_email = current_user.email
         requestor_display = current_user.name or current_user.email
-        if is_procurement():
-            override_email = request.form.get("requestor_override", "").strip()
-            if override_email in PROCUREMENT_EMAILS:
-                override_user = db.execute("SELECT name, email FROM users WHERE email = ?", (override_email,)).fetchone()
-                if override_user:
-                    requestor_email = override_user["email"]
-                    requestor_display = override_user["name"] or override_user["email"]
 
         cur = db.execute(
             """INSERT INTO inventory_purchase_requests (pr_number, request_date, job_name,
@@ -2039,11 +2025,11 @@ def inventory_new_purchase():
         log_activity("inventory", "purchase_request", pr_id, "created", new_value=request.form.get("job_name", ""))
         db.commit()
 
-        # Procurement-originated requests (submitted by procurement, for
-        # procurement) don't need a submission notification -- the group
-        # only needs to hear about it once the order is actually placed,
-        # which already sends its own notification further down the flow.
-        if requestor_email not in PROCUREMENT_EMAILS:
+        # If a procurement person is the one actually logged in and
+        # submitting, skip the submission notification -- the group only
+        # needs to hear about it once the order is actually placed, which
+        # already sends its own notification further down the flow.
+        if current_user.email not in PROCUREMENT_EMAILS:
             item_summary = "; ".join(i.strip() for i in items if i.strip())[:200]
             send_whatsapp_group_message(
                 f"🛒 New purchase request submitted\n"
@@ -2056,11 +2042,7 @@ def inventory_new_purchase():
         flash("Purchase request submitted.")
         return redirect(url_for("inventory_purchase_list"))
 
-    procurement_users = get_db().execute(
-        f"SELECT name, email FROM users WHERE email IN ({','.join('?' * len(PROCUREMENT_EMAILS))})",
-        tuple(PROCUREMENT_EMAILS)
-    ).fetchall() if is_procurement() else []
-    return render_template("inventory/new_purchase_request.html", today=date.today().isoformat(), procurement_users=procurement_users)
+    return render_template("inventory/new_purchase_request.html", today=date.today().isoformat())
 
 
 @app.route("/inventory/purchase/<int:request_id>")
