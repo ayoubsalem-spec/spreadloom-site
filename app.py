@@ -2719,13 +2719,17 @@ def _log_request_status(db, request_id, status, changed_by, release_note=None):
 @login_required
 def request_center():
     db = get_db()
+    department_options = [d["name"] for d in db.execute("SELECT name FROM departments ORDER BY name").fetchall()]
     if request.method == "POST":
         text = request.form.get("original_request", "").strip()
         if not text:
             flash("Please describe what you need before submitting.", "error")
         else:
-            user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
-            department = user_row["department"] if user_row else None
+            submitted_department = request.form.get("department", "").strip()
+            if not submitted_department:
+                user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
+                submitted_department = user_row["department"] if user_row else None
+            department = submitted_department
             now = datetime.utcnow().isoformat()
             cur = db.execute(
                 "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
@@ -2760,7 +2764,7 @@ def request_center():
             (r["id"],)
         ).fetchall()
         requests_with_history.append({"r": r, "history": history, "attachments": attachments})
-    return render_template("requests/my_requests.html", requests_with_history=requests_with_history)
+    return render_template("requests/my_requests.html", requests_with_history=requests_with_history, department_options=department_options)
 
 
 def _render_my_requests_for(db, email):
@@ -2899,7 +2903,14 @@ def product_intelligence_detail(request_id):
         action = request.form.get("action")
         now = datetime.utcnow().isoformat()
 
-        if action == "save_details":
+        if action == "change_department":
+            new_department = request.form.get("department", "").strip()
+            db.execute("UPDATE feature_requests SET department = ?, updated_at = ? WHERE id = ?",
+                       (new_department, now, request_id))
+            db.commit()
+            flash("Department corrected.")
+
+        elif action == "save_details":
             # Saves the admin-only intelligence fields WITHOUT touching
             # status at all -- exactly the separation asked for.
             db.execute(
@@ -2955,7 +2966,8 @@ def product_intelligence_detail(request_id):
     attachments = db.execute(
         "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id", (request_id,)
     ).fetchall()
-    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel, statuses=REQUEST_STATUSES, attachments=attachments)
+    department_options = [d["name"] for d in db.execute("SELECT name FROM departments ORDER BY name").fetchall()]
+    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel, statuses=REQUEST_STATUSES, attachments=attachments, department_options=department_options)
 
 
 @app.route("/admin/product-intelligence/preview")

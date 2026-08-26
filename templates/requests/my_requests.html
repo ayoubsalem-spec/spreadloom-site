@@ -13,6 +13,13 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label style="margin-top:0;">What do you need?</label>
         <textarea name="original_request" required placeholder="Describe what you need..."></textarea>
+        <label style="margin-top:14px;">Department</label>
+        <select name="department">
+            <option value="">&mdash; Select department &mdash;</option>
+            {% for opt in department_options %}
+            <option value="{{ opt }}">{{ opt }}</option>
+            {% endfor %}
+        </select>
         <label style="margin-top:14px;">Screenshots (optional)</label>
         <input type="file" name="screenshots" accept="image/*" multiple>
         <div class="rc-submit-foot">
