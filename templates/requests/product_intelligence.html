@@ -15,125 +15,235 @@
 {%- endif -%}
 {% endmacro %}
 
-<div class="rc-hero" style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:16px; margin-bottom:28px;">
-    <div>
-        <span class="rc-eyebrow">Product Intelligence</span>
-        <h1>Command Center</h1>
-        <p class="sub">Every request, its full history, and where BuildIQ is actually spending its build time.</p>
+<div class="oc-hero">
+    <div class="oc-hero-top">
+        <div>
+            <span class="rc-eyebrow">Product Intelligence</span>
+            <h1 class="oc-hero-title">BuildIQ</h1>
+            <p class="oc-hero-sub">The operating picture &middot; <span class="cc-status-pill" style="margin-top:0; vertical-align:middle;"><span class="cc-status-dot"></span>Operational</span></p>
+        </div>
+        <a href="{{ url_for('product_intelligence_preview') }}" class="btn btn-sm">Preview Employee View</a>
     </div>
-    <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
-</div>
 
-<div class="kpi-grid pi-kpi-grid">
-    <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
-    <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>
-    <a href="{{ url_for('product_intelligence', status='Building') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Building' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></a>
-    <a href="{{ url_for('product_intelligence', status='Testing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Testing' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></a>
-    <a href="{{ url_for('product_intelligence', status='Released') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Released' }}"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></a>
-    <a href="{{ url_for('product_intelligence', status='On Hold,Not Planned') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'On Hold,Not Planned' }}"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></a>
-</div>
-{% if status_filter %}
-<p class="sub" style="margin-top:-14px; margin-bottom:26px; font-size:12px;">Filtered by KPI &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
-{% endif %}
-
-{% if pipeline %}
-<div class="pi-section">
-    <p class="pi-section-title">Request Pipeline <span class="dim">where everything sits right now</span></p>
-    <div class="pi-pipeline">
-        {% for seg in pipeline %}
-        <div class="pi-pipeline-seg" style="width:{{ seg.pct }}%; background:{{ seg.color }};" title="{{ seg.status|replace('Released','Resolved') }}: {{ seg.count }}">{{ seg.count if seg.pct >= 6 }}</div>
-        {% endfor %}
+    <div class="oc-hero-numbers" style="margin-bottom:32px;">
+        <a href="{{ url_for('tracker_dashboard') }}" class="oc-num"><div class="oc-num-value">{{ total_projects }}</div><div class="oc-num-label">Projects</div></a>
+        <a href="{{ url_for('product_intelligence') }}" class="oc-num"><div class="oc-num-value">{{ kpi.total }}</div><div class="oc-num-label">Requests</div></a>
+        <a href="{{ url_for('sitepulse_dashboard') }}" class="oc-num"><div class="oc-num-value">{{ total_equipment }}</div><div class="oc-num-label">Equipment</div></a>
+        <div class="oc-num" style="cursor:default;"><div class="oc-num-value">{{ pulse_activity_today }}</div><div class="oc-num-label">Activity Today</div></div>
+        <div class="oc-num" style="cursor:default;"><div class="oc-num-value">{{ active_this_week }}/{{ total_users }}</div><div class="oc-num-label">Active This Week</div></div>
     </div>
-    <div class="pi-pipeline-legend">
-        {% for seg in pipeline %}
-        <div class="pi-pipeline-legend-item"><span class="pi-pipeline-legend-swatch" style="background:{{ seg.color }};"></span>{{ seg.status|replace('Released','Resolved') }} ({{ seg.count }})</div>
-        {% endfor %}
-    </div>
-</div>
-{% endif %}
 
-<div class="pi-two-col">
-    {% if dept_breakdown %}
-    <div class="pi-section">
-        <p class="pi-section-title">By Department</p>
-        {% for d in dept_breakdown %}
-        <div class="pi-bar-row">
-            <div class="pi-bar-label">{{ d.label }}</div>
-            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ d.pct }}%;"></div></div>
-            <div class="pi-bar-count">{{ d.count }}</div>
+    <div class="oc-hero-chart-label">
+        <span class="sub" style="margin:0; font-size:13px;">Requests submitted, last 7 days</span>
+        <span class="console-week-delta {{ week_trend_direction }}">{{ '▲' if week_trend_direction == 'up' else ('▼' if week_trend_direction == 'down' else '●') }} {{ week_delta|abs if week_delta else 0 }} vs prior week ({{ last_week_count }})</span>
+    </div>
+    <div class="oc-hero-chart">
+        {% for d in trend_days %}
+        {% set bar_h = (d.count / trend_max * 90)|round|int if trend_max else 3 %}
+        <div class="col">
+            <div class="bar" style="height:{{ bar_h if bar_h > 3 else 3 }}px;"><span class="val">{{ d.count }}</span></div>
+            <div class="lbl">{{ d.label }}</div>
         </div>
         {% endfor %}
     </div>
-    {% endif %}
-
-    {% if module_breakdown %}
-    <div class="pi-section">
-        <p class="pi-section-title">By BuildIQ Module <span class="dim">from released/tagged requests</span></p>
-        {% for m in module_breakdown %}
-        <div class="pi-bar-row">
-            <div class="pi-bar-label">{{ m.label }}</div>
-            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ m.pct }}%;"></div></div>
-            <div class="pi-bar-count">{{ m.count }}</div>
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
 </div>
 
-<div class="pi-two-col">
-    <div class="pi-section">
-        <p class="pi-section-title" style="display:flex; justify-content:space-between;">Recently Resolved</p>
-        {% if recently_released %}
-        {% for r in recently_released %}
-        <div class="pi-resolved-item">
-            <div class="pi-resolved-icon">&#10003;</div>
-            <div class="pi-resolved-body">
-                <span class="pi-resolved-eyebrow">Resolved</span>
-                <div class="pi-resolved-top">
-                    <div class="pi-resolved-title">{{ r['original_request'] }}</div>
-                    {% if r['buildiq_module'] %}<span class="pi-resolved-module">{{ r['buildiq_module'] }}</span>{% endif %}
-                </div>
-                {% if r['release_note'] %}<div class="pi-resolved-note">{{ r['release_note'] }}</div>{% endif %}
-                <div class="pi-resolved-meta">
-                    <div class="pi-avatar">{{ (r['requester_name'] or r['requester_email'] or '?')[0]|upper }}</div>
-                    <span class="pi-resolved-meta-text">{{ r['requester_name'] or r['requester_email'] }} &middot; {{ r['changed_at']|friendly_short_dt }}</span>
-                </div>
+<hr class="oc-divider">
+
+<div>
+    <span class="oc-section-eyebrow">What We're Building</span>
+    <h2 class="oc-section-title">Priority Builds</h2>
+    {% if priority_builds %}
+    <div class="oc-priority-list">
+        {% for p in priority_builds %}
+        <a href="{{ url_for('product_intelligence_detail', request_id=p['id']) }}" class="oc-priority-item">
+            <div class="oc-priority-top">
+                <span class="oc-priority-title">{{ p['original_request'][:70] }}{% if p['original_request']|length > 70 %}&hellip;{% endif %}</span>
+                <span class="rc-badge {{ 'b-testing' if p['status'] == 'Testing' else 'b-progress' }}">{{ p['status'] }}</span>
             </div>
+            <div class="oc-priority-meta">{{ p['buildiq_module'] or 'Unassigned module' }} &middot; Updated {{ p['updated_at']|friendly_short_dt }}</div>
+            {% set current_work = p['testing_notes'] if p['status'] == 'Testing' and p['testing_notes'] else p['internal_notes'] %}
+            {% if current_work %}<div class="oc-priority-work">Current work: {{ current_work[:140] }}{% if current_work|length > 140 %}&hellip;{% endif %}</div>{% endif %}
+        </a>
+        {% endfor %}
+    </div>
+    {% else %}
+    <p class="sub">Nothing is actively Building or Testing right now.</p>
+    {% endif %}
+</div>
+
+<hr class="oc-divider">
+
+<div>
+    <span class="oc-section-eyebrow">Where It Stands</span>
+    <h2 class="oc-section-title">Request Lifecycle</h2>
+    <div class="oc-lifecycle">
+        <div class="oc-life-stage">
+            <div class="oc-life-dot {{ 'active' if kpi.new_reviewing else '' }}">{{ kpi.new_reviewing }}</div>
+            <div class="oc-life-label">Requested</div>
+        </div>
+        <div class="oc-life-stage">
+            <div class="oc-life-connector {{ 'done' if kpi.approved or kpi.building or kpi.testing or kpi.released }}"></div>
+            <div class="oc-life-dot {{ 'active' if kpi.approved else '' }}">{{ kpi.approved }}</div>
+            <div class="oc-life-label">Approved</div>
+        </div>
+        <div class="oc-life-stage">
+            <div class="oc-life-connector {{ 'done' if kpi.building or kpi.testing or kpi.released }}"></div>
+            <div class="oc-life-dot {{ 'active' if kpi.building else '' }}">{{ kpi.building }}</div>
+            <div class="oc-life-label">Building</div>
+        </div>
+        <div class="oc-life-stage">
+            <div class="oc-life-connector {{ 'done' if kpi.testing or kpi.released }}"></div>
+            <div class="oc-life-dot {{ 'active' if kpi.testing else '' }}">{{ kpi.testing }}</div>
+            <div class="oc-life-label">Testing</div>
+        </div>
+        <div class="oc-life-stage">
+            <div class="oc-life-connector {{ 'done' if kpi.released }}"></div>
+            <div class="oc-life-dot {{ 'done' if kpi.released else '' }}">{{ kpi.released }}</div>
+            <div class="oc-life-label">Resolved</div>
+        </div>
+    </div>
+
+    <div class="kpi-grid pi-kpi-grid" style="margin-top:28px;">
+        <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
+        <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>
+        <a href="{{ url_for('product_intelligence', status='Building') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Building' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></a>
+        <a href="{{ url_for('product_intelligence', status='Testing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Testing' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></a>
+        <a href="{{ url_for('product_intelligence', status='Released') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Released' }}"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></a>
+        <a href="{{ url_for('product_intelligence', status='On Hold,Not Planned') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'On Hold,Not Planned' }}"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></a>
+    </div>
+    {% if status_filter %}
+    <p class="sub" style="margin-top:-14px; margin-bottom:10px; font-size:12px;">Filtered by KPI &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
+    {% endif %}
+
+    <div class="oc-analytics-charts">
+        <div>
+            <p class="oc-chart-label">Where BuildIQ activity is happening, last 7 days</p>
+            {% if activity_mix %}
+            {% for m in activity_mix %}
+            <div class="pi-bar-row">
+                <div class="pi-bar-label">{{ m.label }}</div>
+                <div class="pi-bar-track" style="height:10px;"><div class="pi-bar-fill" style="width:{{ m.pct }}%;"></div></div>
+                <div class="pi-bar-count">{{ m.count }}</div>
+            </div>
+            {% endfor %}
+            {% else %}
+            <p class="sub">No activity in the last 7 days.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<hr class="oc-divider">
+
+<div class="oc-attention-band">
+    <span class="oc-section-eyebrow" style="color:var(--red);">What Needs Me</span>
+    <h2 class="oc-section-title">Attention Required</h2>
+    {% if attention_items %}
+    {% for item in attention_items %}
+    <a href="{{ item.url }}" class="oc-attn-row2"><span>&#128308; {{ item.label }}</span><span>&rarr;</span></a>
+    {% endfor %}
+    {% else %}
+    <div class="oc-attn-clear2">&#9898; No items require attention</div>
+    {% endif %}
+</div>
+
+<div class="pi-two-col" style="margin-top:26px;">
+    <div>
+        <span class="oc-section-eyebrow">What Changed</span>
+        <h2 class="oc-section-title" style="font-size:18px;">BuildIQ Pulse</h2>
+        {% if platform_activity %}
+        {% for a in platform_activity[:6] %}
+        <div class="oc-pulse-row">
+            <span class="oc-pulse-time">{{ a['created_at']|friendly_short_dt }}</span>
+            <span>{{ a['section']|capitalize }}: {{ a['action']|replace('_',' ') }} &mdash; {{ a['entity_type']|replace('_',' ') }}</span>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="sub">No recent activity.</p>
+        {% endif %}
+    </div>
+    <div>
+        <span class="oc-section-eyebrow">What Was Released</span>
+        <h2 class="oc-section-title" style="font-size:18px;">Recently Resolved</h2>
+        {% if recently_released %}
+        {% for r in recently_released[:4] %}
+        <div class="oc-pulse-row" style="align-items:flex-start;">
+            <span class="oc-pulse-time">{{ r['changed_at']|friendly_short_dt }}</span>
+            <span>{{ r['original_request'][:60] }}{% if r['original_request']|length > 60 %}&hellip;{% endif %}{% if r['buildiq_module'] %} <span style="color:var(--text-faint);">&middot; {{ r['buildiq_module'] }}</span>{% endif %}</span>
         </div>
         {% endfor %}
         {% else %}
         <p class="sub">Nothing resolved yet.</p>
         {% endif %}
     </div>
+</div>
 
-    <div class="pi-section">
-        <p class="pi-section-title">Recent Activity</p>
-        {% if recent_activity %}
-        <div class="card" style="padding:2px 18px;">
-            {% for a in recent_activity %}
-            {% set meta = status_meta(a['status'])|trim %}
-            {% set badge_class = meta.split('|')[0] %}
-            {% set icon = meta.split('|')[1] %}
-            <div class="pi-activity-item">
-                <div class="pi-activity-icon rc-badge {{ badge_class }}" style="border-radius:50%;">{{ icon|safe }}</div>
-                <div class="pi-activity-body">
-                    <div>
-                        <div class="pi-activity-status rc-badge {{ badge_class }}" style="border:none; padding:0; background:none;">{{ a['status']|replace('Released','Resolved') }}</div>
-                        <div class="pi-activity-title">{{ a['original_request'][:60] }}{% if a['original_request']|length > 60 %}&hellip;{% endif %}</div>
-                    </div>
-                    <div class="pi-activity-right">
-                        <div class="pi-activity-time">{{ a['changed_at']|friendly_short_dt }}</div>
-                        {% if a['changed_by'] %}<div class="pi-activity-user">{{ a['changed_by'] }}</div>{% endif %}
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
+<hr class="oc-divider">
+
+<div class="oc-mission">
+    <span class="oc-section-eyebrow">Strategic Direction</span>
+    <h2 class="oc-section-title">Build Direction</h2>
+    <div class="oc-mission-flow">
+        <div class="oc-mission-stage">
+            <div class="oc-mission-label now">Now</div>
+            <a href="{{ url_for('tracker_dashboard') }}" class="oc-mission-sys">Project Hunt</a><span class="oc-mission-desc">Make flawless</span>
+            <a href="{{ url_for('sitepulse_dashboard') }}" class="oc-mission-sys">Equipment Center</a><span class="oc-mission-desc">Make flawless</span>
+            <a href="{{ url_for('sitepulse_dashboard') }}" class="oc-mission-sys">SitePulse</a><span class="oc-mission-desc">Make flawless</span>
         </div>
-        {% else %}
-        <p class="sub">No activity yet.</p>
-        {% endif %}
+        <div class="oc-mission-arrow">&rarr;</div>
+        <div class="oc-mission-stage">
+            <div class="oc-mission-label next">Next</div>
+            <div class="oc-mission-sys static">Quote Pro</div><span class="oc-mission-desc">Excel &rarr; Takeoff &rarr; Estimate &rarr; Proposal &rarr; BuildIQ</span>
+        </div>
+        <div class="oc-mission-arrow">&rarr;</div>
+        <div class="oc-mission-stage">
+            <div class="oc-mission-label evolving">Evolving</div>
+            <a href="{{ url_for('assistant_page') }}" class="oc-mission-sys">Atlas</a><span class="oc-mission-desc">Improving the AI interface</span>
+        </div>
+        <div class="oc-mission-arrow">&rarr;</div>
+        <div class="oc-mission-stage">
+            <div class="oc-mission-label later">Later</div>
+            <div class="oc-mission-sys static">Engineering / Redline</div><span class="oc-mission-desc">Future engineering intelligence</span>
+        </div>
     </div>
 </div>
+
+<hr class="oc-divider">
+
+<div>
+    <span class="oc-section-eyebrow">The Living Platform</span>
+    <h2 class="oc-section-title">BuildIQ Ecosystem</h2>
+    <div class="oc-eco-grid">
+        {% for e in ecosystem %}
+        {% if e.url %}<a href="{{ e.url }}" class="oc-eco-item">{% else %}<div class="oc-eco-item static">{% endif %}
+            <div class="oc-eco-name"><span>{{ e.name }}</span><span class="dot {{ 'live' if e.health and e.health.last else ('quiet' if e.url else 'none') }}"></span></div>
+            <div class="oc-eco-active">{% if e.active %}{{ e.active }} active request{{ 's' if e.active != 1 }}{% elif e.url %}No active requests{% else %}Not yet built{% endif %}</div>
+        {% if e.url %}</a>{% else %}</div>{% endif %}
+        {% endfor %}
+    </div>
+    <div style="margin-top:18px;">
+        <span class="oc-section-eyebrow">Adoption</span>
+        <div class="oc-adopt-metric" style="margin-top:8px;">
+            <div class="oc-adopt-value2">{{ active_this_week }} / {{ total_users }}</div>
+            <div class="oc-adopt-label2">Active users this week</div>
+        </div>
+    </div>
+</div>
+
+<hr class="oc-divider">
+
+<div class="oc-actions-bar">
+    <div class="cc-quick-actions">
+        <a href="{{ url_for('tracker_new_project') }}" class="btn btn-sm btn-gold">+ Project</a>
+        <a href="{{ url_for('inventory_new_concrete') }}" class="btn btn-sm">+ Concrete Request</a>
+        <a href="{{ url_for('inventory_new_purchase') }}" class="btn btn-sm">+ Purchase Request</a>
+        <a href="{{ url_for('sitepulse_new_asset') }}" class="btn btn-sm">+ Equipment</a>
+    </div>
+    <a href="{{ url_for('assistant_page') }}" class="btn btn-sm btn-gold">Ask Atlas &rarr;</a>
+</div>
+
+<hr class="oc-divider">
 
 <div class="pi-section">
     <p class="pi-section-title">All Requests</p>
