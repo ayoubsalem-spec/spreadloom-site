@@ -43,20 +43,6 @@
         .titlebar nav::-webkit-scrollbar { display:none; }
         .titlebar nav a { text-decoration:none; color:var(--text-dim); font-weight:600; flex-shrink:0; }
         .titlebar nav a:hover, .titlebar nav a.active { color:var(--brass); }
-        /* Contextual sub-navigation -- for a section with its own internal
-           pages (e.g. Inventory/Procurement's Concrete/Purchase Requests).
-           Deliberately reuses the exact same typography, spacing rhythm,
-           and hover/active treatment as the titlebar nav above -- same
-           design system, just a second contextual row, not a different
-           navigation language. */
-        .context-nav {
-            display:flex; gap:20px; padding:12px 32px; border-bottom:1px solid var(--line);
-            background:rgba(16,27,43,0.6); font-family:'IBM Plex Mono',monospace; font-size:11px;
-            color:var(--text-dim); letter-spacing:0.5px; overflow-x:auto; white-space:nowrap;
-        }
-        .context-nav a { text-decoration:none; color:var(--text-dim); font-weight:600; }
-        .context-nav a:hover, .context-nav a.active { color:var(--brass); }
-        @media (max-width:720px) { .context-nav { padding:10px 16px; gap:14px; } }
         .container { max-width:1100px; margin:0 auto; padding:32px 32px 60px; }
         .section-row { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:22px; flex-wrap:wrap; gap:12px; }
         .sub { color:var(--text-dim); font-size:13.5px; margin-top:4px; }
@@ -99,7 +85,6 @@
             .titlebar nav { gap:14px; font-size:10px; }
         }
     </style>
-    {% block extra_head %}{% endblock %}
 </head>
 <body>
 <div class="titlebar">
@@ -109,12 +94,12 @@
         {% if has_project_hunt_access %}<a href="{{ url_for('tracker_dashboard') }}" class="{{ 'active' if request.path.startswith('/tracker') }}">Project Hunt</a>{% endif %}
         <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') }}">Equipment Center</a>
         <a href="{{ url_for('inventory_materials_list') }}" class="{{ 'active' if request.path.startswith('/inventory') }}">SitePulse</a>
-        {% if has_project_hunt_access %}
+        {% if has_atlas_access %}
         <a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>
+        {% endif %}
         <a href="{{ url_for('request_center') }}" class="{{ 'active' if request.path == '/requests' }}">Requests</a>
         {% if is_admin_user %}
         <a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>
-        {% endif %}
         {% endif %}
         {% if current_user.email == "ayoub@darycet.com" %}
         <a href="{{ url_for('sitepulse_activity_log') }}">Activity</a>
@@ -133,13 +118,11 @@
     <nav><a href="{{ url_for('login') }}">Log in</a></nav>
     {% endif %}
 </div>
-{% block context_nav %}{% endblock %}
 <div class="container">
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}{% for category, msg in messages %}<div class="flash {{ 'flash-success' if category != 'error' }}">{{ msg }}</div>{% endfor %}{% endif %}
     {% endwith %}
     {% block content %}{% endblock %}
 </div>
-{% block extra_scripts %}{% endblock %}
 </body>
 </html>

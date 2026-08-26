@@ -1,57 +1,27 @@
 {% extends "inventory/base.html" %}
-{% block inner %}
-{% include "requests/_styles.html" %}
-
+{% block content %}
 <div class="section-row">
-    <div>
-        <span class="rc-eyebrow">SitePulse</span>
-        <h1>Concrete Requests</h1>
-        <p class="sub">Concrete Checklist Form</p>
-    </div>
+    <div><h1>Concrete Requests</h1><p class="sub">Concrete Checklist Form</p></div>
     <a href="{{ url_for('inventory_new_concrete') }}" class="btn btn-gold">+ New Request</a>
 </div>
-
-<p class="pi-section-title">All Requests</p>
-<form method="GET" class="pi-table-toolbar">
-    <select name="project" onchange="this.form.submit()">
-        <option value="">All projects</option>
-        {% for p in projects %}
-        <option value="{{ p }}" {{ 'selected' if project_filter == p }}>{{ p }}</option>
-        {% endfor %}
-    </select>
-    <select name="status" onchange="this.form.submit()">
-        <option value="">All statuses</option>
-        <option value="Submitted" {{ 'selected' if status_filter == 'Submitted' }}>Submitted</option>
-        <option value="Scheduled" {{ 'selected' if status_filter == 'Scheduled' }}>Scheduled</option>
-        <option value="Completed" {{ 'selected' if status_filter == 'Completed' }}>Completed</option>
-    </select>
-    <input type="date" name="pour_date" value="{{ pour_date_filter }}" onchange="this.form.submit()" style="width:auto; flex:0 0 auto;">
-    {% if project_filter or status_filter or pour_date_filter %}
-    <a href="{{ url_for('inventory_concrete_list') }}" class="btn btn-sm">Clear filters</a>
-    {% endif %}
-</form>
-
+<a href="{{ url_for('inventory_home') }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; SitePulse</a>
 {% if requests|length == 0 %}
-<p class="sub">{% if project_filter or status_filter or pour_date_filter %}No concrete requests match this filter.{% else %}No concrete requests logged yet.{% endif %}</p>
+<div class="card"><p class="sub" style="margin:0;">No concrete requests logged yet.</p></div>
 {% else %}
-<table>
-    <tr><th>Project</th><th>Area</th><th>Pour Date</th><th>Amount</th><th>Status</th></tr>
-    {% for r in requests %}
-    <tr onclick="window.location='{{ url_for('inventory_view_concrete', request_id=r['id']) }}'" style="cursor:pointer;">
-        <td>
-            <div class="pi-req-title">{{ r['project'] }}</div>
-            <div class="pi-req-id">CR-{{ '%03d'|format(r['id']) }}</div>
-        </td>
-        <td>{{ r['area_description'] or '\u2014' }}</td>
-        <td>{{ r['pour_date']|friendly_date }}</td>
-        <td>{{ r['concrete_amount'] or '\u2014' }}</td>
-        <td>
-            {% if r['status'] == 'Completed' %}<span class="rc-badge b-released">Completed</span>
-            {% elif r['status'] == 'Scheduled' %}<span class="rc-badge b-testing">Scheduled</span>
-            {% else %}<span class="rc-badge b-submitted">{{ r['status'] or 'Submitted' }}</span>{% endif %}
-        </td>
-    </tr>
-    {% endfor %}
-</table>
+<div class="card" style="padding:0; overflow-x:auto;">
+    <table>
+        <tr><th>Project</th><th>Area</th><th>Pour Date</th><th>Amount</th><th>Status</th><th></th></tr>
+        {% for r in requests %}
+        <tr>
+            <td><strong>{{ r['project'] }}</strong></td>
+            <td>{{ r['area_description'] or '\u2014' }}</td>
+            <td>{{ r['pour_date']|friendly_date }}</td>
+            <td>{{ r['concrete_amount'] or '\u2014' }}</td>
+            <td><span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span></td>
+            <td><a href="{{ url_for('inventory_view_concrete', request_id=r['id']) }}" class="btn btn-sm">Open</a></td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
 {% endif %}
 {% endblock %}

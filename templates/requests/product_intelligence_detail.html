@@ -4,7 +4,7 @@
 
 <span class="rc-eyebrow">Request #{{ r['id'] }}</span>
 <h1>{{ r['requester_name'] or r['requester_email'] }}</h1>
-<p class="sub" style="margin-bottom:20px;">{{ r['department'] or 'No department set' }}{% if r['module_area'] %} &middot; Tagged by requester: {{ r['module_area'] }}{% endif %} &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
+<p class="sub" style="margin-bottom:20px;">{{ r['department'] or 'No department set' }} &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
 
 <div class="card" style="border-left:3px solid var(--brass);">
     <p class="sub" style="margin:0 0 8px;">Original Request</p>
@@ -79,7 +79,7 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="action" value="save_details">
             <label style="margin-top:0;">BuildIQ Module</label>
-            <input type="text" name="buildiq_module" value="{{ intel['buildiq_module'] if intel else '' }}" placeholder="e.g. Atlas, SitePulse, Project Hunt">
+            <input type="text" name="buildiq_module" value="{{ intel['buildiq_module'] if intel else '' }}" placeholder="e.g. Atlas, Redline, SitePulse">
 
             <label>Internal Notes</label>
             <textarea name="internal_notes" rows="3">{{ intel['internal_notes'] if intel else '' }}</textarea>

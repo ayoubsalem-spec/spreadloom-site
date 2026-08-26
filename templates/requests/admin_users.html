@@ -3,6 +3,17 @@
 <h1>Users &amp; Departments</h1>
 <p class="sub" style="margin-bottom:24px;">Department is set here only -- employees never edit their own. Every request snapshots whatever's set here at the moment they submit.</p>
 
+<div style="margin-bottom:32px; padding:16px; border:1px solid #2a2a2a; border-radius:8px;">
+    <h3 style="margin-top:0;">Departments</h3>
+    <p class="sub" style="margin-bottom:12px;">Current departments: {{ department_options|join(', ') if department_options else '\u2014' }}</p>
+    <form method="POST" style="display:flex; gap:8px; align-items:center;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="add_department">
+        <input type="text" name="new_department" placeholder="New department name" style="flex:1;">
+        <button type="submit" class="btn">Add Department</button>
+    </form>
+</div>
+
 <table>
     <tr>
         <th>Name</th>

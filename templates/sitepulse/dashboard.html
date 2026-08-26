@@ -1,10 +1,7 @@
 {% extends "sitepulse/base.html" %}
-{% block inner %}
-{% include "requests/_styles.html" %}
-
+{% block content %}
 <div class="section-row">
     <div>
-        <span class="rc-eyebrow">Equipment Center</span>
         <h1>Equipment</h1>
         <p class="sub" style="margin-bottom:0;">Check here before renting anything externally.</p>
     </div>
@@ -36,23 +33,23 @@
     </a>
 </div>
 
-<p class="pi-section-title" style="margin-bottom:10px;">Equipment</p>
-<form method="GET" class="pi-table-toolbar">
-    <select name="status" onchange="this.form.submit()">
+<form method="GET" style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
+    <select name="status" onchange="this.form.submit()" style="width:auto; flex:1; min-width:150px;">
         <option value="">All Statuses (active)</option>
         {% for s in status_options %}<option value="{{ s }}" {{ 'selected' if current_filter==s }}>{{ s }}</option>{% endfor %}
     </select>
-    <select name="location" onchange="this.form.submit()">
+    <select name="location" onchange="this.form.submit()" style="width:auto; flex:1; min-width:150px;">
         <option value="">All Locations</option>
         {% for loc in locations %}<option value="{{ loc }}" {{ 'selected' if current_location==loc }}>{{ loc }}</option>{% endfor %}
     </select>
     {% if current_filter or current_location %}<a href="{{ url_for('sitepulse_dashboard') }}" class="btn btn-sm">Clear Filters</a>{% endif %}
 </form>
 
-<input type="text" id="equip-search" placeholder="Search by name, location, or activity..." oninput="filterEquipment()" style="margin-bottom:16px;">
+<input type="text" id="equip-search" placeholder="Search by name, location, or activity..." oninput="filterEquipment()"
+       style="width:100%; padding:12px 14px; background:var(--navy-light); border:1px solid var(--border); border-radius:8px; font-size:15px; color:var(--text-light); margin-bottom:16px;">
 
 {% if assets|length == 0 %}
-<p class="sub">No equipment matches this view.</p>
+<div class="card"><p class="sub" style="margin-bottom:0;">No equipment matches this view.</p></div>
 {% else %}
 
 <!-- DESKTOP: one line per asset, latest activity included in the same row -->
@@ -65,7 +62,7 @@
                 <a href="{{ url_for('sitepulse_view_asset', asset_id=a['id']) }}"><strong>{{ a['name'] }}</strong></a>
                 {% if a['description'] %}<div class="sub" style="margin:0;">{{ a['description'] }}</div>{% endif %}
             </td>
-            <td><a href="{{ url_for('sitepulse_dashboard', status=a['status'], location=current_location) }}" style="text-decoration:none;"><span class="rc-badge {{ a['status']|sp_statusclass }}" title="Click to filter by this status">{{ a['status'] }}</span></a></td>
+            <td><a href="{{ url_for('sitepulse_dashboard', status=a['status'], location=current_location) }}" style="text-decoration:none;"><span class="badge {{ a['status']|sp_statusclass }}" title="Click to filter by this status">{{ a['status'] }}</span></a></td>
             <td>{% if a['location'] %}<a href="{{ url_for('sitepulse_dashboard', status=current_filter, location=a['location']) }}" title="Click to filter by this location">{{ a['location'] }}</a>{% else %}&mdash;{% endif %}</td>
             <td>
                 {% if a['latest_activity'] %}
@@ -101,7 +98,7 @@
                 <a href="{{ url_for('sitepulse_view_asset', asset_id=a['id']) }}" style="font-size:16px; font-weight:700; color:var(--text-light);">{{ a['name'] }}</a>
                 <div class="sub" style="margin:2px 0 0 0;">{{ a['description'] or '' }}{% if a['location'] %} &middot; <a href="{{ url_for('sitepulse_dashboard', status=current_filter, location=a['location']) }}">{{ a['location'] }}</a>{% endif %}</div>
             </div>
-            <a href="{{ url_for('sitepulse_dashboard', status=a['status'], location=current_location) }}" style="text-decoration:none;"><span class="rc-badge {{ a['status']|sp_statusclass }}">{{ a['status'] }}</span></a>
+            <a href="{{ url_for('sitepulse_dashboard', status=a['status'], location=current_location) }}" style="text-decoration:none;"><span class="badge {{ a['status']|sp_statusclass }}">{{ a['status'] }}</span></a>
         </div>
         {% if a['latest_activity'] %}
         <div style="margin-top:10px; padding-top:10px; border-top:1px solid var(--border); font-size:13px;">
