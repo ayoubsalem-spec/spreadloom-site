@@ -1703,8 +1703,33 @@ def send_due_concrete_reminders():
 def inventory_concrete_list():
     send_due_concrete_reminders()
     db = get_db()
-    rows = db.execute("SELECT * FROM inventory_concrete_requests ORDER BY pour_date DESC").fetchall()
-    return render_template("inventory/concrete_requests.html", requests=rows)
+
+    project_filter = request.args.get("project", "")
+    status_filter = request.args.get("status", "")
+    pour_date_filter = request.args.get("pour_date", "")
+
+    conditions, params = [], []
+    if project_filter:
+        conditions.append("project = ?")
+        params.append(project_filter)
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if pour_date_filter:
+        conditions.append("pour_date = ?")
+        params.append(pour_date_filter)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    rows = db.execute(f"SELECT * FROM inventory_concrete_requests {where} ORDER BY pour_date DESC", params).fetchall()
+    projects = [p["project"] for p in db.execute(
+        "SELECT DISTINCT project FROM inventory_concrete_requests WHERE project IS NOT NULL AND project != '' ORDER BY project"
+    ).fetchall()]
+
+    return render_template(
+        "inventory/concrete_requests.html", requests=rows, projects=projects,
+        status_options=CONCRETE_STATUS_OPTIONS, project_filter=project_filter,
+        status_filter=status_filter, pour_date_filter=pour_date_filter
+    )
 
 
 def create_concrete_request(fields, requested_by):
@@ -2714,6 +2739,7 @@ def assistant_reset():
 
 
 REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
+CONCRETE_STATUS_OPTIONS = ["Submitted", "Scheduled", "Completed"]
 
 
 def _log_request_status(db, request_id, status, changed_by, release_note=None):

@@ -1,12 +1,36 @@
 {% extends "inventory/base.html" %}
 {% block content %}
+<style>
+    .cr-toolbar { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+    .cr-toolbar select, .cr-toolbar input[type="date"] { width:auto; min-width:170px; flex:0 0 auto; }
+</style>
 <div class="section-row">
     <div><h1>Concrete Requests</h1><p class="sub">Concrete Checklist Form</p></div>
     <a href="{{ url_for('inventory_new_concrete') }}" class="btn btn-gold">+ New Request</a>
 </div>
 <a href="{{ url_for('inventory_home') }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; SitePulse</a>
+
+<form method="GET" class="cr-toolbar">
+    <select name="project" onchange="this.form.submit()">
+        <option value="">All projects</option>
+        {% for p in projects %}
+        <option value="{{ p }}" {{ 'selected' if project_filter == p }}>{{ p }}</option>
+        {% endfor %}
+    </select>
+    <select name="status" onchange="this.form.submit()">
+        <option value="">All statuses</option>
+        {% for s in status_options %}
+        <option value="{{ s }}" {{ 'selected' if status_filter == s }}>{{ s }}</option>
+        {% endfor %}
+    </select>
+    <input type="date" name="pour_date" value="{{ pour_date_filter }}" onchange="this.form.submit()">
+    {% if project_filter or status_filter or pour_date_filter %}
+    <a href="{{ url_for('inventory_concrete_list') }}" class="btn btn-sm">Clear filters</a>
+    {% endif %}
+</form>
+
 {% if requests|length == 0 %}
-<div class="card"><p class="sub" style="margin:0;">No concrete requests logged yet.</p></div>
+<div class="card"><p class="sub" style="margin:0;">{{ 'No requests match those filters.' if project_filter or status_filter or pour_date_filter else 'No concrete requests logged yet.' }}</p></div>
 {% else %}
 <div class="card" style="padding:0; overflow-x:auto;">
     <table>
