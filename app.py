@@ -806,7 +806,7 @@ def init_db():
     # Seed the initial department list once. After this, departments are
     # managed entirely from the admin UI (Users & Departments page) --
     # adding a new one is a row insert, not a code change.
-    existing_dept_count = db.execute("SELECT COUNT(*) as c FROM departments").fetchone()["c"]
+    existing_dept_count = db.execute("SELECT COUNT(*) FROM departments").fetchone()[0]
     if existing_dept_count == 0:
         now = datetime.utcnow().isoformat()
         for dept_name in ["Estimating", "Procurement", "Operations"]:
