@@ -28,7 +28,7 @@
         <div class="kpi-label">Unmeant Projects</div>
     </a>
 </div>
-{% if filter_status %}<p class="sub">Showing: <b>{{ filter_status|capitalize }}</b> — <a href="{{ url_for('tracker_dashboard') }}">clear filter</a></p>{% endif %}
+{% if filter_status and filter_status != 'all' %}<p class="sub">Showing: <b>{{ filter_status|capitalize }}</b> — <a href="{{ url_for('tracker_dashboard', filter='all') }}">show all</a></p>{% elif filter_status == 'all' %}<p class="sub">Showing: <b>All</b> — <a href="{{ url_for('tracker_dashboard', filter='active') }}">back to active</a></p>{% endif %}
 
 {% if total_blocking > 0 %}
 <div class="alert-banner">

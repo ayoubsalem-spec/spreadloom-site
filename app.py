@@ -3106,6 +3106,11 @@ def tr_file_content_matches_extension(file_storage, extension):
 def tracker_dashboard():
     db = get_db()
     filter_status = request.args.get("filter", "")
+    if "filter" not in request.args:
+        # No filter specified at all (fresh visit to Project Hunt) --
+        # default to showing only active (In Progress) bids. "all" is
+        # the explicit escape hatch to see everything else.
+        filter_status = "active"
 
     all_projects = db.execute("SELECT * FROM tracker_projects ORDER BY bid_due_date ASC").fetchall()
     active_projects = [p for p in all_projects if p["status"] != "Archived"]
@@ -3160,6 +3165,8 @@ def tracker_dashboard():
     elif filter_status == "unmeant":
         display_projects = [p for p in active_projects if p["status"] == "Unmeant"]
     else:
+        # "all" (explicit) or any other/blank value -- show everything
+        # that isn't archived.
         display_projects = active_projects
 
     client_filter = request.args.get("client", "").strip().lower()
