@@ -1,6 +1,5 @@
 {% extends "sitepulse/base.html" %}
-{% block inner %}
-{% include "requests/_styles.html" %}
+{% block content %}
 <div class="section-row">
     <div>
         <h1>{{ a['name'] }}</h1>
@@ -141,7 +140,7 @@
         {% for u in usage %}
         <tr>
             {% if u['entry_kind'] == 'move' %}
-            <td><span class="rc-badge b-progress">Location Move</span></td>
+            <td><span class="badge status-inprogress">Location Move</span></td>
             <td>
                 {{ u['from_location'] or '\u2014' }} &rarr; {{ u['to_location'] }}
                 {%- if u['move_reason'] %} &middot; {{ u['move_reason'] }}{% endif %}
@@ -248,7 +247,7 @@
             <td>{{ m['entry_date'] or '—' }}</td>
             <td>{{ m['work_done'] }}{% if m['parts'] %}<br><span class="sub" style="margin:0;">Parts: {{ m['parts'] }}</span>{% endif %}</td>
             <td>{{ m['reported_by'] or '—' }}</td>
-            <td>{% if m['resolved'] %}<span class="rc-badge b-released">Resolved</span>{% else %}<span class="rc-badge b-testing">Open</span>{% endif %}</td>
+            <td>{% if m['resolved'] %}<span class="badge status-awarded">Resolved</span>{% else %}<span class="badge status-pending">Open</span>{% endif %}</td>
             <td>
                 {% if m['photo_filename'] %}
                 <a href="{{ url_for('uploaded_photo', filename=m['photo_filename']) }}" target="_blank">

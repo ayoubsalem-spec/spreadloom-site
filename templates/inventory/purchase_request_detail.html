@@ -1,12 +1,11 @@
 {% extends "inventory/base.html" %}
-{% block inner %}
-{% include "requests/_styles.html" %}
+{% block content %}
 <div class="section-row">
     <div>
         <h1>{{ r['job_name'] or 'Purchase Request' }}</h1>
         <p class="sub">PR# {{ r['pr_number'] or '\u2014' }} &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
     </div>
-    <span class="rc-badge {{ 'b-released' if r['status']=='Completed' else ('b-progress' if r['status']=='Scheduled' else 'b-submitted') }}">{{ r['status'] or 'Submitted' }}</span>
+    <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
 </div>
 
 <div class="card">
