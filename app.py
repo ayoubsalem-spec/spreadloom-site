@@ -779,6 +779,7 @@ def init_db():
         "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_arrival_time TEXT",
         "ALTER TABLE inventory_concrete_requests ADD COLUMN full_reminder_sent_at TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
+        "ALTER TABLE feature_requests ADD COLUMN module_area TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
     ]:
         try:
@@ -961,14 +962,14 @@ def home():
 
 SP_STATUS_OPTIONS = ["Available", "Out on Job", "In Maintenance", "Sold", "Stolen"]
 SP_STATUS_BADGE = {
-    "Available": "status-awarded", "Out on Job": "status-inprogress",
-    "In Maintenance": "status-pending", "Sold": "status-submitted", "Stolen": "status-submitted",
+    "Available": "b-released", "Out on Job": "b-progress",
+    "In Maintenance": "b-testing", "Sold": "b-stalled", "Stolen": "b-attention",
 }
 
 
 @app.template_filter("sp_statusclass")
 def sp_statusclass(status):
-    return SP_STATUS_BADGE.get(status, "status-pending")
+    return SP_STATUS_BADGE.get(status, "b-stalled")
 
 
 @app.route("/sitepulse/")
@@ -1661,8 +1662,28 @@ def send_due_concrete_reminders():
 def inventory_concrete_list():
     send_due_concrete_reminders()
     db = get_db()
-    rows = db.execute("SELECT * FROM inventory_concrete_requests ORDER BY pour_date DESC").fetchall()
-    return render_template("inventory/concrete_requests.html", requests=rows)
+    project_filter = request.args.get("project", "")
+    status_filter = request.args.get("status", "")
+    pour_date_filter = request.args.get("pour_date", "")
+    conditions, params = [], []
+    if project_filter:
+        conditions.append("project = ?")
+        params.append(project_filter)
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if pour_date_filter:
+        conditions.append("pour_date = ?")
+        params.append(pour_date_filter)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(f"SELECT * FROM inventory_concrete_requests {where} ORDER BY pour_date DESC", params).fetchall()
+    projects = [p["project"] for p in db.execute(
+        "SELECT DISTINCT project FROM inventory_concrete_requests WHERE project IS NOT NULL AND project != '' ORDER BY project"
+    ).fetchall()]
+    return render_template(
+        "inventory/concrete_requests.html", requests=rows, projects=projects,
+        project_filter=project_filter, status_filter=status_filter, pour_date_filter=pour_date_filter
+    )
 
 
 def create_concrete_request(fields, requested_by):
@@ -1969,8 +1990,24 @@ def inventory_delete_concrete(request_id):
 @login_required
 def inventory_purchase_list():
     db = get_db()
-    rows = db.execute("SELECT * FROM inventory_purchase_requests ORDER BY request_date DESC").fetchall()
-    return render_template("inventory/purchase_requests.html", requests=rows)
+    job_filter = request.args.get("job_name", "")
+    status_filter = request.args.get("status", "")
+    conditions, params = [], []
+    if job_filter:
+        conditions.append("job_name = ?")
+        params.append(job_filter)
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(f"SELECT * FROM inventory_purchase_requests {where} ORDER BY request_date DESC", params).fetchall()
+    job_names = [j["job_name"] for j in db.execute(
+        "SELECT DISTINCT job_name FROM inventory_purchase_requests WHERE job_name IS NOT NULL AND job_name != '' ORDER BY job_name"
+    ).fetchall()]
+    return render_template(
+        "inventory/purchase_requests.html", requests=rows, job_names=job_names,
+        job_filter=job_filter, status_filter=status_filter
+    )
 
 
 def _generate_pr_number(db):
@@ -2234,10 +2271,10 @@ def inventory_delete_purchase(request_id):
 
 TR_STATUS_OPTIONS = ["In Progress", "Submitted", "Awarded", "Unmeant", "On Hold", "Cancelled", "Pending", "Archived"]
 TR_STATUS_BADGE_CLASS = {
-    "In Progress": "status-inprogress", "Submitted": "status-submitted",
-    "Awarded": "status-awarded", "Unmeant": "status-lost",
-    "On Hold": "status-onhold", "Cancelled": "status-cancelled", "Pending": "status-pending",
-    "Archived": "status-cancelled",
+    "In Progress": "b-progress", "Submitted": "b-submitted",
+    "Awarded": "b-released", "Unmeant": "b-attention",
+    "On Hold": "b-stalled", "Cancelled": "b-stalled", "Pending": "b-testing",
+    "Archived": "b-stalled",
 }
 
 
@@ -2250,7 +2287,7 @@ def tr_markdown_filter(text):
 
 @app.template_filter("statusclass")
 def tr_statusclass_filter(status):
-    return TR_STATUS_BADGE_CLASS.get(status, "status-pending")
+    return TR_STATUS_BADGE_CLASS.get(status, "b-stalled")
 
 
 @app.template_filter("daysleft")
@@ -2671,7 +2708,8 @@ def assistant_reset():
 
 
 REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
-DEPARTMENT_OPTIONS = ["Leadership", "Field", "Procurement", "Engineering", "Operations", "Finance"]
+DEPARTMENT_OPTIONS = ["Estimating", "Procurement", "Operations"]
+MODULE_AREA_OPTIONS = ["SitePulse", "Project Hunt", "Equipment Center", "Atlas", "Procurement / Purchase Requests", "Request Center", "Other"]
 
 
 def _log_request_status(db, request_id, status, changed_by, release_note=None):
@@ -2699,12 +2737,12 @@ def request_center():
         if not text:
             flash("Please describe what you need before submitting.", "error")
         else:
-            user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
-            department = user_row["department"] if user_row else None
+            department = request.form.get("department", "").strip() or None
+            module_area = request.form.get("module_area", "").strip() or None
             now = datetime.utcnow().isoformat()
             cur = db.execute(
-                "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                (current_user.email, current_user.name or current_user.email, department, text, "Submitted", now, now)
+                "INSERT INTO feature_requests (requester_email, requester_name, department, module_area, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (current_user.email, current_user.name or current_user.email, department, module_area, text, "Submitted", now, now)
             )
             request_id = cur.lastrowid
             db.commit()
@@ -2720,6 +2758,8 @@ def request_center():
             flash("Request submitted.")
         return redirect(url_for("request_center"))
 
+    user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
+    default_department = user_row["department"] if user_row else None
     my_requests = db.execute(
         "SELECT * FROM feature_requests WHERE requester_email = ? ORDER BY created_at DESC",
         (current_user.email,)
@@ -2735,7 +2775,11 @@ def request_center():
             (r["id"],)
         ).fetchall()
         requests_with_history.append({"r": r, "history": history, "attachments": attachments})
-    return render_template("requests/my_requests.html", requests_with_history=requests_with_history)
+    return render_template(
+        "requests/my_requests.html", requests_with_history=requests_with_history,
+        department_options=DEPARTMENT_OPTIONS, module_area_options=MODULE_AREA_OPTIONS,
+        default_department=default_department
+    )
 
 
 def _render_my_requests_for(db, email):
@@ -2783,9 +2827,16 @@ def product_intelligence():
         params.append(department_filter)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(f"SELECT * FROM feature_requests {where} ORDER BY created_at DESC", params).fetchall()
-    departments = [d["department"] for d in db.execute(
+    # Always show the full canonical department list in the filter, not
+    # just whatever's already been used on a submitted request -- an
+    # empty dropdown when nobody's been assigned a department yet was
+    # exactly the bug reported. Still merge in any real custom value
+    # already in use (e.g. someone's department before this list existed)
+    # so nothing already-filterable silently disappears from the filter.
+    used_departments = [d["department"] for d in db.execute(
         "SELECT DISTINCT department FROM feature_requests WHERE department IS NOT NULL AND department != ''"
     ).fetchall()]
+    departments = DEPARTMENT_OPTIONS + [d for d in used_departments if d not in DEPARTMENT_OPTIONS]
 
     # Dashboard data -- all real aggregate queries against feature_requests
     # and its related tables, computed fresh every load. Nothing here is

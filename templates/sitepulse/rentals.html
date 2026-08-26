@@ -1,7 +1,10 @@
 {% extends "sitepulse/base.html" %}
-{% block content %}
+{% block inner %}
+{% include "requests/_styles.html" %}
+
 <div class="section-row">
     <div>
+        <span class="rc-eyebrow">Equipment Center</span>
         <h1>Rentals</h1>
         <p class="sub" style="margin-bottom:0;">Equipment we're renting from outside vendors.</p>
     </div>
@@ -39,7 +42,7 @@
             <td>{{ r['rented_date'] }}</td>
             <td>{{ r['due_date'] or '&mdash;'|safe }}</td>
             <td>
-                <span class="badge {{ 'status-inprogress' if r['rental_status']=='Active' else ('status-submitted' if r['rental_status']=='Overdue' else 'status-awarded') }}"
+                <span class="rc-badge {{ 'b-progress' if r['rental_status']=='Active' else ('b-attention' if r['rental_status']=='Overdue' else 'b-released') }}"
                       style="{{ 'background:#F87171; color:#1a0000;' if r['rental_status']=='Overdue' }}">
                     {{ r['rental_status'] }}
                 </span>
@@ -67,7 +70,7 @@
                 <div style="font-size:16px; font-weight:700;">{{ r['equipment_description'] }}</div>
                 <div class="sub" style="margin:2px 0 0 0;">{{ r['vendor'] }}{% if r['job_name'] %} &middot; {{ r['job_name'] }}{% endif %}</div>
             </div>
-            <span class="badge {{ 'status-inprogress' if r['rental_status']=='Active' else ('status-submitted' if r['rental_status']=='Overdue' else 'status-awarded') }}"
+            <span class="rc-badge {{ 'b-progress' if r['rental_status']=='Active' else ('b-attention' if r['rental_status']=='Overdue' else 'b-released') }}"
                   style="{{ 'background:#F87171; color:#1a0000;' if r['rental_status']=='Overdue' }}">
                 {{ r['rental_status'] }}
             </span>

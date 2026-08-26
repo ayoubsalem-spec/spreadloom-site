@@ -13,6 +13,26 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <label style="margin-top:0;">What do you need?</label>
         <textarea name="original_request" required placeholder="Describe what you need..."></textarea>
+        <div class="form-row" style="margin-top:14px;">
+            <div style="flex:1;">
+                <label style="margin-top:0;">Department</label>
+                <select name="department">
+                    <option value="">&mdash; Select &mdash;</option>
+                    {% for opt in department_options %}
+                    <option value="{{ opt }}" {{ 'selected' if default_department == opt }}>{{ opt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="flex:1;">
+                <label style="margin-top:0;">Which part of BuildIQ needs work?</label>
+                <select name="module_area">
+                    <option value="">&mdash; Select &mdash;</option>
+                    {% for opt in module_area_options %}
+                    <option value="{{ opt }}">{{ opt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
         <label style="margin-top:14px;">Screenshots (optional)</label>
         <input type="file" name="screenshots" accept="image/*" multiple>
         <div class="rc-submit-foot">
