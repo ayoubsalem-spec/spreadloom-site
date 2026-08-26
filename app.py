@@ -777,6 +777,7 @@ def init_db():
         "ALTER TABLE inventory_purchase_requests ADD COLUMN ordered_date TEXT",
         "ALTER TABLE inventory_purchase_requests ADD COLUMN vendor_company TEXT",
         "ALTER TABLE inventory_purchase_requests ADD COLUMN vendor_company_phone TEXT",
+        "ALTER TABLE inventory_purchase_requests ADD COLUMN expected_delivery_date TEXT",
         # Location-move auto-tracking (item 15) -- Status & Location now
         # writes movement entries straight into the usage log, including
         # ones scheduled for a future date.
@@ -2220,9 +2221,10 @@ def inventory_place_purchase_order(request_id):
     if request.method == "POST":
         db.execute(
             """UPDATE inventory_purchase_requests SET vendor_company=?, vendor_company_phone=?,
-               ordered_by=?, ordered_date=?, status='Scheduled', updated_at=? WHERE id=?""",
+               ordered_by=?, ordered_date=?, expected_delivery_date=?, status='Scheduled', updated_at=? WHERE id=?""",
             (request.form.get("vendor_company", ""), request.form.get("vendor_company_phone", ""),
              current_user.name or current_user.email, date.today().isoformat(),
+             request.form.get("expected_delivery_date", ""),
              datetime.utcnow().isoformat(), request_id)
         )
         log_activity("inventory", "purchase_request", request_id, "updated", field="status",

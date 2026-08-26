@@ -10,13 +10,14 @@
 {% else %}
 <div class="card" style="padding:0; overflow-x:auto;">
     <table>
-        <tr><th>PR#</th><th>Job Name</th><th>Date</th><th>Needed On</th><th>Status</th><th></th></tr>
+        <tr><th>PR#</th><th>Job Name</th><th>Date</th><th>Needed On</th><th>Delivery On</th><th>Status</th><th></th></tr>
         {% for r in requests %}
         <tr>
             <td><strong>{{ r['pr_number'] or '\u2014' }}</strong></td>
             <td>{{ r['job_name'] or '\u2014' }}</td>
             <td>{{ r['request_date']|friendly_date }}</td>
             <td>{{ r['needed_on']|friendly_date if r['needed_on'] else '\u2014' }}</td>
+            <td>{{ r['expected_delivery_date']|friendly_date if r['expected_delivery_date'] else '\u2014' }}</td>
             <td><span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span></td>
             <td><a href="{{ url_for('inventory_view_purchase', request_id=r['id']) }}" class="btn btn-sm">Open</a></td>
         </tr>

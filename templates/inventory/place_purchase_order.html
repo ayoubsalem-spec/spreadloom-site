@@ -9,6 +9,9 @@
             <div style="flex:1;"><label>Vendor / Company</label><input type="text" name="vendor_company" value="{{ r['vendor_company'] or '' }}" data-remember="vendor_company" autofocus></div>
             <div style="flex:1;"><label>Phone</label><input type="text" name="vendor_company_phone" value="{{ r['vendor_company_phone'] or '' }}" data-remember="vendor_company_phone"></div>
         </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Expected Delivery Date</label><input type="date" name="expected_delivery_date" value="{{ r['expected_delivery_date'] or '' }}"></div>
+        </div>
         <p class="sub" style="margin-top:16px;">Ordered by: <strong style="color:var(--text);">{{ current_user.name or current_user.email }}</strong> &middot; {{ today }}</p>
         <button type="submit" class="btn btn-gold" style="margin-top:8px;">Place Order &amp; Mark Scheduled</button>
     </form>

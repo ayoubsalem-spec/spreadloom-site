@@ -55,6 +55,7 @@
     <table>
         <tr><td class="sub" style="width:220px;">Ordered By</td><td>{{ r['ordered_by'] }}{% if r['ordered_date'] %} &middot; {{ r['ordered_date']|friendly_date }}{% endif %}</td></tr>
         {% if r['vendor_company'] %}<tr><td class="sub">Vendor</td><td>{{ r['vendor_company'] }}{% if r['vendor_company_phone'] %} &middot; {{ r['vendor_company_phone'] }}{% endif %}</td></tr>{% endif %}
+        {% if r['expected_delivery_date'] %}<tr><td class="sub">Delivery On</td><td>{{ r['expected_delivery_date']|friendly_date }}</td></tr>{% endif %}
     </table>
     {% if is_procurement %}
     <a href="{{ url_for('inventory_place_purchase_order', request_id=r['id']) }}" class="btn btn-sm" style="margin-top:10px;">Edit Order Details</a>
