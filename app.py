@@ -3698,6 +3698,11 @@ def admin_restore():
             return redirect(url_for("admin_restore"))
         close_db(None)
         os.replace(temp_path, DB_PATH)
+        # Restoring swaps in a DB file that may predate newer tables/columns
+        # (departments, etc.) -- re-run migrations immediately so the
+        # restored DB is brought up to the current schema before anyone
+        # hits a route that assumes it.
+        init_db()
         flash("Database restored successfully from backup.")
         return redirect(url_for("home"))
     return render_template("admin_restore.html")
