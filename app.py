@@ -803,6 +803,21 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+    # Belt-and-suspenders: create departments here too, as its own
+    # standalone statement, in case it didn't take earlier (e.g. an
+    # existing production DB that predates this table and whose
+    # executescript run stopped short of it for any reason).
+    try:
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS departments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )"""
+        )
+    except sqlite3.OperationalError:
+        pass
+
     # Seed the initial department list once. After this, departments are
     # managed entirely from the admin UI (Users & Departments page) --
     # adding a new one is a row insert, not a code change.
