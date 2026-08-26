@@ -1,224 +1,63 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}SitePulse{% endblock %}</title>
-    <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
-    <meta name="theme-color" content="#0B1220">
-    <link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root {
-            --navy: #0B1220; --navy-light: #1A2438; --navy-card: #151E30;
-            --gold: #D4AF37; --gold-light: #E8C765; --gold-dim: #8A7530;
-            --text-light: #F1F5F9; --text-dim: #8B9BB4; --border: #263248;
-            --green: #22C55E; --red: #EF4444; --yellow: #EAB308; --blue: #3B82F6;
+{% extends "base.html" %}
+
+{% block context_nav %}
+<div class="context-nav">
+    <a href="{{ url_for('inventory_concrete_list') }}" class="{{ 'active' if request.path.startswith('/inventory/concrete') }}">Concrete Requests</a>
+    <a href="{{ url_for('inventory_purchase_list') }}" class="{{ 'active' if request.path.startswith('/inventory/purchase') }}">Purchase Requests</a>
+    <a href="{{ url_for('inventory_materials_list') }}" class="{{ 'active' if request.path.startswith('/inventory/materials') }}">Inventory / Materials</a>
+    {% if current_user.email == "ayoub@darycet.com" %}
+    <a href="{{ url_for('inventory_activity_log') }}" class="{{ 'active' if request.path.startswith('/inventory/activity') }}">Activity</a>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block content %}{% block inner %}{% endblock %}{% endblock %}
+
+{% block extra_scripts %}
+<script>
+    // Remembered-field autofill: any <input data-remember="key"> gets its
+    // past values saved to localStorage and offered back via a datalist.
+    // Inventory-specific -- these forms (concrete/purchase requests) are
+    // the only place this pattern is used.
+    (function () {
+        function storageKey(key) { return 'sitepulse_remember_' + key; }
+        function getSaved(key) {
+            try { return JSON.parse(localStorage.getItem(storageKey(key)) || '[]'); }
+            catch (e) { return []; }
         }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            background-color: var(--navy);
-            color: var(--text-light); line-height: 1.5; font-weight: 400; letter-spacing: -0.01em;
+        function saveValue(key, value) {
+            value = (value || '').trim();
+            if (!value) return;
+            var saved = getSaved(key).filter(function (v) { return v !== value; });
+            saved.unshift(value);
+            saved = saved.slice(0, 8);
+            localStorage.setItem(storageKey(key), JSON.stringify(saved));
         }
-        a { color: var(--gold-light); text-decoration: none; }
-        nav { background: var(--navy-light); padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); }
-        nav .logo-only { display: flex; align-items: center; }
-        nav .brand-text {
-            font-family: 'Space Grotesk', 'Inter', sans-serif;
-            font-weight: 700; font-size: 16px; letter-spacing: -0.01em; color: var(--gold-light);
-            margin-left: 12px; white-space: nowrap;
-        }
-        nav .brand-group { display: flex; align-items: center; }
-        nav .nav-links { display: flex; align-items: center; }
-        nav a { color: var(--text-light); margin-left: 24px; font-size: 13.5px; font-weight: 500; }
-        nav a:hover { color: var(--gold-light); }
-        nav a.cta { background: linear-gradient(135deg, var(--gold), var(--gold-dim)); color: var(--navy); padding: 9px 18px; border-radius: 7px; font-weight: 700; }
-        .container { max-width: 1100px; margin: 0 auto; padding: 36px 24px; }
-        .flash { background: rgba(239,68,68,0.15); border: 1px solid var(--red); color: #FCA5A5; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 13.5px; }
-        .flash-success { background: rgba(34,197,94,0.15); border: 1px solid #22C55E; color: #86EFAC; }
-        .card { background: rgba(21,30,48,0.88); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid var(--border); border-radius: 14px; padding: 24px; margin-bottom: 20px; }
-        h1 { font-family: 'Space Grotesk', 'Inter', sans-serif; font-size: 27px; margin-bottom: 6px; color: var(--text-light); font-weight: 700; letter-spacing: -0.02em; }
-        h2 { font-family: 'Space Grotesk', 'Inter', sans-serif; font-size: 16px; color: var(--text-light); margin-bottom: 12px; font-weight: 600; letter-spacing: -0.01em; }
-        p.sub { color: var(--text-dim); margin-bottom: 20px; font-size: 13.5px; }
-        label { display: block; font-weight: 600; font-size: 11.5px; margin-bottom: 6px; margin-top: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.6px; }
-        input, textarea, select {
-            width: 100%; padding: 10px 12px; background: var(--navy-light); border: 1px solid var(--border);
-            border-radius: 7px; font-size: 14px; font-family: inherit; color: var(--text-light);
-        }
-        select {
-            appearance: none; -webkit-appearance: none;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1L6 6L11 1' stroke='%23D4AF37' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-            background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px;
-        }
-        input:focus, textarea:focus, select:focus { outline: none; border-color: var(--gold-dim); box-shadow: 0 0 0 3px rgba(212,175,55,0.15); }
-        textarea { min-height: 80px; resize: vertical; }
-        button, .btn {
-            background: var(--navy-light); border: 1px solid var(--border); color: var(--text-light);
-            padding: 9px 18px; border-radius: 7px; font-size: 13px; font-weight: 600; cursor: pointer;
-            display: inline-block; margin-top: 14px; transition: all 0.15s; font-family: inherit;
-        }
-        button:hover, .btn:hover { border-color: var(--gold-dim); color: var(--gold-light); }
-        button:active, .btn:active { transform: scale(0.97); }
-        .btn-gold { background: linear-gradient(135deg, var(--gold), var(--gold-dim)); color: var(--navy); border: none; font-weight: 700; }
-        .btn-gold:hover { color: var(--navy); opacity: 0.9; }
-        .btn-sm { padding: 6px 12px; font-size: 12px; margin-top: 0; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--border); font-size: 13.5px; vertical-align: top; color: var(--text-light); }
-        tbody tr { transition: background 0.15s; }
-        tbody tr:hover { background: rgba(212,175,55,0.05); }
-        th { color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 700; }
-        .badge { padding: 4px 11px; border-radius: 20px; font-size: 11px; font-weight: 700; display: inline-block; letter-spacing: 0.3px; }
-        .status-awarded { background: rgba(34,197,94,0.15); color: #4ADE80; }
-        .status-submitted { background: rgba(212,175,55,0.15); color: var(--gold-light); }
-        .status-inprogress { background: rgba(59,130,246,0.15); color: #60A5FA; }
-        .status-pending { background: rgba(234,179,8,0.15); color: #FDE047; }
-        .alert-banner {
-            background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.4); color: #FCA5A5;
-            padding: 14px 18px; border-radius: 10px; margin-bottom: 20px; font-size: 13.5px; font-weight: 600;
-        }
-        .section-row { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
-        .form-row { display: flex; gap: 16px; }
-        .inline-form { display: flex; gap: 8px; align-items: center; }
-        .inline-form input, .inline-form select { width: auto; }
-        .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px; }
-        .kpi-card {
-            background: rgba(21,30,48,0.88); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-            border: 1px solid rgba(212,175,55,0.35); border-radius: 14px; padding: 20px;
-            position: relative; overflow: hidden; transition: transform 0.2s, box-shadow 0.2s;
-            text-decoration: none; display: block;
-        }
-        .kpi-card::before {
-            content: ''; position: absolute; top: -40px; right: -40px; width: 120px; height: 120px;
-            background: radial-gradient(circle, rgba(212,175,55,0.18) 0%, transparent 70%); pointer-events: none;
-        }
-        .kpi-card:hover { transform: translateY(-3px); box-shadow: 0 12px 24px rgba(0,0,0,0.35); border-color: rgba(212,175,55,0.6); }
-        .kpi-card.active-filter { border-color: var(--gold); }
-        .btn.active-filter, .btn-sm.active-filter { background: var(--gold); color: var(--navy); border-color: var(--gold); }
-        .kpi-value { font-family: 'Space Grotesk', 'Inter', sans-serif; font-size: 32px; font-weight: 700; color: var(--text-light); letter-spacing: -0.03em; position: relative; }
-        .kpi-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.6px; margin-top: 4px; font-weight: 700; position: relative; }
-        .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
-        .desktop-only { display: block; }
-        .mobile-only { display: none; }
-        .stack-nav { display: flex; flex-direction: column; gap: 16px; margin: 24px 0; max-width: 320px; }
-        .stack-nav a.btn-stack {
-            background: linear-gradient(135deg, var(--gold), var(--gold-dim)); color: var(--navy);
-            border: none; font-weight: 700; text-align: center; padding: 16px 18px; border-radius: 9px;
-            font-size: 15px; margin-top: 0;
-        }
-        .stack-nav a.btn-stack:hover { color: var(--navy); opacity: 0.9; }
-        @media (max-width: 700px) {
-            .container { padding: 20px 14px; }
-            nav { padding: 14px 16px; flex-wrap: wrap; gap: 10px; }
-            .brand-text { font-size: 14px; }
-            nav .nav-links { flex-wrap: wrap; }
-            nav a { margin-left: 0; margin-right: 16px; margin-top: 4px; }
-            .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
-            .kpi-card { padding: 12px; }
-            .kpi-value { font-size: 20px; }
-            .kpi-label { font-size: 9px; }
-            h1 { font-size: 21px; }
-            .card { padding: 16px; border-radius: 10px; }
-            .section-row { flex-direction: column; align-items: flex-start; gap: 10px; }
-            .section-row > div, .section-row > a { width: 100%; }
-            table { display: block; overflow-x: auto; white-space: nowrap; }
-            button, .btn { padding: 11px 18px; font-size: 14px; }
-            .btn-sm { padding: 9px 14px; font-size: 13px; }
-            .form-row { flex-direction: column; gap: 0; }
-            .inline-form { flex-direction: column; align-items: stretch; }
-            .inline-form input, .inline-form select { width: 100% !important; }
-            .inline-form button, .inline-form .btn { width: 100%; }
-            .desktop-only { display: none; }
-            .mobile-only { display: block; }
-            .stack-nav { max-width: 100%; gap: 14px; }
-            .stack-nav a.btn-stack { padding: 15px 18px; font-size: 15px; }
-        }
-    </style>
-    <script>
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function() {
-                navigator.serviceWorker.register("{{ url_for('static', filename='service-worker.js') }}");
-            });
-        }
-    </script>
-</head>
-<body>
-    <nav>
-        <div class="brand-group">
-            <a href="{{ url_for('inventory_home') }}" class="logo-only"><img src="{{ url_for('static', filename='icons/apps/sitepulse.png') }}" alt="SitePulse" style="height:32px; vertical-align:middle;"></a>
-            <a href="{{ url_for('inventory_home') }}" class="brand-text">SitePulse</a>
-        </div>
-        <div class="nav-links">
-            {% if current_user.is_authenticated %}
-                <a href="{{ url_for('home') }}">&larr; BuildIQ</a>
-                <a href="{{ url_for('inventory_concrete_list') }}">Concrete Requests</a>
-                <a href="{{ url_for('inventory_purchase_list') }}">Purchase Requests</a>
-                <a href="{{ url_for('inventory_materials_list') }}">Inventory</a>
-                {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('inventory_activity_log') }}">Activity</a>{% endif %}
-                
-                {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('admin_backup') }}">Backup</a>{% endif %}
-                {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('admin_restore') }}">Restore</a>{% endif %}
-                {% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('team_list') }}">Team</a>{% endif %}
-                <a href="{{ url_for('logout') }}">Log out</a>
-            {% else %}
-                <a href="{{ url_for('login') }}">Log in</a>
-                <a href="{{ url_for('signup') }}" class="cta">Get Started</a>
-            {% endif %}
-        </div>
-    </nav>
-    <div class="container">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}{% for category, msg in messages %}<div class="flash {{ 'flash-success' if category != 'error' }}">{{ msg }}</div>{% endfor %}{% endif %}
-        {% endwith %}
-        {% block content %}{% endblock %}
-    </div>
-    <script>
-        // Remembered-field autofill: any <input data-remember="key"> gets its
-        // past values saved to localStorage and offered back via a datalist.
-        (function () {
-            function storageKey(key) { return 'sitepulse_remember_' + key; }
-            function getSaved(key) {
-                try { return JSON.parse(localStorage.getItem(storageKey(key)) || '[]'); }
-                catch (e) { return []; }
-            }
-            function saveValue(key, value) {
-                value = (value || '').trim();
-                if (!value) return;
-                var saved = getSaved(key).filter(function (v) { return v !== value; });
-                saved.unshift(value);
-                saved = saved.slice(0, 8);
-                localStorage.setItem(storageKey(key), JSON.stringify(saved));
-            }
-            document.querySelectorAll('input[data-remember]').forEach(function (input) {
-                var key = input.getAttribute('data-remember');
-                var listId = 'remember-' + key;
-                var saved = getSaved(key);
-                if (saved.length) {
-                    var datalist = document.getElementById(listId);
-                    if (!datalist) {
-                        datalist = document.createElement('datalist');
-                        datalist.id = listId;
-                        input.after(datalist);
-                    }
-                    datalist.innerHTML = '';
-                    saved.forEach(function (v) {
-                        var opt = document.createElement('option');
-                        opt.value = v;
-                        datalist.appendChild(opt);
-                    });
-                    input.setAttribute('list', listId);
+        document.querySelectorAll('input[data-remember]').forEach(function (input) {
+            var key = input.getAttribute('data-remember');
+            var listId = 'remember-' + key;
+            var saved = getSaved(key);
+            if (saved.length) {
+                var datalist = document.getElementById(listId);
+                if (!datalist) {
+                    datalist = document.createElement('datalist');
+                    datalist.id = listId;
+                    input.after(datalist);
                 }
-                input.addEventListener('change', function () { saveValue(key, input.value); });
-                var form = input.closest('form');
-                if (form) {
-                    form.addEventListener('submit', function () { saveValue(key, input.value); });
-                }
-            });
-        })();
-    </script>
-</body>
-</html>
+                datalist.innerHTML = '';
+                saved.forEach(function (v) {
+                    var opt = document.createElement('option');
+                    opt.value = v;
+                    datalist.appendChild(opt);
+                });
+                input.setAttribute('list', listId);
+            }
+            input.addEventListener('change', function () { saveValue(key, input.value); });
+            var form = input.closest('form');
+            if (form) {
+                form.addEventListener('submit', function () { saveValue(key, input.value); });
+            }
+        });
+    })();
+</script>
+{% endblock %}

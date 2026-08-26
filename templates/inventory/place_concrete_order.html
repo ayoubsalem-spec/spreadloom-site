@@ -1,5 +1,5 @@
 {% extends "inventory/base.html" %}
-{% block content %}
+{% block inner %}
 <h1>Place Concrete Order</h1>
 <p class="sub">{{ r['project'] }} &middot; Pour {{ r['pour_date']|friendly_date }}{% if r['pour_time'] %} at {{ r['pour_time'] }}{% endif %} &mdash; fill in who's showing up and when. This marks the request Scheduled and builds the notification below.</p>
 <div class="card">

@@ -1,11 +1,12 @@
 {% extends "inventory/base.html" %}
-{% block content %}
+{% block inner %}
+{% include "requests/_styles.html" %}
 <div class="section-row">
     <div>
         <h1>{{ r['project'] }}</h1>
         <p class="sub">Concrete Checklist Form &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
     </div>
-    <span class="badge {{ 'status-awarded' if r['status']=='Completed' else ('status-inprogress' if r['status']=='Scheduled' else 'status-pending') }}">{{ r['status'] or 'Submitted' }}</span>
+    <span class="rc-badge {{ 'b-released' if r['status']=='Completed' else ('b-progress' if r['status']=='Scheduled' else 'b-submitted') }}">{{ r['status'] or 'Submitted' }}</span>
 </div>
 <div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Project Info</h3>

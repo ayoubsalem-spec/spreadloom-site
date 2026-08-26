@@ -1,5 +1,5 @@
 {% extends "inventory/base.html" %}
-{% block content %}
+{% block inner %}
 <h1>Place Order</h1>
 <p class="sub">{{ r['job_name'] or 'Purchase Request' }} &middot; PR# {{ r['pr_number'] or '\u2014' }} &mdash; fill in who it was ordered from. This marks the request Scheduled.</p>
 <div class="card">

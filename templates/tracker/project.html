@@ -1,5 +1,6 @@
 {% extends "tracker/base.html" %}
-{% block content %}
+{% block inner %}
+{% include "requests/_styles.html" %}
 <div class="section-row" style="margin-top:0;">
     <div>
         <h1>{{ p['name'] }}</h1>
@@ -7,7 +8,7 @@
         {% if p['address'] %}<p class="sub" style="margin-bottom:0; margin-top:4px;">📍 {{ p['address'] }}</p>{% endif %}
     </div>
     <div>
-        <span class="badge {{ p['status']|statusclass }}" style="font-size:13px; padding:6px 16px;">{{ p['status'] }}</span>
+        <span class="rc-badge {{ p['status']|statusclass }}" style="font-size:11px; padding:4px 10px;">{{ p['status'] }}</span>
         <a href="{{ url_for('tracker_edit_project', project_id=p['id']) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Edit Project</a>
         <a href="{{ url_for('tracker_project_activity_log', project_id=p['id']) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Activity Log</a>
     </div>
@@ -55,7 +56,7 @@
                     <b>{{ q['vendor_name'] or 'No vendor set' }}</b>
                     {% if q['vendor_phone'] %}<span class="sub" style="font-size:12.5px;"> — {{ q['vendor_phone'] }}</span>{% endif %}
                 </span>
-                <span class="badge {{ 'badge-received' if q['status']=='Received' else ('badge-sent' if q['status']=='Sent' else 'badge-notsent') }}">{{ q['status'] }}</span>
+                <span class="rc-badge {{ 'b-released' if q['status']=='Received' else ('b-testing' if q['status']=='Sent' else 'b-stalled') }}">{{ q['status'] }}</span>
             </summary>
 
             <div style="margin-top:14px; padding-left:4px;">
@@ -68,7 +69,7 @@
                 <form method="POST" action="{{ url_for('tracker_delete_quote', quote_id=q['id']) }}" style="display:inline;"
                       onsubmit="return confirm('Delete this vendor quote permanently?');">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <button type="submit" class="btn-sm" style="color:#F87171; border-color:#7F1D1D;">Delete Quote</button>
+                    <button type="submit" class="btn btn-sm" style="color:#F87171; border-color:#7F1D1D;">Delete Quote</button>
                 </form>
 
                 <form method="POST" action="{{ url_for('tracker_update_quote_status', quote_id=q['id']) }}" class="inline-form" style="margin-top:12px;">
@@ -79,7 +80,7 @@
                         <option value="Received" {{ 'selected' if q['status']=='Received' }}>Received</option>
                     </select>
                     <input type="text" name="amount" placeholder="Amount" value="{{ q['amount'] or '' }}" style="width:160px;">
-                    <button type="submit" class="btn-sm">Update</button>
+                    <button type="submit" class="btn btn-sm">Update</button>
                 </form>
 
                 <div style="margin-top:12px;">
@@ -88,13 +89,13 @@
                     <form method="POST" action="{{ url_for('tracker_delete_quote_file', quote_id=q['id']) }}" style="display:inline;"
                           onsubmit="return confirm('Remove this attached file?');">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button type="submit" class="btn-sm" style="color:#F87171; border-color:#7F1D1D;">Remove File</button>
+                        <button type="submit" class="btn btn-sm" style="color:#F87171; border-color:#7F1D1D;">Remove File</button>
                     </form>
                     {% else %}
                     <form method="POST" action="{{ url_for('tracker_upload_quote_file', quote_id=q['id']) }}" enctype="multipart/form-data" class="inline-form">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="file" name="quote_file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg" style="width:auto;">
-                        <button type="submit" class="btn-sm">Attach Quote File</button>
+                        <button type="submit" class="btn btn-sm">Attach Quote File</button>
                     </form>
                     {% endif %}
                 </div>
@@ -103,11 +104,11 @@
                 <div style="margin-top:14px;">
                     <form method="POST" action="{{ url_for('tracker_generate_rfq', quote_id=q['id']) }}" style="display:inline;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button type="submit" class="btn-sm">{{ 'Regenerate RFQ Email' if q['rfq_email'] else 'Generate RFQ Email' }}</button>
+                        <button type="submit" class="btn btn-sm">{{ 'Regenerate RFQ Email' if q['rfq_email'] else 'Generate RFQ Email' }}</button>
                     </form>
                     <form method="POST" action="{{ url_for('tracker_generate_followup', quote_id=q['id']) }}" style="display:inline;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button type="submit" class="btn-sm">{{ 'Regenerate Follow-Up' if q['follow_up_email'] else 'Generate Follow-Up Email' }}</button>
+                        <button type="submit" class="btn btn-sm">{{ 'Regenerate Follow-Up' if q['follow_up_email'] else 'Generate Follow-Up Email' }}</button>
                     </form>
                     {% if q['rfq_email'] %}
                     <div class="ai-output">
@@ -115,7 +116,7 @@
                             <b style="color:var(--gold-light);">RFQ Email:</b>
                             <form method="POST" action="{{ url_for('tracker_clear_rfq', quote_id=q['id']) }}">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn-sm">Clear</button>
+                                <button type="submit" class="btn btn-sm">Clear</button>
                             </form>
                         </div>
                         {{ q['rfq_email']|markdown|safe }}
@@ -127,7 +128,7 @@
                             <b style="color:var(--gold-light);">Follow-Up Email:</b>
                             <form method="POST" action="{{ url_for('tracker_clear_followup', quote_id=q['id']) }}">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <button type="submit" class="btn-sm">Clear</button>
+                                <button type="submit" class="btn btn-sm">Clear</button>
                             </form>
                         </div>
                         {{ q['follow_up_email']|markdown|safe }}
@@ -157,7 +158,7 @@
         <input type="text" name="doc_name" placeholder="Document name" required style="width:200px;">
         <input type="text" name="doc_type" placeholder="Type (Permit, Plan Set, RFI...)" style="width:180px;">
         <input type="url" name="link" placeholder="Shared drive link" style="width:220px;">
-        <button type="submit" class="btn-sm">Add</button>
+        <button type="submit" class="btn btn-sm">Add</button>
     </form>
     {% if docs|length > 0 %}
     <table>
@@ -166,7 +167,7 @@
         <tr>
             <td>{{ d['doc_name'] }}</td>
             <td>{{ d['doc_type'] or '—' }}</td>
-            <td><span class="badge {{ 'badge-received' if d['status']=='On File' else 'badge-notsent' }}">{{ d['status'] }}</span></td>
+            <td><span class="rc-badge {{ 'b-released' if d['status']=='On File' else 'b-stalled' }}">{{ d['status'] }}</span></td>
             <td>
                 {% if d['link'] %}
                     {% if d['link'].startswith('http://') or d['link'].startswith('https://') %}
@@ -185,7 +186,7 @@
                         <option value="Requested" {{ 'selected' if d['status']=='Requested' }}>Requested</option>
                         <option value="On File" {{ 'selected' if d['status']=='On File' }}>On File</option>
                     </select>
-                    <button type="submit" class="btn-sm">Update</button>
+                    <button type="submit" class="btn btn-sm">Update</button>
                 </form>
             </td>
         </tr>

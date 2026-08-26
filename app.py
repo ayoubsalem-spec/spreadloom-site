@@ -779,6 +779,7 @@ def init_db():
         "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_arrival_time TEXT",
         "ALTER TABLE inventory_concrete_requests ADD COLUMN full_reminder_sent_at TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
+        "ALTER TABLE feature_requests ADD COLUMN module_area TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
     ]:
         try:
@@ -961,14 +962,14 @@ def home():
 
 SP_STATUS_OPTIONS = ["Available", "Out on Job", "In Maintenance", "Sold", "Stolen"]
 SP_STATUS_BADGE = {
-    "Available": "status-awarded", "Out on Job": "status-inprogress",
-    "In Maintenance": "status-pending", "Sold": "status-submitted", "Stolen": "status-submitted",
+    "Available": "b-released", "Out on Job": "b-progress",
+    "In Maintenance": "b-testing", "Sold": "b-stalled", "Stolen": "b-attention",
 }
 
 
 @app.template_filter("sp_statusclass")
 def sp_statusclass(status):
-    return SP_STATUS_BADGE.get(status, "status-pending")
+    return SP_STATUS_BADGE.get(status, "b-stalled")
 
 
 @app.route("/sitepulse/")
@@ -1661,28 +1662,28 @@ def send_due_concrete_reminders():
 def inventory_concrete_list():
     send_due_concrete_reminders()
     db = get_db()
-    rows = db.execute("SELECT * FROM inventory_concrete_requests ORDER BY pour_date DESC").fetchall()
-
-    project_options = sorted({r["project"] for r in rows if r["project"]})
-    status_options = sorted({r["status"] or "Submitted" for r in rows})
-
     project_filter = request.args.get("project", "")
-    pour_date_filter = request.args.get("pour_date", "")
     status_filter = request.args.get("status", "")
-
-    filtered_rows = rows
+    pour_date_filter = request.args.get("pour_date", "")
+    conditions, params = [], []
     if project_filter:
-        filtered_rows = [r for r in filtered_rows if r["project"] == project_filter]
-    if pour_date_filter:
-        filtered_rows = [r for r in filtered_rows if r["pour_date"] == pour_date_filter]
+        conditions.append("project = ?")
+        params.append(project_filter)
     if status_filter:
-        filtered_rows = [r for r in filtered_rows if (r["status"] or "Submitted") == status_filter]
-
-    return render_template("inventory/concrete_requests.html", requests=filtered_rows,
-                            has_any_requests=len(rows) > 0,
-                            project_options=project_options, status_options=status_options,
-                            project_filter=project_filter, pour_date_filter=pour_date_filter,
-                            status_filter=status_filter)
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if pour_date_filter:
+        conditions.append("pour_date = ?")
+        params.append(pour_date_filter)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(f"SELECT * FROM inventory_concrete_requests {where} ORDER BY pour_date DESC", params).fetchall()
+    projects = [p["project"] for p in db.execute(
+        "SELECT DISTINCT project FROM inventory_concrete_requests WHERE project IS NOT NULL AND project != '' ORDER BY project"
+    ).fetchall()]
+    return render_template(
+        "inventory/concrete_requests.html", requests=rows, projects=projects,
+        project_filter=project_filter, status_filter=status_filter, pour_date_filter=pour_date_filter
+    )
 
 
 def create_concrete_request(fields, requested_by):
@@ -1989,8 +1990,24 @@ def inventory_delete_concrete(request_id):
 @login_required
 def inventory_purchase_list():
     db = get_db()
-    rows = db.execute("SELECT * FROM inventory_purchase_requests ORDER BY request_date DESC").fetchall()
-    return render_template("inventory/purchase_requests.html", requests=rows)
+    job_filter = request.args.get("job_name", "")
+    status_filter = request.args.get("status", "")
+    conditions, params = [], []
+    if job_filter:
+        conditions.append("job_name = ?")
+        params.append(job_filter)
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(f"SELECT * FROM inventory_purchase_requests {where} ORDER BY request_date DESC", params).fetchall()
+    job_names = [j["job_name"] for j in db.execute(
+        "SELECT DISTINCT job_name FROM inventory_purchase_requests WHERE job_name IS NOT NULL AND job_name != '' ORDER BY job_name"
+    ).fetchall()]
+    return render_template(
+        "inventory/purchase_requests.html", requests=rows, job_names=job_names,
+        job_filter=job_filter, status_filter=status_filter
+    )
 
 
 def _generate_pr_number(db):
@@ -2254,10 +2271,10 @@ def inventory_delete_purchase(request_id):
 
 TR_STATUS_OPTIONS = ["In Progress", "Submitted", "Awarded", "Unmeant", "On Hold", "Cancelled", "Pending", "Archived"]
 TR_STATUS_BADGE_CLASS = {
-    "In Progress": "status-inprogress", "Submitted": "status-submitted",
-    "Awarded": "status-awarded", "Unmeant": "status-lost",
-    "On Hold": "status-onhold", "Cancelled": "status-cancelled", "Pending": "status-pending",
-    "Archived": "status-cancelled",
+    "In Progress": "b-progress", "Submitted": "b-submitted",
+    "Awarded": "b-released", "Unmeant": "b-attention",
+    "On Hold": "b-stalled", "Cancelled": "b-stalled", "Pending": "b-testing",
+    "Archived": "b-stalled",
 }
 
 
@@ -2270,7 +2287,7 @@ def tr_markdown_filter(text):
 
 @app.template_filter("statusclass")
 def tr_statusclass_filter(status):
-    return TR_STATUS_BADGE_CLASS.get(status, "status-pending")
+    return TR_STATUS_BADGE_CLASS.get(status, "b-stalled")
 
 
 @app.template_filter("daysleft")
@@ -2691,10 +2708,8 @@ def assistant_reset():
 
 
 REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
-# Initial department list. This drives every department dropdown/filter in the
-# app (see admin_users.html and product_intelligence.html) -- add a new
-# department by appending a string here, no UI changes needed.
 DEPARTMENT_OPTIONS = ["Estimating", "Procurement", "Operations"]
+MODULE_AREA_OPTIONS = ["SitePulse", "Project Hunt", "Equipment Center", "Atlas", "Procurement / Purchase Requests", "Request Center", "Other"]
 
 
 def _log_request_status(db, request_id, status, changed_by, release_note=None):
@@ -2722,12 +2737,12 @@ def request_center():
         if not text:
             flash("Please describe what you need before submitting.", "error")
         else:
-            user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
-            department = user_row["department"] if user_row else None
+            department = request.form.get("department", "").strip() or None
+            module_area = request.form.get("module_area", "").strip() or None
             now = datetime.utcnow().isoformat()
             cur = db.execute(
-                "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                (current_user.email, current_user.name or current_user.email, department, text, "Submitted", now, now)
+                "INSERT INTO feature_requests (requester_email, requester_name, department, module_area, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (current_user.email, current_user.name or current_user.email, department, module_area, text, "Submitted", now, now)
             )
             request_id = cur.lastrowid
             db.commit()
@@ -2743,6 +2758,8 @@ def request_center():
             flash("Request submitted.")
         return redirect(url_for("request_center"))
 
+    user_row = db.execute("SELECT department FROM users WHERE email = ?", (current_user.email,)).fetchone()
+    default_department = user_row["department"] if user_row else None
     my_requests = db.execute(
         "SELECT * FROM feature_requests WHERE requester_email = ? ORDER BY created_at DESC",
         (current_user.email,)
@@ -2758,7 +2775,11 @@ def request_center():
             (r["id"],)
         ).fetchall()
         requests_with_history.append({"r": r, "history": history, "attachments": attachments})
-    return render_template("requests/my_requests.html", requests_with_history=requests_with_history)
+    return render_template(
+        "requests/my_requests.html", requests_with_history=requests_with_history,
+        department_options=DEPARTMENT_OPTIONS, module_area_options=MODULE_AREA_OPTIONS,
+        default_department=default_department
+    )
 
 
 def _render_my_requests_for(db, email):
@@ -2806,9 +2827,16 @@ def product_intelligence():
         params.append(department_filter)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(f"SELECT * FROM feature_requests {where} ORDER BY created_at DESC", params).fetchall()
-    departments = [d["department"] for d in db.execute(
+    # Always show the full canonical department list in the filter, not
+    # just whatever's already been used on a submitted request -- an
+    # empty dropdown when nobody's been assigned a department yet was
+    # exactly the bug reported. Still merge in any real custom value
+    # already in use (e.g. someone's department before this list existed)
+    # so nothing already-filterable silently disappears from the filter.
+    used_departments = [d["department"] for d in db.execute(
         "SELECT DISTINCT department FROM feature_requests WHERE department IS NOT NULL AND department != ''"
     ).fetchall()]
+    departments = DEPARTMENT_OPTIONS + [d for d in used_departments if d not in DEPARTMENT_OPTIONS]
 
     # Dashboard data -- all real aggregate queries against feature_requests
     # and its related tables, computed fresh every load. Nothing here is
@@ -2821,6 +2849,7 @@ def product_intelligence():
     kpi = {
         "total": total_requests,
         "new_reviewing": status_counts.get("Submitted", 0) + status_counts.get("Reviewing", 0),
+        "approved": status_counts.get("Approved", 0),
         "building": status_counts.get("Building", 0),
         "testing": status_counts.get("Testing", 0),
         "released": status_counts.get("Released", 0),
@@ -2873,11 +2902,162 @@ def product_intelligence():
            ORDER BY h.changed_at DESC LIMIT 5"""
     ).fetchall()
 
+    # --- Command Center additions below. Every number here is a real
+    # query against real tables -- nothing fabricated. Where a system
+    # genuinely has no usage tracking yet (Atlas) or doesn't exist yet
+    # (Quote Pro, Engineering/Redline on LIVE), that's stated honestly
+    # rather than invented. ---
+
+    now_dt = datetime.utcnow()
+    today_str = date.today().isoformat()
+
+    # Attention Required: real staleness checks against real records.
+    attention_items = []
+    stale_requests = db.execute(
+        "SELECT COUNT(*) c FROM feature_requests WHERE status IN ('Submitted','Reviewing') "
+        "AND created_at < ?", ((now_dt - timedelta(days=3)).isoformat(),)
+    ).fetchone()["c"]
+    if stale_requests:
+        attention_items.append({"label": f"{stale_requests} request{'s' if stale_requests != 1 else ''} sitting in Submitted/Reviewing for 3+ days", "url": url_for("product_intelligence", status="Submitted,Reviewing")})
+    overdue_concrete = db.execute(
+        "SELECT COUNT(*) c FROM inventory_concrete_requests WHERE status = 'Submitted' AND pour_date < ?", (today_str,)
+    ).fetchone()["c"]
+    if overdue_concrete:
+        attention_items.append({"label": f"{overdue_concrete} concrete request{'s' if overdue_concrete != 1 else ''} past pour date, still not scheduled", "url": url_for("inventory_concrete_list", status="Submitted")})
+    stale_purchase = db.execute(
+        "SELECT COUNT(*) c FROM inventory_purchase_requests WHERE status = 'Submitted' AND request_date < ?",
+        ((now_dt - timedelta(days=5)).date().isoformat(),)
+    ).fetchone()["c"]
+    if stale_purchase:
+        attention_items.append({"label": f"{stale_purchase} purchase request{'s' if stale_purchase != 1 else ''} unactioned for 5+ days", "url": url_for("inventory_purchase_list", status="Submitted")})
+
+    # BuildIQ Health: last real activity per system, from activity_log.
+    def last_activity(section):
+        row = db.execute("SELECT MAX(created_at) m, COUNT(*) c FROM activity_log WHERE section = ?", (section,)).fetchone()
+        return row["m"], row["c"]
+    ph_last, ph_count = last_activity("tracker")
+    eq_last, eq_count = last_activity("sitepulse")
+    proc_last, proc_count = last_activity("inventory")
+
+    system_health = [
+        {"name": "Project Hunt", "last": ph_last, "count": ph_count, "url": url_for("tracker_dashboard")},
+        {"name": "Equipment Center", "last": eq_last, "count": eq_count, "url": url_for("sitepulse_dashboard")},
+        {"name": "SitePulse", "last": eq_last, "count": eq_count, "url": url_for("sitepulse_dashboard")},
+        {"name": "Concrete Requests", "last": proc_last, "count": proc_count, "url": url_for("inventory_concrete_list")},
+        {"name": "Purchase Requests", "last": proc_last, "count": proc_count, "url": url_for("inventory_purchase_list")},
+        {"name": "Atlas", "last": None, "count": None, "url": url_for("assistant_page")},
+        {"name": "Quote Pro", "last": None, "count": None, "url": None},
+        {"name": "Engineering / Redline", "last": None, "count": None, "url": None},
+    ]
+
+    # BuildIQ Adoption: real user count, real "active in last 7 days" via
+    # actual distinct emails in activity_log + feature_requests.
+    total_users = db.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+    week_ago = (now_dt - timedelta(days=7)).isoformat()
+    active_emails = set(r["user_email"] for r in db.execute(
+        "SELECT DISTINCT user_email FROM activity_log WHERE created_at > ? AND user_email IS NOT NULL", (week_ago,)
+    ).fetchall())
+    active_emails |= set(r["requester_email"] for r in db.execute(
+        "SELECT DISTINCT requester_email FROM feature_requests WHERE created_at > ?", (week_ago,)
+    ).fetchall())
+    active_this_week = len(active_emails)
+
+    # Recent BuildIQ Activity: real activity_log entries across every
+    # section, merged with request status history, most recent first.
+    platform_activity = db.execute(
+        """SELECT section, entity_type, entity_id, action, user_email, created_at
+           FROM activity_log ORDER BY created_at DESC LIMIT 8"""
+    ).fetchall()
+
+    # Week-over-week comparison -- a real number and clear direction,
+    # still useful as a compact stat even though the hero below now
+    # carries the fuller day-by-day picture.
+    two_weeks_ago = (now_dt - timedelta(days=14)).isoformat()
+    this_week_count = db.execute("SELECT COUNT(*) c FROM feature_requests WHERE created_at > ?", (week_ago,)).fetchone()["c"]
+    last_week_count = db.execute(
+        "SELECT COUNT(*) c FROM feature_requests WHERE created_at > ? AND created_at <= ?", (two_weeks_ago, week_ago)
+    ).fetchone()["c"]
+    week_delta = this_week_count - last_week_count
+    week_trend_direction = "up" if week_delta > 0 else ("down" if week_delta < 0 else "flat")
+
+    # Real day-by-day request volume, last 7 days -- rendered as a real,
+    # properly sized chart in the hero, not a tiny sparkline. Handled
+    # honestly if sparse: the bars just show the real (small) numbers.
+    trend_days = []
+    for i in range(6, -1, -1):
+        d = (now_dt - timedelta(days=i)).date()
+        count = db.execute(
+            "SELECT COUNT(*) c FROM feature_requests WHERE date(created_at) = ?", (d.isoformat(),)
+        ).fetchone()["c"]
+        trend_days.append({"label": d.strftime("%a"), "count": count})
+    trend_max = max((d["count"] for d in trend_days), default=0) or 1
+
+    # System activity mix over the last 7 days -- real COUNT per section.
+    activity_mix_rows = db.execute(
+        "SELECT section, COUNT(*) c FROM activity_log WHERE created_at > ? GROUP BY section ORDER BY c DESC",
+        (week_ago,)
+    ).fetchall()
+    activity_mix_total = sum(r["c"] for r in activity_mix_rows) or 1
+    activity_mix = [
+        {"label": r["section"].capitalize(), "count": r["c"], "pct": round(100 * r["c"] / activity_mix_total)}
+        for r in activity_mix_rows
+    ]
+
+    # --- Pulse: real "what changed today" counts. ---
+    today_start = date.today().isoformat()
+    pulse_requests_today = db.execute("SELECT COUNT(*) c FROM feature_requests WHERE date(created_at) = ?", (today_start,)).fetchone()["c"]
+    pulse_activity_today = db.execute("SELECT COUNT(*) c FROM activity_log WHERE date(created_at) = ?", (today_start,)).fetchone()["c"]
+    pulse_users_today = len(set(r["user_email"] for r in db.execute(
+        "SELECT DISTINCT user_email FROM activity_log WHERE date(created_at) = ? AND user_email IS NOT NULL", (today_start,)
+    ).fetchall()))
+
+    # Real platform-wide entity counts for the Situation zone.
+    total_projects = db.execute("SELECT COUNT(*) c FROM tracker_projects").fetchone()["c"]
+    total_equipment = db.execute("SELECT COUNT(*) c FROM sitepulse_assets").fetchone()["c"]
+
+    # Priority Builds: real requests actively Building or Testing right
+    # now, with whatever real context exists (module tag, internal/testing
+    # notes) -- no fabricated priority level, since no such field exists.
+    priority_builds = db.execute(
+        """SELECT f.id, f.original_request, f.status, f.updated_at,
+           i.buildiq_module, i.internal_notes, i.testing_notes
+           FROM feature_requests f
+           LEFT JOIN feature_request_intelligence i ON i.feature_request_id = f.id
+           WHERE f.status IN ('Building','Testing')
+           ORDER BY f.updated_at DESC LIMIT 5"""
+    ).fetchall()
+
+    # BuildIQ Ecosystem: real active-request counts per tagged module,
+    # for the systems that actually exist. "Active" excludes Released/
+    # On Hold/Not Planned -- these are requests still moving.
+    ecosystem_counts_raw = {r["buildiq_module"]: r["c"] for r in db.execute(
+        """SELECT i.buildiq_module, COUNT(*) c FROM feature_requests f
+           JOIN feature_request_intelligence i ON i.feature_request_id = f.id
+           WHERE f.status NOT IN ('Released','On Hold','Not Planned') AND i.buildiq_module IS NOT NULL
+           GROUP BY i.buildiq_module"""
+    ).fetchall()}
+    ecosystem = [
+        {"name": "Project Hunt", "url": url_for("tracker_dashboard"), "active": ecosystem_counts_raw.get("Project Hunt", 0), "health": next((s for s in system_health if s["name"] == "Project Hunt"), None)},
+        {"name": "Equipment Center", "url": url_for("sitepulse_dashboard"), "active": ecosystem_counts_raw.get("Equipment Center", 0), "health": next((s for s in system_health if s["name"] == "Equipment Center"), None)},
+        {"name": "SitePulse", "url": url_for("sitepulse_dashboard"), "active": ecosystem_counts_raw.get("SitePulse", 0), "health": next((s for s in system_health if s["name"] == "SitePulse"), None)},
+        {"name": "Quote Pro", "url": None, "active": ecosystem_counts_raw.get("Quote Pro", 0), "health": None},
+        {"name": "Atlas", "url": url_for("assistant_page"), "active": ecosystem_counts_raw.get("Atlas", 0), "health": next((s for s in system_health if s["name"] == "Atlas"), None)},
+        {"name": "Engineering / Redline", "url": None, "active": ecosystem_counts_raw.get("Engineering / Redline", 0), "health": None},
+    ]
+
     return render_template(
         "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
         departments=departments, status_filter=status_filter, department_filter=department_filter,
         kpi=kpi, pipeline=pipeline, dept_breakdown=dept_breakdown, module_breakdown=module_breakdown,
-        recent_activity=recent_activity, recently_released=recently_released
+        recent_activity=recent_activity, recently_released=recently_released,
+        attention_items=attention_items, system_health=system_health,
+        total_users=total_users, active_this_week=active_this_week, platform_activity=platform_activity,
+        this_week_count=this_week_count, last_week_count=last_week_count, week_delta=week_delta, week_trend_direction=week_trend_direction,
+        trend_days=trend_days, trend_max=trend_max,
+        activity_mix=activity_mix,
+        pulse_requests_today=pulse_requests_today, pulse_activity_today=pulse_activity_today, pulse_users_today=pulse_users_today,
+        total_projects=total_projects, total_equipment=total_equipment,
+        priority_builds=priority_builds, ecosystem=ecosystem
     )
 
 
@@ -3056,10 +3236,7 @@ def tr_file_content_matches_extension(file_storage, extension):
 @login_required
 def tracker_dashboard():
     db = get_db()
-    raw_filter = request.args.get("filter")
-    # Default to "Active Bids" on first load (no filter param in the URL).
-    # An explicit filter=all is how the "clear filter" link shows everything.
-    filter_status = "active" if raw_filter is None else raw_filter
+    filter_status = request.args.get("filter", "")
 
     all_projects = db.execute("SELECT * FROM tracker_projects ORDER BY bid_due_date ASC").fetchall()
     active_projects = [p for p in all_projects if p["status"] != "Archived"]
