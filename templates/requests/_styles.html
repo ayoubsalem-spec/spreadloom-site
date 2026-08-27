@@ -254,7 +254,15 @@
     .cc-empty { color:var(--text-dim); font-size:13px; padding:8px 0; }
 
     /* --- Command Center v2: sidebar shell, request health, roadmap --- */
-    .cc-shell { display:grid; grid-template-columns:170px 1fr; gap:28px; align-items:start; }
+    .cc-shell {
+        display:grid; grid-template-columns:170px 1fr; gap:28px; align-items:start;
+        /* Break out of the platform's 1100px page container so Command
+           Center can use the full window width -- this page has enough
+           content density to earn it, unlike simpler list pages. */
+        width:100vw; max-width:1800px;
+        margin-left:calc(-50vw + 50%);
+        padding:0 32px; box-sizing:border-box;
+    }
     .cc-jumpnav { position:sticky; top:78px; padding-top:8px; }
     .cc-jumpnav-label { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.7px; margin-bottom:10px; }
     .cc-jumpnav a { display:flex; align-items:center; gap:9px; padding:7px 8px; border-radius:5px; font-size:12px; font-weight:600; color:var(--text-dim); margin-bottom:2px; text-decoration:none; }
