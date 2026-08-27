@@ -3175,6 +3175,30 @@ def product_intelligence():
     )
 
 
+@app.route("/admin/roadmap/<int:item_id>/update", methods=["POST"])
+@login_required
+def roadmap_item_update(item_id):
+    if not is_admin():
+        flash("Product Intelligence is restricted to admins.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    lane = request.form.get("lane", "later")
+    if lane not in ("now", "next", "later"):
+        lane = "later"
+    try:
+        progress_pct = max(0, min(100, int(request.form.get("progress_pct", 0))))
+    except ValueError:
+        progress_pct = 0
+    note = request.form.get("note", "").strip()
+    db.execute(
+        "UPDATE roadmap_items SET lane = ?, progress_pct = ?, note = ?, updated_at = ? WHERE id = ?",
+        (lane, progress_pct, note, datetime.utcnow().isoformat(), item_id)
+    )
+    db.commit()
+    flash("Roadmap updated.")
+    return redirect(url_for("product_intelligence") + "#cc-roadmap")
+
+
 @app.route("/admin/product-intelligence/<int:request_id>", methods=["GET", "POST"])
 @login_required
 def product_intelligence_detail(request_id):

@@ -286,4 +286,8 @@
     .cc-roadmap-fill { height:100%; }
 
     .cc-mh-row { display:flex; gap:24px; justify-content:space-around; flex-wrap:wrap; }
+
+    .cc-roadmap-card summary::-webkit-details-marker { display:none; }
+    .cc-roadmap-card summary::marker { content:''; }
+    .cc-roadmap-card[open] { border-color:var(--brass-dim); }
 </style>
