@@ -1,7 +1,7 @@
 {% extends "inventory/base.html" %}
 {% block content %}
 <div class="section-row">
-    <div><h1>Inventory</h1><p class="sub">Materials stored at each site &mdash; findable and reusable across projects.</p></div>
+    <div><span class="rc-eyebrow">SitePulse</span><h1>Inventory</h1><p class="sub">Materials stored at each site &mdash; findable and reusable across projects.</p></div>
     <a href="{{ url_for('inventory_new_material') }}" class="btn btn-gold">+ Add Material</a>
 </div>
 <a href="{{ url_for('inventory_home') }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; SitePulse</a>

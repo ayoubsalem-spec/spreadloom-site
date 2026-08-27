@@ -19,6 +19,14 @@
             --line-faint: rgba(79,157,196,0.08);
             --brass:#C9A24B; --brass-dim:#8A7238; --cyan:#5AC8E0; --teal:#5EEAD4;
             --text:#EAF0F5; --text-dim:#7E93A8; --text-faint:#4A5D70; --red:#F87171;
+            /* Aliases for the module-specific palette names that predate the
+               shared design system, so every existing template that
+               references them renders in the exact same colors as the rest
+               of the platform without needing every file touched. */
+            --gold:var(--brass); --gold-light:var(--brass); --gold-dim:var(--brass-dim);
+            --navy:var(--ink); --navy-light:var(--surface); --navy-card:var(--surface-2);
+            --green:var(--teal); --yellow:var(--brass); --blue:var(--cyan);
+            --text-light:var(--text); --border:var(--line);
         }
         body {
             background: linear-gradient(var(--line-faint) 1px, transparent 1px) 0 0/48px 48px,
@@ -74,15 +82,57 @@
         .flash { background: rgba(239,68,68,0.12); border:1px solid var(--red); color:#FCA5A5; padding:12px 16px; border-radius:4px; margin-bottom:20px; font-size:13.5px; }
         .flash-success { background: rgba(94,234,212,0.1); border-color:var(--teal); color:var(--teal); }
         .kpi-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px; }
-        .kpi-card { background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:18px 20px; text-decoration:none; color:var(--text); }
+        .kpi-card { background:var(--surface); border:1px solid var(--line); border-radius:4px; padding:18px 20px; text-decoration:none; color:var(--text); display:block; }
         .kpi-card:hover { border-color:var(--brass-dim); }
+        .kpi-active { border-color:var(--brass); box-shadow:0 0 0 1px rgba(201,162,75,0.25); }
         .kpi-value { font-family:'Space Grotesk',sans-serif; font-size:28px; font-weight:700; }
         .kpi-label { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.8px; margin-top:4px; }
+
+        /* Platform-wide eyebrow label, used above every module's page title
+           (matches Product Intelligence, the design standard). */
+        .rc-eyebrow {
+            font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--brass);
+            text-transform:uppercase; letter-spacing:1.5px; margin-bottom:8px; display:block;
+        }
+
+        /* Status/label badges (pill style) used across Project Hunt,
+           Equipment Center and SitePulse tables -- colors map onto the
+           same tokens Product Intelligence uses. */
+        .badge { padding:4px 11px; border-radius:20px; font-size:11px; font-weight:700; display:inline-block; letter-spacing:0.3px; font-family:'IBM Plex Mono',monospace; }
+        .badge-received, .status-awarded { background:rgba(94,234,212,0.14); color:var(--teal); }
+        .badge-notsent, .status-cancelled { background:rgba(126,147,168,0.14); color:var(--text-dim); }
+        .badge-sent, .status-pending, .status-submitted, .status-onhold { background:rgba(201,162,75,0.14); color:var(--brass); }
+        .badge-blocking, .status-lost { background:rgba(248,113,113,0.14); color:var(--red); }
+        .status-inprogress { background:rgba(90,200,224,0.14); color:var(--cyan); }
+
+        .alert-banner {
+            background:rgba(248,113,113,0.08); border:1px solid rgba(248,113,113,0.35); color:#FCA5A5;
+            padding:14px 18px; border-radius:6px; margin-bottom:20px; font-size:13.5px; font-weight:600;
+        }
+        .inline-form { display:flex; gap:8px; align-items:center; }
+        .pi-table-toolbar { display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+        .pi-table-toolbar select, .pi-table-toolbar input[type="date"] { width:auto; min-width:170px; flex:0 0 auto; }
+        .divider { border:none; border-top:1px solid var(--line); margin:20px 0; }
+        .kpi-card.active-filter { border-color:var(--brass); box-shadow:0 0 0 1px rgba(201,162,75,0.25); }
+        .btn.active-filter, .btn-sm.active-filter { background:linear-gradient(135deg,var(--brass),var(--brass-dim)); color:var(--ink); border-color:var(--brass); }
+        .desktop-only { display:block; }
+        .mobile-only { display:none; }
+        .stack-nav { display:flex; flex-direction:column; gap:16px; margin:24px 0; max-width:320px; }
+        .stack-nav a.btn-stack {
+            background:linear-gradient(135deg,var(--brass),var(--brass-dim)); color:var(--ink);
+            border:none; font-weight:700; text-align:center; padding:16px 18px; border-radius:4px;
+            font-size:15px; text-decoration:none; display:block; font-family:'IBM Plex Mono',monospace;
+        }
+        .stack-nav a.btn-stack:hover { opacity:0.9; }
         @media (max-width:720px) {
             .kpi-grid { grid-template-columns:repeat(2,1fr); }
             .form-row { flex-direction:column; gap:0; }
             .container { padding:20px 16px 40px; }
             .titlebar nav { gap:14px; font-size:10px; }
+            .inline-form { flex-direction:column; align-items:stretch; }
+            .desktop-only { display:none; }
+            .mobile-only { display:block; }
+            .stack-nav { max-width:100%; }
         }
     </style>
 </head>
@@ -124,5 +174,6 @@
     {% endwith %}
     {% block content %}{% endblock %}
 </div>
+{% block extra_body %}{% endblock %}
 </body>
 </html>

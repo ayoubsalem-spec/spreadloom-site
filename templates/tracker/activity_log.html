@@ -1,9 +1,11 @@
 {% extends "tracker/base.html" %}
 {% block content %}
 {% if project %}
+<span class="rc-eyebrow">Project Hunt</span>
 <h1>Activity Log — {{ project['name'] }}</h1>
 <p class="sub">Every change made to this project, quote, and document data.</p>
 {% else %}
+<span class="rc-eyebrow">Project Hunt</span>
 <h1>Activity Log</h1>
 <p class="sub">Every change made across all projects, quotes, and documents (most recent 300).</p>
 {% endif %}

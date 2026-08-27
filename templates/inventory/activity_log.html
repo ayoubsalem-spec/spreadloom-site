@@ -1,8 +1,10 @@
 {% extends "inventory/base.html" %}
 {% block content %}
 {% if record_name %}
+<span class="rc-eyebrow">SitePulse</span>
 <h1>Activity Log &mdash; {{ record_name }}</h1>
 {% else %}
+<span class="rc-eyebrow">SitePulse</span>
 <h1>Activity Log</h1>
 <p class="sub">Most recent 300 changes across materials, concrete requests, and purchase requests.</p>
 {% endif %}

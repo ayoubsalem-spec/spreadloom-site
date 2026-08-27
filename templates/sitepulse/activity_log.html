@@ -1,9 +1,11 @@
 {% extends "sitepulse/base.html" %}
 {% block content %}
 {% if asset %}
+<span class="rc-eyebrow">Equipment Center</span>
 <h1>Activity Log — {{ asset['name'] }}</h1>
 <p class="sub">Every change made to this asset, its usage log, and its maintenance log.</p>
 {% else %}
+<span class="rc-eyebrow">Equipment Center</span>
 <h1>Activity Log</h1>
 <p class="sub">Every change made across all assets, usage entries, and maintenance entries (most recent 300).</p>
 {% endif %}

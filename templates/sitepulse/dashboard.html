@@ -2,6 +2,7 @@
 {% block content %}
 <div class="section-row">
     <div>
+        <span class="rc-eyebrow">Equipment Center</span>
         <h1>Equipment</h1>
         <p class="sub" style="margin-bottom:0;">Check here before renting anything externally.</p>
     </div>
@@ -12,33 +13,33 @@
 </div>
 
 <div class="kpi-grid">
-    <a href="{{ url_for('sitepulse_dashboard', status='Available', location=current_location) }}" class="kpi-card {{ 'active-filter' if current_filter=='Available' }}">
-        <div class="kpi-value">{{ available_count }}</div>
+    <a href="{{ url_for('sitepulse_dashboard', status='Available', location=current_location) }}" class="kpi-card {{ 'kpi-active' if current_filter=='Available' }}">
+        <div class="kpi-value" style="color:var(--teal);">{{ available_count }}</div>
         <div class="kpi-label">Available</div>
     </a>
-    <a href="{{ url_for('sitepulse_dashboard', status='Out on Job', location=current_location) }}" class="kpi-card {{ 'active-filter' if current_filter=='Out on Job' }}">
-        <div class="kpi-value">{{ out_count }}</div>
+    <a href="{{ url_for('sitepulse_dashboard', status='Out on Job', location=current_location) }}" class="kpi-card {{ 'kpi-active' if current_filter=='Out on Job' }}">
+        <div class="kpi-value" style="color:var(--cyan);">{{ out_count }}</div>
         <div class="kpi-label">Out on Job</div>
     </a>
-    <a href="{{ url_for('sitepulse_dashboard', status='In Maintenance', location=current_location) }}" class="kpi-card {{ 'active-filter' if current_filter=='In Maintenance' }}">
-        <div class="kpi-value">{{ maint_count }}</div>
+    <a href="{{ url_for('sitepulse_dashboard', status='In Maintenance', location=current_location) }}" class="kpi-card {{ 'kpi-active' if current_filter=='In Maintenance' }}">
+        <div class="kpi-value" style="color:var(--brass);">{{ maint_count }}</div>
         <div class="kpi-label">In Maintenance</div>
     </a>
     <a href="{{ url_for('sitepulse_rentals_list') }}" class="kpi-card">
-        <div class="kpi-value">{{ active_rentals_count }}</div>
+        <div class="kpi-value" style="color:var(--text-faint);">{{ active_rentals_count }}</div>
         <div class="kpi-label">Active Rentals</div>
         {% if overdue_rentals_count > 0 %}
-        <div style="margin-top:6px; font-size:12px; font-weight:700; color:#F87171;">{{ overdue_rentals_count }} Overdue</div>
+        <div style="margin-top:6px; font-size:12px; font-weight:700; color:var(--red);">{{ overdue_rentals_count }} Overdue</div>
         {% endif %}
     </a>
 </div>
 
-<form method="GET" style="display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap;">
-    <select name="status" onchange="this.form.submit()" style="width:auto; flex:1; min-width:150px;">
+<form method="GET" class="pi-table-toolbar">
+    <select name="status" onchange="this.form.submit()">
         <option value="">All Statuses (active)</option>
         {% for s in status_options %}<option value="{{ s }}" {{ 'selected' if current_filter==s }}>{{ s }}</option>{% endfor %}
     </select>
-    <select name="location" onchange="this.form.submit()" style="width:auto; flex:1; min-width:150px;">
+    <select name="location" onchange="this.form.submit()">
         <option value="">All Locations</option>
         {% for loc in locations %}<option value="{{ loc }}" {{ 'selected' if current_location==loc }}>{{ loc }}</option>{% endfor %}
     </select>
@@ -46,7 +47,7 @@
 </form>
 
 <input type="text" id="equip-search" placeholder="Search by name, location, or activity..." oninput="filterEquipment()"
-       style="width:100%; padding:12px 14px; background:var(--navy-light); border:1px solid var(--border); border-radius:8px; font-size:15px; color:var(--text-light); margin-bottom:16px;">
+       style="width:100%; padding:10px 12px; background:var(--surface-2); border:1px solid var(--line); border-radius:3px; font-size:14px; color:var(--text); margin-bottom:16px;">
 
 {% if assets|length == 0 %}
 <div class="card"><p class="sub" style="margin-bottom:0;">No equipment matches this view.</p></div>

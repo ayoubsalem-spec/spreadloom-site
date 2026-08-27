@@ -1,7 +1,11 @@
 {% extends "tracker/base.html" %}
 {% block content %}
 <div class="section-row" style="margin-top:0;">
-    <h1>Project Hunt</h1>
+    <div>
+        <span class="rc-eyebrow">Project Hunt</span>
+        <h1>Bid Tracker</h1>
+        <p class="sub">Every active bid, its status, and what's due next.</p>
+    </div>
     <div>
         <a href="{{ url_for('admin_export_excel') }}" class="btn">Export to Excel</a>
         <a href="{{ url_for('admin_backup') }}" class="btn">Download Backup</a>
@@ -11,20 +15,20 @@
 </div>
 
 <div class="kpi-grid">
-    <a href="{{ url_for('tracker_dashboard', filter='active') }}" class="kpi-card" style="text-decoration:none; {{ 'border-color: var(--gold);' if filter_status=='active' }}">
+    <a href="{{ url_for('tracker_dashboard', filter='active') }}" class="kpi-card {{ 'kpi-active' if filter_status=='active' }}">
         <div class="kpi-value">{{ kpis.active }}</div>
         <div class="kpi-label">Active Bids</div>
     </a>
-    <a href="{{ url_for('tracker_dashboard', filter='submitted') }}" class="kpi-card" style="text-decoration:none; {{ 'border-color: var(--gold);' if filter_status=='submitted' }}">
-        <div class="kpi-value">{{ kpis.submitted }}</div>
+    <a href="{{ url_for('tracker_dashboard', filter='submitted') }}" class="kpi-card {{ 'kpi-active' if filter_status=='submitted' }}">
+        <div class="kpi-value" style="color:var(--cyan);">{{ kpis.submitted }}</div>
         <div class="kpi-label">Submitted</div>
     </a>
-    <a href="{{ url_for('tracker_dashboard', filter='awarded') }}" class="kpi-card" style="text-decoration:none; {{ 'border-color: var(--gold);' if filter_status=='awarded' }}">
-        <div class="kpi-value">{{ kpis.awarded }}</div>
+    <a href="{{ url_for('tracker_dashboard', filter='awarded') }}" class="kpi-card {{ 'kpi-active' if filter_status=='awarded' }}">
+        <div class="kpi-value" style="color:var(--teal);">{{ kpis.awarded }}</div>
         <div class="kpi-label">Awarded</div>
     </a>
-    <a href="{{ url_for('tracker_dashboard', filter='unmeant') }}" class="kpi-card" style="text-decoration:none; {{ 'border-color: var(--gold);' if filter_status=='unmeant' }}">
-        <div class="kpi-value">{{ kpis.unmeant }}</div>
+    <a href="{{ url_for('tracker_dashboard', filter='unmeant') }}" class="kpi-card {{ 'kpi-active' if filter_status=='unmeant' }}">
+        <div class="kpi-value" style="color:var(--text-faint);">{{ kpis.unmeant }}</div>
         <div class="kpi-label">Unmeant Projects</div>
     </a>
 </div>
@@ -41,9 +45,9 @@
         <h2 style="margin-bottom:0;">All Projects</h2>
     </div>
 
-    <form method="GET" class="inline-form" style="margin-top:14px; margin-bottom:14px; flex-wrap:wrap;">
+    <form method="GET" class="pi-table-toolbar" style="margin-top:14px; margin-bottom:14px;">
         <input type="text" name="client" placeholder="Filter by client..." value="{{ client_filter }}" style="width:200px;">
-        <select name="status" style="width:auto;">
+        <select name="status" onchange="this.form.submit()">
             <option value="">All Statuses</option>
             {% for s in status_options %}
             <option value="{{ s }}" {{ 'selected' if status_filter==s }}>{{ s }}</option>
