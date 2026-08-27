@@ -298,4 +298,14 @@
     .cc-roadmap-card summary::-webkit-details-marker { display:none; }
     .cc-roadmap-card summary::marker { content:''; }
     .cc-roadmap-card[open] { border-color:var(--brass-dim); }
+
+    /* --- CSS-only tabs (no JS) for Recently Resolved / Recent Activity --- */
+    .cc-tab-radio { display:none; }
+    .cc-tab-panel { display:none; }
+    .cc-tab-labels { display:flex; gap:8px; margin-bottom:14px; }
+    .cc-tab-label { padding:8px 16px; border:1px solid var(--line); border-radius:4px; cursor:pointer; font-size:12.5px; font-weight:600; color:var(--text-dim); font-family:'IBM Plex Mono',monospace; }
+    #cc-tab-resolved:checked ~ .cc-tab-labels label[for="cc-tab-resolved"],
+    #cc-tab-activity:checked ~ .cc-tab-labels label[for="cc-tab-activity"] { color:var(--brass); border-color:var(--brass-dim); background:rgba(201,162,75,0.08); }
+    #cc-tab-resolved:checked ~ .cc-panel-resolved { display:block; }
+    #cc-tab-activity:checked ~ .cc-panel-activity { display:block; }
 </style>

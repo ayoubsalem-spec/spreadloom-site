@@ -66,6 +66,37 @@
 </div>
 {% endif %}
 
+<!-- BY DEPARTMENT / BY MODULE: moved up, compact side-by-side -->
+{% if dept_breakdown or module_breakdown %}
+<div class="pi-two-col" style="margin-bottom:20px;">
+    {% if dept_breakdown %}
+    <div class="card" style="margin-bottom:0; padding:16px 18px;">
+        <p class="pi-section-title" style="margin-bottom:10px;">By Department</p>
+        {% for d in dept_breakdown %}
+        <div class="pi-bar-row">
+            <div class="pi-bar-label">{{ d.label }}</div>
+            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ d.pct }}%;"></div></div>
+            <div class="pi-bar-count">{{ d.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    {% if module_breakdown %}
+    <div class="card" style="margin-bottom:0; padding:16px 18px;">
+        <p class="pi-section-title" style="margin-bottom:10px;">By BuildIQ Module <span class="dim">from released/tagged</span></p>
+        {% for m in module_breakdown %}
+        <div class="pi-bar-row">
+            <div class="pi-bar-label">{{ m.label }}</div>
+            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ m.pct }}%;"></div></div>
+            <div class="pi-bar-count">{{ m.count }}</div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
 <!-- REQUEST HEALTH: metrics about the requests pipeline specifically -->
 <p class="pi-section-title" id="cc-reqhealth" style="margin-bottom:12px; scroll-margin-top:16px;">Request Health</p>
 <div class="cc-req-health-row" style="margin-bottom:20px;">
@@ -105,8 +136,8 @@
 <p class="pi-section-title" id="cc-overview" style="margin-bottom:12px; scroll-margin-top:16px;">System Overview</p>
 <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
     <div class="card" style="margin-bottom:0;">
-        <h3 style="margin-bottom:10px;">Module Network</h3>
-        <svg width="100%" height="230" viewBox="0 0 640 230">
+        <h3 style="margin-bottom:8px;">Module Network</h3>
+        <svg width="100%" height="190" viewBox="0 0 640 230">
             <defs><filter id="ccGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
             <line x1="320" y1="115" x2="140" y2="45"  stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
             <line x1="320" y1="115" x2="140" y2="115" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
@@ -144,7 +175,7 @@
     </div>
     <div class="card" style="margin-bottom:0; display:flex; flex-direction:column; align-items:center; justify-content:center;">
         <h3 style="align-self:flex-start; margin-bottom:6px;">System Health</h3>
-        <svg width="180" height="180" viewBox="0 0 180 180">
+        <svg width="150" height="150" viewBox="0 0 180 180">
             <defs><filter id="ccRing" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
             <circle cx="90" cy="90" r="78" fill="none" stroke="var(--line)" stroke-width="10"/>
             {% if fleet_uptime_pct is not none %}
@@ -172,7 +203,7 @@
         {% set mh_color = '#5EEAD4' if m['lane'] == 'now' else '#C9A24B' %}
         {% set mh_off = (163.4 * (1 - m['progress_pct']/100))|round(1) %}
         <div style="text-align:center; {{ 'opacity:0.5;' if m['lane'] == 'later' }}">
-            <svg width="90" height="90" viewBox="0 0 66 66"><defs><filter id="ccMh{{ loop.index }}" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <svg width="72" height="72" viewBox="0 0 66 66"><defs><filter id="ccMh{{ loop.index }}" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
             <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
             <circle cx="33" cy="33" r="26" fill="none" stroke="{{ mh_color }}" stroke-width="6" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="{{ mh_off }}" transform="rotate(-90 33 33)" filter="url(#ccMh{{ loop.index }})"/>
             <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ m['progress_pct'] }}%</text></svg>
@@ -230,28 +261,8 @@
 </div>
 {% endif %}
 
-<!-- NEEDS YOUR ATTENTION: compact, moved down -->
-<p class="pi-section-title" id="cc-attention" style="margin-bottom:12px; scroll-margin-top:16px;">Needs Your Attention</p>
-<div class="card" style="margin-bottom:20px; padding:14px 18px;">
-    {% if attention_items %}
-    <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0 20px;">
-        {% for item in attention_items %}
-        <div class="cc-queue-item" style="padding:8px 0;">
-            <div class="cc-queue-pri {{ 'cc-pri-high' if item.priority == 'high' else 'cc-pri-med' }}"></div>
-            <div style="flex:1; min-width:0;">
-                <div class="cc-queue-title" style="font-size:12px;">{{ item.title }}</div>
-                <div class="cc-queue-meta">{{ item.meta }}</div>
-            </div>
-            <a href="{{ item.url }}" class="cc-queue-action">{{ item.action_label }}</a>
-        </div>
-        {% endfor %}
-    </div>
-    {% else %}
-        <p class="cc-empty" style="padding:0;">Nothing urgent right now.</p>
-    {% endif %}
-</div>
-
 <!-- REQUESTS TREND -->
+
 <p class="pi-section-title" id="cc-trend" style="margin-bottom:12px; scroll-margin-top:16px;">Requests Trend <span class="dim">14 days</span></p>
 <div class="card" style="margin-bottom:20px;">
     <svg width="100%" height="140" viewBox="0 0 900 140" style="overflow:visible;">
@@ -288,37 +299,36 @@
     {% endfor %}
 </div>
 
-<div class="pi-two-col">
-    {% if dept_breakdown %}
-    <div class="pi-section">
-        <p class="pi-section-title">By Department</p>
-        {% for d in dept_breakdown %}
-        <div class="pi-bar-row">
-            <div class="pi-bar-label">{{ d.label }}</div>
-            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ d.pct }}%;"></div></div>
-            <div class="pi-bar-count">{{ d.count }}</div>
+<!-- NEEDS YOUR ATTENTION: after all the graphs, compact -->
+<p class="pi-section-title" id="cc-attention" style="margin-bottom:12px; scroll-margin-top:16px;">Needs Your Attention</p>
+<div class="card" style="margin-bottom:20px; padding:14px 18px;">
+    {% if attention_items %}
+    <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0 20px;">
+        {% for item in attention_items %}
+        <div class="cc-queue-item" style="padding:8px 0;">
+            <div class="cc-queue-pri {{ 'cc-pri-high' if item.priority == 'high' else 'cc-pri-med' }}"></div>
+            <div style="flex:1; min-width:0;">
+                <div class="cc-queue-title" style="font-size:12px;">{{ item.title }}</div>
+                <div class="cc-queue-meta">{{ item.meta }}</div>
+            </div>
+            <a href="{{ item.url }}" class="cc-queue-action">{{ item.action_label }}</a>
         </div>
         {% endfor %}
     </div>
-    {% endif %}
-
-    {% if module_breakdown %}
-    <div class="pi-section">
-        <p class="pi-section-title">By BuildIQ Module <span class="dim">from released/tagged requests</span></p>
-        {% for m in module_breakdown %}
-        <div class="pi-bar-row">
-            <div class="pi-bar-label">{{ m.label }}</div>
-            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ m.pct }}%;"></div></div>
-            <div class="pi-bar-count">{{ m.count }}</div>
-        </div>
-        {% endfor %}
-    </div>
+    {% else %}
+        <p class="cc-empty" style="padding:0;">Nothing urgent right now.</p>
     {% endif %}
 </div>
 
-<div class="pi-two-col">
-    <div class="pi-section">
-        <p class="pi-section-title" style="display:flex; justify-content:space-between;">Recently Resolved</p>
+<div class="cc-tabs">
+    <input type="radio" name="cc-activity-tab" id="cc-tab-resolved" class="cc-tab-radio" checked>
+    <input type="radio" name="cc-activity-tab" id="cc-tab-activity" class="cc-tab-radio">
+    <div class="cc-tab-labels">
+        <label for="cc-tab-resolved" class="cc-tab-label">Recently Resolved{% if recently_released %} ({{ recently_released|length }}){% endif %}</label>
+        <label for="cc-tab-activity" class="cc-tab-label">Recent Activity</label>
+    </div>
+
+    <div class="cc-tab-panel cc-panel-resolved">
         {% if recently_released %}
         {% for r in recently_released %}
         <div class="pi-resolved-item">
@@ -342,10 +352,9 @@
         {% endif %}
     </div>
 
-    <div class="pi-section">
-        <p class="pi-section-title">Recent Activity</p>
+    <div class="cc-tab-panel cc-panel-activity">
         {% if recent_activity %}
-        <div class="card" style="padding:2px 18px;">
+        <div class="card" style="padding:2px 18px; margin-bottom:0;">
             {% for a in recent_activity %}
             {% set meta = status_meta(a['status'])|trim %}
             {% set badge_class = meta.split('|')[0] %}
@@ -374,6 +383,7 @@
 <div class="pi-section">
     <p class="pi-section-title">All Requests</p>
     <form method="GET" class="pi-table-toolbar">
+        <input type="text" id="pi-req-search" placeholder="Search requests..." oninput="ccFilterRequests()" style="max-width:220px;">
         <select name="status" onchange="this.form.submit()">
             <option value="">All statuses</option>
             {% for s in statuses %}
@@ -387,6 +397,7 @@
             {% endfor %}
         </select>
     </form>
+    <p id="pi-req-no-match" class="sub" style="display:none;">No requests match your search.</p>
 
     {% if requests %}
     <table>
@@ -398,7 +409,7 @@
             <th>Submitted</th>
         </tr>
         {% for r in requests %}
-        <tr onclick="window.location='{{ url_for('product_intelligence_detail', request_id=r['id']) }}'" style="cursor:pointer;">
+        <tr onclick="window.location='{{ url_for('product_intelligence_detail', request_id=r['id']) }}'" style="cursor:pointer;" data-search="{{ (r['original_request'] ~ ' ' ~ (r['department'] or '') ~ ' ' ~ (r['requester_name'] or r['requester_email'] or ''))|lower }}">
             <td style="max-width:400px;">
                 <div class="pi-req-title" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r['original_request'] }}</div>
                 <div class="pi-req-id">REQ-{{ '%03d'|format(r['id']) }}</div>
@@ -426,4 +437,17 @@
 
 </div>
 </div>
+<script>
+function ccFilterRequests() {
+    var q = document.getElementById('pi-req-search').value.toLowerCase().trim();
+    var rows = document.querySelectorAll('table tr[data-search]');
+    var visible = 0;
+    rows.forEach(function(row) {
+        var match = row.getAttribute('data-search').indexOf(q) !== -1;
+        row.style.display = match ? '' : 'none';
+        if (match) visible++;
+    });
+    document.getElementById('pi-req-no-match').style.display = (visible === 0 && rows.length > 0) ? 'block' : 'none';
+}
+</script>
 {% endblock %}
