@@ -647,6 +647,17 @@ def init_db():
             name TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
         );
+        -- Command Center roadmap: the modules being built, which lane
+        -- they're in (now/next/later), and how far along each is.
+        CREATE TABLE IF NOT EXISTS roadmap_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            lane TEXT NOT NULL DEFAULT 'later',
+            note TEXT,
+            progress_pct INTEGER DEFAULT 0,
+            sort_order INTEGER DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS feature_request_status_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             feature_request_id INTEGER NOT NULL,
@@ -827,6 +838,40 @@ def init_db():
         now = datetime.utcnow().isoformat()
         for dept_name in ["Estimating", "Procurement", "Operations"]:
             db.execute("INSERT OR IGNORE INTO departments (name, created_at) VALUES (?, ?)", (dept_name, now))
+
+    # Same belt-and-suspenders pattern as departments: create the table as
+    # its own standalone statement too, then seed once.
+    try:
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS roadmap_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                lane TEXT NOT NULL DEFAULT 'later',
+                note TEXT,
+                progress_pct INTEGER DEFAULT 0,
+                sort_order INTEGER DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+    except sqlite3.OperationalError:
+        pass
+    existing_roadmap_count = db.execute("SELECT COUNT(*) FROM roadmap_items").fetchone()[0]
+    if existing_roadmap_count == 0:
+        now = datetime.utcnow().isoformat()
+        roadmap_seed = [
+            ("SitePulse", "now", "Filters and delivery dates shipped. Polishing purchase request flow next.", 70, 1),
+            ("Project Hunt", "now", "Bid tracker filters and KPI theme done. Vendor follow-up automation left.", 50, 2),
+            ("Equipment Center", "now", "Matching Product Intelligence's KPI colors and filters.", 50, 3),
+            ("BidFlow", "next", "Takeoff + bid system. Waiting on final Excel sheets from estimating.", 15, 4),
+            ("Atlas", "next", "Voice assistant -- scoping starts after BidFlow's data model is settled.", 0, 5),
+            ("Engineering", "later", "Parked intentionally.", 0, 6),
+            ("Finance", "later", "Parked intentionally.", 0, 7),
+        ]
+        for name, lane, note, pct, order in roadmap_seed:
+            db.execute(
+                "INSERT INTO roadmap_items (name, lane, note, progress_pct, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, lane, note, pct, order, now)
+            )
 
     db.commit()
     db.close()
@@ -3069,6 +3114,54 @@ def product_intelligence():
          "spark": _section_spark("inventory"), "spark_color": "#5AC8E0", "url": url_for("inventory_home")},
     ]
 
+    # ---- Request Health: metrics specific to the requests pipeline,
+    # separate from System Health (which is about the platform overall). ----
+    released_map = {}
+    for row in db.execute(
+        "SELECT feature_request_id, MIN(changed_at) as released_at FROM feature_request_status_history "
+        "WHERE status = 'Released' GROUP BY feature_request_id"
+    ).fetchall():
+        released_map[row["feature_request_id"]] = row["released_at"]
+
+    created_map = {r["id"]: r["created_at"] for r in all_requests}
+
+    resolve_days = []
+    for req_id, released_at in released_map.items():
+        created_at = created_map.get(req_id)
+        if not created_at:
+            continue
+        try:
+            d1 = datetime.fromisoformat(created_at)
+            d2 = datetime.fromisoformat(released_at)
+            resolve_days.append(((d2 - d1).total_seconds() / 86400, released_at))
+        except ValueError:
+            continue
+    resolve_days.sort(key=lambda x: x[1], reverse=True)
+    recent_resolve_days = [d for d, _ in resolve_days[:20]]
+    avg_resolve_days = round(sum(recent_resolve_days) / len(recent_resolve_days), 1) if recent_resolve_days else None
+
+    backlog_counts = []
+    for d in day_labels:
+        d_end = d.isoformat() + "T23:59:59"
+        count = 0
+        for req_id, c_at in created_map.items():
+            if c_at > d_end:
+                continue
+            r_at = released_map.get(req_id)
+            if r_at and r_at <= d_end:
+                continue
+            count += 1
+        backlog_counts.append(count)
+    backlog_line, _ = _trend_paths(backlog_counts, width=260, height=56, pad_top=6, pad_bottom=6)
+    open_backlog_now = backlog_counts[-1] if backlog_counts else 0
+    backlog_trend_up = len(backlog_counts) >= 2 and backlog_counts[-1] > backlog_counts[0]
+
+    roadmap_rows = db.execute("SELECT * FROM roadmap_items ORDER BY sort_order ASC").fetchall()
+    roadmap_lanes = {"now": [], "next": [], "later": []}
+    for item in roadmap_rows:
+        roadmap_lanes.setdefault(item["lane"], []).append(item)
+    module_health = [r for r in roadmap_rows if r["lane"] in ("now", "next")][:4]
+
     return render_template(
         "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
         departments=departments, status_filter=status_filter, department_filter=department_filter,
@@ -3076,7 +3169,9 @@ def product_intelligence():
         recent_activity=recent_activity, recently_released=recently_released,
         attention_items=attention_items, fleet_uptime_pct=fleet_uptime_pct, resolution_rate_pct=resolution_rate_pct,
         submitted_line=submitted_line, resolved_line=resolved_line, resolved_fill=resolved_fill,
-        module_tiles=module_tiles
+        module_tiles=module_tiles, avg_resolve_days=avg_resolve_days, backlog_line=backlog_line,
+        open_backlog_now=open_backlog_now, backlog_trend_up=backlog_trend_up,
+        roadmap_lanes=roadmap_lanes, module_health=module_health
     )
 
 

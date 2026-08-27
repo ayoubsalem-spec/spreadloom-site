@@ -24,8 +24,69 @@
     <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
 </div>
 
+<div class="cc-shell">
+<div class="cc-jumpnav">
+    <div class="cc-jumpnav-label">Jump to</div>
+    <a href="#cc-kpis" class="jn-brass"><span class="jn-dot"></span>All Requests</a>
+    <a href="#cc-reqhealth" class="jn-teal"><span class="jn-dot"></span>Request Health</a>
+    <a href="#cc-overview" class="jn-teal"><span class="jn-dot"></span>System Overview</a>
+    <a href="#cc-modhealth" class="jn-teal"><span class="jn-dot"></span>Module Health</a>
+    <a href="#cc-roadmap" class="jn-brass"><span class="jn-dot"></span>Roadmap</a>
+    <a href="#cc-attention"><span class="jn-dot"></span>Needs Attention</a>
+    <a href="#cc-trend" class="jn-teal"><span class="jn-dot"></span>Requests Trend</a>
+</div>
+<div class="cc-main">
+
+<p class="pi-section-title" id="cc-kpis" style="margin-bottom:12px; scroll-margin-top:16px;">All Requests</p>
+<div class="kpi-grid pi-kpi-grid" style="margin-bottom:28px;">
+    <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
+    <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>
+    <a href="{{ url_for('product_intelligence', status='Building') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Building' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></a>
+    <a href="{{ url_for('product_intelligence', status='Testing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Testing' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></a>
+    <a href="{{ url_for('product_intelligence', status='Released') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Released' }}"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></a>
+    <a href="{{ url_for('product_intelligence', status='On Hold,Not Planned') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'On Hold,Not Planned' }}"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></a>
+</div>
+{% if status_filter %}
+<p class="sub" style="margin-top:-14px; margin-bottom:26px; font-size:12px;">Filtered by KPI &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
+{% endif %}
+
+<!-- REQUEST HEALTH: metrics about the requests pipeline specifically -->
+<p class="pi-section-title" id="cc-reqhealth" style="margin-bottom:12px; scroll-margin-top:16px;">Request Health</p>
+<div class="cc-req-health-row" style="margin-bottom:28px;">
+    <div class="card" style="margin-bottom:0;">
+        <h3 style="margin-bottom:4px;">Avg Time to Resolve</h3>
+        <p class="sub" style="margin-bottom:12px; font-size:11.5px;">Submitted &rarr; Released, last 20 resolved.</p>
+        {% if avg_resolve_days is not none %}
+        <div class="cc-stat-value" style="color:var(--teal);">{{ avg_resolve_days }}<span style="font-size:14px; color:var(--text-dim);"> days</span></div>
+        {% else %}
+        <div class="cc-stat-value" style="color:var(--text-faint); font-size:18px;">Not enough data yet</div>
+        {% endif %}
+    </div>
+    <div class="card" style="margin-bottom:0;">
+        <h3 style="margin-bottom:4px;">Open Backlog</h3>
+        <p class="sub" style="margin-bottom:10px; font-size:11.5px;">Not yet Released, tracked daily, 14 days.</p>
+        <svg width="100%" height="46" viewBox="0 0 260 56" style="overflow:visible;">
+            <defs><filter id="ccBk" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <path d="{{ backlog_line }}" fill="none" stroke="{{ '#F87171' if backlog_trend_up else '#5EEAD4' }}" stroke-width="2.2" filter="url(#ccBk)"/>
+        </svg>
+        <div class="cc-stat-value" style="color:{{ 'var(--red)' if backlog_trend_up else 'var(--teal)' }}; font-size:20px; margin-top:6px;">{{ open_backlog_now }} open</div>
+        <div class="cc-stat-delta" style="color:{{ 'var(--red)' if backlog_trend_up else 'var(--teal)' }};">{{ '&#8593; trending up over 14 days'|safe if backlog_trend_up else '&#8595; trending down over 14 days'|safe }}</div>
+    </div>
+    <div class="card" style="margin-bottom:0;">
+        <h3 style="margin-bottom:4px;">Resolution Rate</h3>
+        <p class="sub" style="margin-bottom:12px; font-size:11.5px;">Share of all-time requests shipped.</p>
+        <div style="display:flex; align-items:center; gap:14px;">
+            <svg width="60" height="60" viewBox="0 0 66 66"><defs><filter id="ccRr" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
+            <circle cx="33" cy="33" r="26" fill="none" stroke="#5EEAD4" stroke-width="6" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="{{ (163.4 * (1 - resolution_rate_pct/100))|round(1) }}" transform="rotate(-90 33 33)" filter="url(#ccRr)"/>
+            <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="13" font-family="Space Grotesk" font-weight="700">{{ resolution_rate_pct }}%</text></svg>
+            <div class="cc-stat-delta" style="color:var(--teal); margin-top:0;">{{ kpi.released }} of {{ kpi.total }} shipped</div>
+        </div>
+    </div>
+</div>
+
 <!-- NEEDS YOUR ATTENTION -->
-<p class="pi-section-title" style="margin-bottom:12px;">Needs Your Attention</p>
+<p class="pi-section-title" id="cc-attention" style="margin-bottom:12px; scroll-margin-top:16px;">Needs Your Attention</p>
 <div class="card" style="margin-bottom:28px;">
     {% if attention_items %}
         {% for item in attention_items %}
@@ -44,63 +105,114 @@
 </div>
 
 <!-- SYSTEM OVERVIEW: network diagram + gauges -->
-<p class="pi-section-title" style="margin-bottom:12px;">System Overview</p>
-<div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:28px;">
+<p class="pi-section-title" id="cc-overview" style="margin-bottom:12px; scroll-margin-top:16px;">System Overview</p>
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:28px;">
     <div class="card" style="margin-bottom:0;">
         <h3 style="margin-bottom:10px;">Module Network</h3>
-        <svg width="100%" height="210" viewBox="0 0 620 210">
+        <svg width="100%" height="230" viewBox="0 0 640 230">
             <defs><filter id="ccGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-            <line x1="310" y1="105" x2="120" y2="40"  stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
-            <line x1="310" y1="105" x2="120" y2="105" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
-            <line x1="310" y1="105" x2="120" y2="170" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
-            <line x1="310" y1="105" x2="500" y2="55"  stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
-            <line x1="310" y1="105" x2="500" y2="155" stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
-            <a href="{{ url_for('product_intelligence') }}"><circle cx="310" cy="105" r="27" fill="var(--surface)" stroke="#C9A24B" stroke-width="2" filter="url(#ccGlow)"/>
-            <text x="310" y="102" text-anchor="middle" fill="#C9A24B" font-size="8" font-family="IBM Plex Mono" font-weight="700">COMMAND</text>
-            <text x="310" y="112" text-anchor="middle" fill="#C9A24B" font-size="8" font-family="IBM Plex Mono" font-weight="700">CENTER</text></a>
-            <a href="{{ url_for('tracker_dashboard') }}"><circle cx="120" cy="40" r="20" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2" filter="url(#ccGlow)"/>
-            <text x="120" y="44" text-anchor="middle" fill="#5EEAD4" font-size="7.5" font-family="IBM Plex Mono" font-weight="700">HUNT</text></a>
-            <a href="{{ url_for('sitepulse_dashboard') }}"><circle cx="120" cy="105" r="20" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2" filter="url(#ccGlow)"/>
-            <text x="120" y="109" text-anchor="middle" fill="#5EEAD4" font-size="6.5" font-family="IBM Plex Mono" font-weight="700">EQUIP</text></a>
-            <a href="{{ url_for('inventory_home') }}"><circle cx="120" cy="170" r="20" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2" filter="url(#ccGlow)"/>
-            <text x="120" y="174" text-anchor="middle" fill="#5EEAD4" font-size="6.5" font-family="IBM Plex Mono" font-weight="700">SITEPULSE</text></a>
-            <circle cx="500" cy="55" r="18" fill="var(--surface)" stroke="#C9A24B" stroke-width="1.5" filter="url(#ccGlow)"/>
-            <text x="500" y="59" text-anchor="middle" fill="#C9A24B" font-size="7" font-family="IBM Plex Mono" font-weight="700">ATLAS</text>
-            <circle cx="500" cy="155" r="18" fill="var(--surface)" stroke="#C9A24B" stroke-width="1.5" filter="url(#ccGlow)"/>
-            <text x="500" y="159" text-anchor="middle" fill="#C9A24B" font-size="6" font-family="IBM Plex Mono" font-weight="700">QUOTEPRO</text>
+            <line x1="320" y1="115" x2="140" y2="45"  stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
+            <line x1="320" y1="115" x2="140" y2="115" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
+            <line x1="320" y1="115" x2="140" y2="185" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
+            <line x1="320" y1="115" x2="500" y2="55"  stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
+            <line x1="320" y1="115" x2="500" y2="175" stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
+            <a href="{{ url_for('product_intelligence') }}"><circle cx="320" cy="115" r="30" fill="var(--surface)" stroke="#C9A24B" stroke-width="2.5" filter="url(#ccGlow)"/>
+            <text x="320" y="120" text-anchor="middle" fill="#C9A24B" font-size="9.5" font-family="IBM Plex Mono" font-weight="700">CC</text></a>
+            <text x="320" y="160" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="700">Command Center</text>
+
+            <a href="{{ url_for('tracker_dashboard') }}"><circle cx="140" cy="45" r="22" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccGlow)"/>
+            <text x="140" y="50" text-anchor="middle" fill="#5EEAD4" font-size="10" font-family="Space Grotesk" font-weight="700">PH</text></a>
+            <text x="140" y="80" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">Project Hunt</text>
+
+            <a href="{{ url_for('sitepulse_dashboard') }}"><circle cx="140" cy="115" r="22" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccGlow)"/>
+            <text x="140" y="120" text-anchor="middle" fill="#5EEAD4" font-size="10" font-family="Space Grotesk" font-weight="700">EC</text></a>
+            <text x="140" y="150" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">Equipment Center</text>
+
+            <a href="{{ url_for('inventory_home') }}"><circle cx="140" cy="185" r="22" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccGlow)"/>
+            <text x="140" y="190" text-anchor="middle" fill="#5EEAD4" font-size="10" font-family="Space Grotesk" font-weight="700">SP</text></a>
+            <text x="140" y="220" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">SitePulse</text>
+
+            <circle cx="500" cy="55" r="19" fill="var(--surface)" stroke="#C9A24B" stroke-width="2" filter="url(#ccGlow)"/>
+            <text x="500" y="59" text-anchor="middle" fill="#C9A24B" font-size="9" font-family="Space Grotesk" font-weight="700">BF</text>
+            <text x="500" y="85" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">BidFlow</text>
+
+            <circle cx="500" cy="175" r="19" fill="var(--surface)" stroke="#C9A24B" stroke-width="2" filter="url(#ccGlow)"/>
+            <text x="500" y="179" text-anchor="middle" fill="#C9A24B" font-size="9" font-family="Space Grotesk" font-weight="700">AT</text>
+            <text x="500" y="205" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">Atlas</text>
         </svg>
-    </div>
-    <div class="cc-gauge-row">
-        <div class="card cc-gauge-card" style="margin-bottom:0;">
-            <svg width="66" height="66" viewBox="0 0 66 66">
-                <defs><filter id="ccG1" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-                <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
-                {% if fleet_uptime_pct is not none %}
-                <circle cx="33" cy="33" r="26" fill="none" stroke="#5EEAD4" stroke-width="6" stroke-linecap="round"
-                        stroke-dasharray="163.4" stroke-dashoffset="{{ (163.4 * (1 - fleet_uptime_pct/100))|round(1) }}"
-                        transform="rotate(-90 33 33)" filter="url(#ccG1)"/>
-                <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ fleet_uptime_pct }}%</text>
-                {% else %}
-                <text x="33" y="38" text-anchor="middle" fill="var(--text-faint)" font-size="11" font-family="Space Grotesk" font-weight="700">&mdash;</text>
-                {% endif %}
-            </svg>
-            <div class="cc-gauge-gtext">Fleet uptime</div>
+        <div style="display:flex; gap:16px; margin-top:6px;">
+            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Live now</div>
+            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Next up</div>
         </div>
-        <div class="card cc-gauge-card" style="margin-bottom:0;">
-            <svg width="66" height="66" viewBox="0 0 66 66">
-                <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
-                <circle cx="33" cy="33" r="26" fill="none" stroke="#C9A24B" stroke-width="6" stroke-linecap="round"
-                        stroke-dasharray="163.4" stroke-dashoffset="{{ (163.4 * (1 - resolution_rate_pct/100))|round(1) }}"
-                        transform="rotate(-90 33 33)" filter="url(#ccG1)"/>
-                <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ resolution_rate_pct }}%</text>
-            </svg>
-            <div class="cc-gauge-gtext">Resolution rate</div>
+    </div>
+    <div class="card" style="margin-bottom:0; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+        <h3 style="align-self:flex-start; margin-bottom:6px;">System Health</h3>
+        <svg width="180" height="180" viewBox="0 0 180 180">
+            <defs><filter id="ccRing" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <circle cx="90" cy="90" r="78" fill="none" stroke="var(--line)" stroke-width="10"/>
+            {% if fleet_uptime_pct is not none %}
+            <circle cx="90" cy="90" r="78" fill="none" stroke="#5EEAD4" stroke-width="10" stroke-linecap="round" stroke-dasharray="490" stroke-dashoffset="{{ (490 * (1 - fleet_uptime_pct/100))|round(1) }}" transform="rotate(-90 90 90)" filter="url(#ccRing)"/>
+            {% endif %}
+            <circle cx="90" cy="90" r="60" fill="none" stroke="var(--line)" stroke-width="8"/>
+            <circle cx="90" cy="90" r="60" fill="none" stroke="#C9A24B" stroke-width="8" stroke-linecap="round" stroke-dasharray="377" stroke-dashoffset="{{ (377 * (1 - resolution_rate_pct/100))|round(1) }}" transform="rotate(-90 90 90)" filter="url(#ccRing)"/>
+            {% set sys_health_pct = ((fleet_uptime_pct or 0) + resolution_rate_pct) // 2 if fleet_uptime_pct is not none else resolution_rate_pct %}
+            <text x="90" y="84" text-anchor="middle" fill="var(--text)" font-size="24" font-family="Space Grotesk" font-weight="700">{{ sys_health_pct }}%</text>
+            <text x="90" y="102" text-anchor="middle" fill="var(--text-dim)" font-size="9" font-family="IBM Plex Mono">SYSTEM HEALTH</text>
+        </svg>
+        <div style="display:flex; gap:16px; margin-top:8px;">
+            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Fleet uptime {% if fleet_uptime_pct is not none %}({{ fleet_uptime_pct }}%){% endif %}</div>
+            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Resolution ({{ resolution_rate_pct }}%)</div>
         </div>
     </div>
 </div>
 
+<!-- MODULE HEALTH: roadmap completion per module -->
+{% if module_health %}
+<p class="pi-section-title" id="cc-modhealth" style="margin-bottom:12px; scroll-margin-top:16px;">Module Health Scores <span class="dim">roadmap task completion</span></p>
+<div class="card" style="margin-bottom:28px;">
+    <div class="cc-mh-row">
+        {% for m in module_health %}
+        {% set mh_color = '#5EEAD4' if m['lane'] == 'now' else '#C9A24B' %}
+        {% set mh_off = (163.4 * (1 - m['progress_pct']/100))|round(1) %}
+        <div style="text-align:center; {{ 'opacity:0.5;' if m['lane'] == 'later' }}">
+            <svg width="90" height="90" viewBox="0 0 66 66"><defs><filter id="ccMh{{ loop.index }}" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
+            <circle cx="33" cy="33" r="26" fill="none" stroke="{{ mh_color }}" stroke-width="6" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="{{ mh_off }}" transform="rotate(-90 33 33)" filter="url(#ccMh{{ loop.index }})"/>
+            <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ m['progress_pct'] }}%</text></svg>
+            <div style="font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--text-dim); text-transform:uppercase; margin-top:4px;">{{ m['name'] }}</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+<!-- ROADMAP -->
+{% if roadmap_lanes.now or roadmap_lanes.next or roadmap_lanes.later %}
+<p class="pi-section-title" id="cc-roadmap" style="margin-bottom:12px; scroll-margin-top:16px;">Roadmap</p>
+<div style="margin-bottom:28px;">
+    {% for lane_key, lane_title in [('now','Now \u00b7 Polishing'), ('next','Next up'), ('later','Later \u00b7 Not started')] %}
+    {% if roadmap_lanes[lane_key] %}
+    <div class="cc-roadmap-lane {{ lane_key }}">
+        <div class="cc-roadmap-head {{ lane_key }}">{{ lane_title }}</div>
+        <div class="cc-roadmap-row">
+            {% for item in roadmap_lanes[lane_key] %}
+            <div class="cc-roadmap-card">
+                <div class="cc-roadmap-title">{{ item['name'] }}</div>
+                {% if item['note'] %}<div class="cc-roadmap-note">{{ item['note'] }}</div>{% endif %}
+                {% if item['progress_pct'] %}
+                <div class="cc-roadmap-track"><div class="cc-roadmap-fill" style="width:{{ item['progress_pct'] }}%; background:{{ 'var(--teal)' if lane_key == 'now' else 'var(--brass)' }};"></div></div>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    {% endfor %}
+</div>
+{% endif %}
+
 <!-- REQUESTS TREND -->
-<p class="pi-section-title" style="margin-bottom:12px;">Requests Trend <span class="dim">14 days</span></p>
+<p class="pi-section-title" id="cc-trend" style="margin-bottom:12px; scroll-margin-top:16px;">Requests Trend <span class="dim">14 days</span></p>
 <div class="card" style="margin-bottom:28px;">
     <svg width="100%" height="140" viewBox="0 0 900 140" style="overflow:visible;">
         <defs>
@@ -135,18 +247,6 @@
     </a>
     {% endfor %}
 </div>
-
-<div class="kpi-grid pi-kpi-grid">
-    <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
-    <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>
-    <a href="{{ url_for('product_intelligence', status='Building') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Building' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></a>
-    <a href="{{ url_for('product_intelligence', status='Testing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Testing' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></a>
-    <a href="{{ url_for('product_intelligence', status='Released') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Released' }}"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></a>
-    <a href="{{ url_for('product_intelligence', status='On Hold,Not Planned') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'On Hold,Not Planned' }}"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></a>
-</div>
-{% if status_filter %}
-<p class="sub" style="margin-top:-14px; margin-bottom:26px; font-size:12px;">Filtered by KPI &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
-{% endif %}
 
 {% if pipeline %}
 <div class="pi-section">
@@ -298,5 +398,8 @@
     {% else %}
     <p class="sub">No requests match this filter.</p>
     {% endif %}
+</div>
+
+</div>
 </div>
 {% endblock %}
