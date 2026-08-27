@@ -24,6 +24,118 @@
     <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
 </div>
 
+<!-- NEEDS YOUR ATTENTION -->
+<p class="pi-section-title" style="margin-bottom:12px;">Needs Your Attention</p>
+<div class="card" style="margin-bottom:28px;">
+    {% if attention_items %}
+        {% for item in attention_items %}
+        <div class="cc-queue-item">
+            <div class="cc-queue-pri {{ 'cc-pri-high' if item.priority == 'high' else 'cc-pri-med' }}"></div>
+            <div style="flex:1;">
+                <div class="cc-queue-title">{{ item.title }}</div>
+                <div class="cc-queue-meta">{{ item.meta }}</div>
+            </div>
+            <a href="{{ item.url }}" class="cc-queue-action">{{ item.action_label }}</a>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p class="cc-empty">Nothing urgent right now.</p>
+    {% endif %}
+</div>
+
+<!-- SYSTEM OVERVIEW: network diagram + gauges -->
+<p class="pi-section-title" style="margin-bottom:12px;">System Overview</p>
+<div style="display:grid; grid-template-columns:1.4fr 1fr; gap:16px; margin-bottom:28px;">
+    <div class="card" style="margin-bottom:0;">
+        <h3 style="margin-bottom:10px;">Module Network</h3>
+        <svg width="100%" height="210" viewBox="0 0 620 210">
+            <defs><filter id="ccGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+            <line x1="310" y1="105" x2="120" y2="40"  stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
+            <line x1="310" y1="105" x2="120" y2="105" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
+            <line x1="310" y1="105" x2="120" y2="170" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
+            <line x1="310" y1="105" x2="500" y2="55"  stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
+            <line x1="310" y1="105" x2="500" y2="155" stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
+            <a href="{{ url_for('product_intelligence') }}"><circle cx="310" cy="105" r="27" fill="var(--surface)" stroke="#C9A24B" stroke-width="2" filter="url(#ccGlow)"/>
+            <text x="310" y="102" text-anchor="middle" fill="#C9A24B" font-size="8" font-family="IBM Plex Mono" font-weight="700">COMMAND</text>
+            <text x="310" y="112" text-anchor="middle" fill="#C9A24B" font-size="8" font-family="IBM Plex Mono" font-weight="700">CENTER</text></a>
+            <a href="{{ url_for('tracker_dashboard') }}"><circle cx="120" cy="40" r="20" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2" filter="url(#ccGlow)"/>
+            <text x="120" y="44" text-anchor="middle" fill="#5EEAD4" font-size="7.5" font-family="IBM Plex Mono" font-weight="700">HUNT</text></a>
+            <a href="{{ url_for('sitepulse_dashboard') }}"><circle cx="120" cy="105" r="20" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2" filter="url(#ccGlow)"/>
+            <text x="120" y="109" text-anchor="middle" fill="#5EEAD4" font-size="6.5" font-family="IBM Plex Mono" font-weight="700">EQUIP</text></a>
+            <a href="{{ url_for('inventory_home') }}"><circle cx="120" cy="170" r="20" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2" filter="url(#ccGlow)"/>
+            <text x="120" y="174" text-anchor="middle" fill="#5EEAD4" font-size="6.5" font-family="IBM Plex Mono" font-weight="700">SITEPULSE</text></a>
+            <circle cx="500" cy="55" r="18" fill="var(--surface)" stroke="#C9A24B" stroke-width="1.5" filter="url(#ccGlow)"/>
+            <text x="500" y="59" text-anchor="middle" fill="#C9A24B" font-size="7" font-family="IBM Plex Mono" font-weight="700">ATLAS</text>
+            <circle cx="500" cy="155" r="18" fill="var(--surface)" stroke="#C9A24B" stroke-width="1.5" filter="url(#ccGlow)"/>
+            <text x="500" y="159" text-anchor="middle" fill="#C9A24B" font-size="6" font-family="IBM Plex Mono" font-weight="700">QUOTEPRO</text>
+        </svg>
+    </div>
+    <div class="cc-gauge-row">
+        <div class="card cc-gauge-card" style="margin-bottom:0;">
+            <svg width="66" height="66" viewBox="0 0 66 66">
+                <defs><filter id="ccG1" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+                <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
+                {% if fleet_uptime_pct is not none %}
+                <circle cx="33" cy="33" r="26" fill="none" stroke="#5EEAD4" stroke-width="6" stroke-linecap="round"
+                        stroke-dasharray="163.4" stroke-dashoffset="{{ (163.4 * (1 - fleet_uptime_pct/100))|round(1) }}"
+                        transform="rotate(-90 33 33)" filter="url(#ccG1)"/>
+                <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ fleet_uptime_pct }}%</text>
+                {% else %}
+                <text x="33" y="38" text-anchor="middle" fill="var(--text-faint)" font-size="11" font-family="Space Grotesk" font-weight="700">&mdash;</text>
+                {% endif %}
+            </svg>
+            <div class="cc-gauge-gtext">Fleet uptime</div>
+        </div>
+        <div class="card cc-gauge-card" style="margin-bottom:0;">
+            <svg width="66" height="66" viewBox="0 0 66 66">
+                <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
+                <circle cx="33" cy="33" r="26" fill="none" stroke="#C9A24B" stroke-width="6" stroke-linecap="round"
+                        stroke-dasharray="163.4" stroke-dashoffset="{{ (163.4 * (1 - resolution_rate_pct/100))|round(1) }}"
+                        transform="rotate(-90 33 33)" filter="url(#ccG1)"/>
+                <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ resolution_rate_pct }}%</text>
+            </svg>
+            <div class="cc-gauge-gtext">Resolution rate</div>
+        </div>
+    </div>
+</div>
+
+<!-- REQUESTS TREND -->
+<p class="pi-section-title" style="margin-bottom:12px;">Requests Trend <span class="dim">14 days</span></p>
+<div class="card" style="margin-bottom:28px;">
+    <svg width="100%" height="140" viewBox="0 0 900 140" style="overflow:visible;">
+        <defs>
+            <filter id="ccFg" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+            <linearGradient id="ccFillTeal" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5EEAD4" stop-opacity="0.22"/><stop offset="100%" stop-color="#5EEAD4" stop-opacity="0"/></linearGradient>
+        </defs>
+        <line x1="0" y1="15" x2="900" y2="15" stroke="var(--line)"/>
+        <line x1="0" y1="65" x2="900" y2="65" stroke="var(--line)"/>
+        <line x1="0" y1="110" x2="900" y2="110" stroke="var(--line)"/>
+        <path d="{{ submitted_line }}" fill="none" stroke="#C9A24B" stroke-width="2.5" filter="url(#ccFg)"/>
+        <path d="{{ resolved_fill }}" fill="url(#ccFillTeal)" stroke="none"/>
+        <path d="{{ resolved_line }}" fill="none" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccFg)"/>
+    </svg>
+    <div style="display:flex; gap:18px; margin-top:8px;">
+        <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim);"><span style="width:9px; height:9px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Submitted</div>
+        <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim);"><span style="width:9px; height:9px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Resolved</div>
+    </div>
+</div>
+
+<!-- MODULE STATUS TILES -->
+<p class="pi-section-title" style="margin-bottom:12px;">Module Status <span class="dim">7-day activity</span></p>
+<div class="cc-tile-row" style="margin-bottom:28px;">
+    {% for t in module_tiles %}
+    <a href="{{ t.url }}" class="cc-tile">
+        <div class="cc-tile-top">
+            <span class="cc-tile-name">{{ t.name }}</span>
+            <span class="cc-status-pill {{ 'cc-status-healthy' if t.healthy else 'cc-status-attention' }}">{{ 'Healthy' if t.healthy else 'Attention' }}</span>
+        </div>
+        <div class="cc-tile-value" style="color:{{ t.color }};">{{ t.value }}</div>
+        <div class="cc-tile-label">{{ t.label }}</div>
+        <svg width="100%" height="30" viewBox="0 0 220 30"><polyline points="{{ t.spark }}" fill="none" stroke="{{ t.spark_color }}" stroke-width="2"/></svg>
+    </a>
+    {% endfor %}
+</div>
+
 <div class="kpi-grid pi-kpi-grid">
     <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
     <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>

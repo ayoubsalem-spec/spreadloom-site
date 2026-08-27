@@ -2832,6 +2832,42 @@ def _render_my_requests_for(db, email):
     return requests_with_history
 
 
+def _spark_points(counts, width=220, height=30, pad=3):
+    """Turn a list of daily counts into an SVG polyline 'points' string,
+    scaled to fit the given viewbox. Used for the small module-tile
+    sparklines on the Command Center."""
+    if not counts:
+        return ""
+    mx = max(counts) or 1
+    n = len(counts)
+    step = width / (n - 1) if n > 1 else 0
+    pts = []
+    for i, c in enumerate(counts):
+        x = round(i * step, 1)
+        y = round(height - pad - (c / mx) * (height - 2 * pad), 1) if mx else height / 2
+        pts.append(f"{x},{y}")
+    return " ".join(pts)
+
+
+def _trend_paths(counts, width=900, height=140, pad_top=8, pad_bottom=8):
+    """Turn a list of daily counts into an SVG line path plus a matching
+    filled-area path (closed down to the baseline), scaled to the given
+    viewbox. Used for the big Requests Trend chart on Command Center."""
+    if not counts:
+        return "", ""
+    mx = max(counts) if max(counts) > 0 else 1
+    n = len(counts)
+    step = width / (n - 1) if n > 1 else 0
+    pts = []
+    for i, c in enumerate(counts):
+        x = round(i * step, 1)
+        y = round(height - pad_bottom - (c / mx) * (height - pad_top - pad_bottom), 1)
+        pts.append((x, y))
+    line = " ".join(f"L{x},{y}" if i > 0 else f"M{x},{y}" for i, (x, y) in enumerate(pts))
+    fill = line + f" L{pts[-1][0]},{height} L{pts[0][0]},{height} Z"
+    return line, fill
+
+
 @app.route("/admin/product-intelligence")
 @login_required
 def product_intelligence():
@@ -2922,11 +2958,125 @@ def product_intelligence():
            ORDER BY h.changed_at DESC LIMIT 5"""
     ).fetchall()
 
+    # ---- Command Center: control-room layer ----
+    # Everything below is a real query against existing tables -- nothing
+    # here is fabricated. Priority queue, system gauges, the requests
+    # trend chart, and per-module activity sparklines.
+    today = date.today()
+
+    attention_items = []
+    upcoming_bids = db.execute(
+        "SELECT id, name, bid_due_date FROM tracker_projects "
+        "WHERE status = 'In Progress' AND bid_due_date IS NOT NULL AND bid_due_date != '' "
+        "ORDER BY bid_due_date ASC"
+    ).fetchall()
+    for p in upcoming_bids:
+        try:
+            due = datetime.strptime(p["bid_due_date"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        days_left = (due - today).days
+        if 0 <= days_left <= 3:
+            attention_items.append({
+                "priority": "high", "title": f"Bid due in {days_left} day{'s' if days_left != 1 else ''} \u2014 {p['name']}",
+                "meta": "PROJECT HUNT", "action_label": "Open",
+                "url": url_for("tracker_view_project", project_id=p["id"])
+            })
+
+    overdue_rentals = db.execute(
+        "SELECT id, equipment_description, due_date FROM sitepulse_rentals "
+        "WHERE returned_date IS NULL AND due_date IS NOT NULL AND due_date != '' AND due_date < ?",
+        (today.isoformat(),)
+    ).fetchall()
+    for r in overdue_rentals:
+        try:
+            due = datetime.strptime(r["due_date"], "%Y-%m-%d").date()
+            days_late = (today - due).days
+        except ValueError:
+            days_late = None
+        attention_items.append({
+            "priority": "high", "title": f"Rental overdue \u2014 {r['equipment_description']}",
+            "meta": f"EQUIPMENT CENTER \u00b7 {days_late} day{'s' if days_late != 1 else ''} late" if days_late is not None else "EQUIPMENT CENTER",
+            "action_label": "Open", "url": url_for("sitepulse_rentals_list")
+        })
+
+    pending_requests_count = status_counts.get("Submitted", 0) + status_counts.get("Reviewing", 0)
+    if pending_requests_count > 0:
+        attention_items.append({
+            "priority": "med", "title": f"{pending_requests_count} new request{'s' if pending_requests_count != 1 else ''} awaiting review",
+            "meta": "REQUEST CENTER", "action_label": "Review",
+            "url": url_for("product_intelligence", status="Submitted,Reviewing")
+        })
+
+    tomorrow = (today + timedelta(days=1)).isoformat()
+    unordered_pours = db.execute(
+        "SELECT id, project FROM inventory_concrete_requests WHERE pour_date = ? AND status = 'Submitted'",
+        (tomorrow,)
+    ).fetchall()
+    for c in unordered_pours:
+        attention_items.append({
+            "priority": "med", "title": "Concrete pour tomorrow \u2014 no order placed",
+            "meta": f"SITEPULSE \u00b7 {c['project']}", "action_label": "Open",
+            "url": url_for("inventory_concrete_list")
+        })
+
+    priority_rank = {"high": 0, "med": 1, "low": 2}
+    attention_items.sort(key=lambda x: priority_rank.get(x["priority"], 3))
+    attention_items = attention_items[:6]
+
+    total_assets = db.execute("SELECT COUNT(*) FROM sitepulse_assets").fetchone()[0]
+    available_assets = db.execute("SELECT COUNT(*) FROM sitepulse_assets WHERE status = 'Available'").fetchone()[0]
+    fleet_uptime_pct = round(100 * available_assets / total_assets) if total_assets else None
+    resolution_rate_pct = round(100 * kpi["released"] / total_requests) if total_requests else 0
+
+    day_labels = [(today - timedelta(days=i)) for i in range(13, -1, -1)]
+    submitted_counts, resolved_counts = [], []
+    for d in day_labels:
+        d_str = d.isoformat()
+        submitted_counts.append(db.execute(
+            "SELECT COUNT(*) FROM feature_requests WHERE date(created_at) = ?", (d_str,)
+        ).fetchone()[0])
+        resolved_counts.append(db.execute(
+            "SELECT COUNT(*) FROM feature_request_status_history WHERE status = 'Released' AND date(changed_at) = ?", (d_str,)
+        ).fetchone()[0])
+    submitted_line, _ = _trend_paths(submitted_counts)
+    resolved_line, resolved_fill = _trend_paths(resolved_counts)
+
+    week_days = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
+
+    def _section_spark(section):
+        counts = []
+        for d in week_days:
+            counts.append(db.execute(
+                "SELECT COUNT(*) FROM activity_log WHERE section = ? AND date(created_at) = ?",
+                (section, d.isoformat())
+            ).fetchone()[0])
+        return _spark_points(counts)
+
+    active_bids_count = db.execute("SELECT COUNT(*) FROM tracker_projects WHERE status = 'In Progress'").fetchone()[0]
+    in_maintenance_count = db.execute("SELECT COUNT(*) FROM sitepulse_assets WHERE status = 'In Maintenance'").fetchone()[0]
+    open_po_count = db.execute("SELECT COUNT(*) FROM inventory_purchase_requests WHERE status != 'Completed'").fetchone()[0]
+
+    module_tiles = [
+        {"name": "Project Hunt", "value": active_bids_count, "label": "Active bids", "color": "var(--teal)",
+         "healthy": not any(a["meta"] == "PROJECT HUNT" for a in attention_items),
+         "spark": _section_spark("tracker"), "spark_color": "#5EEAD4", "url": url_for("tracker_dashboard")},
+        {"name": "Equipment Center", "value": in_maintenance_count, "label": "In maintenance", "color": "var(--brass)",
+         "healthy": len(overdue_rentals) == 0,
+         "spark": _section_spark("sitepulse"), "spark_color": "#C9A24B", "url": url_for("sitepulse_dashboard")},
+        {"name": "SitePulse", "value": open_po_count, "label": "Open POs", "color": "var(--cyan)",
+         "healthy": True,
+         "spark": _section_spark("inventory"), "spark_color": "#5AC8E0", "url": url_for("inventory_home")},
+    ]
+
     return render_template(
         "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
         departments=departments, status_filter=status_filter, department_filter=department_filter,
         kpi=kpi, pipeline=pipeline, dept_breakdown=dept_breakdown, module_breakdown=module_breakdown,
-        recent_activity=recent_activity, recently_released=recently_released
+        recent_activity=recent_activity, recently_released=recently_released,
+        attention_items=attention_items, fleet_uptime_pct=fleet_uptime_pct, resolution_rate_pct=resolution_rate_pct,
+        submitted_line=submitted_line, resolved_line=resolved_line, resolved_fill=resolved_fill,
+        module_tiles=module_tiles
     )
 
 

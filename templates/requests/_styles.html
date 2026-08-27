@@ -224,4 +224,32 @@
     .pi-section-title { letter-spacing:0.2px; }
 
     .pi-preview-btn { position:relative; }
+
+    /* --- Command Center: control-room layer --- */
+    .cc-queue-item { display:flex; align-items:flex-start; gap:10px; padding:11px 0; border-bottom:1px solid var(--line); }
+    .cc-queue-item:last-child { border-bottom:none; }
+    .cc-queue-pri { width:4px; align-self:stretch; border-radius:3px; flex-shrink:0; }
+    .cc-pri-high { background:var(--red); }
+    .cc-pri-med { background:var(--brass); }
+    .cc-queue-title { font-size:13px; color:var(--text); }
+    .cc-queue-meta { font-size:10.5px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; margin-top:3px; }
+    .cc-queue-action { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--brass); border:1px solid var(--brass-dim); border-radius:3px; padding:4px 9px; white-space:nowrap; align-self:center; }
+    .cc-queue-action:hover { border-color:var(--brass); }
+
+    .cc-gauge-row { display:flex; flex-direction:column; gap:14px; }
+    .cc-gauge-card { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; }
+    .cc-gauge-gtext { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--text-dim); text-transform:uppercase; }
+
+    .cc-tile-row { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+    .cc-tile { background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:16px 18px; text-decoration:none; color:var(--text); display:block; transition:border-color 0.15s; }
+    .cc-tile:hover { border-color:var(--brass-dim); }
+    .cc-tile-top { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; }
+    .cc-tile-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13.5px; }
+    .cc-status-pill { font-family:'IBM Plex Mono',monospace; font-size:8px; font-weight:700; text-transform:uppercase; padding:2px 6px; border-radius:2px; border:1.5px solid; }
+    .cc-status-healthy { color:var(--teal); border-color:var(--teal); }
+    .cc-status-attention { color:var(--brass); border-color:var(--brass); }
+    .cc-tile-value { font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; margin:6px 0 1px; }
+    .cc-tile-label { font-family:'IBM Plex Mono',monospace; font-size:8.5px; color:var(--text-dim); text-transform:uppercase; margin-bottom:8px; }
+
+    .cc-empty { color:var(--text-dim); font-size:13px; padding:8px 0; }
 </style>
