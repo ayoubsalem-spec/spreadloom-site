@@ -31,7 +31,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas as pdf_canvas
-from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session
+from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session, Response, stream_with_context
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -40,6 +40,15 @@ from werkzeug.utils import secure_filename
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
 csrf = CSRFProtect(app)
+
+# Atlas conversation state lives here, server-side, keyed by a small token
+# stored in the person's session cookie. Streamed responses can't safely
+# rewrite the session cookie mid-stream (headers are already sent by the
+# time the body starts flowing), so the actual draft -- mode, collected
+# fields, and real message history -- is kept here instead, and the cookie
+# only ever holds the lookup token. In-memory, so it resets on redeploy;
+# that's fine for a conversational scratchpad.
+ATLAS_SESSIONS = {}
 
 
 HOUSTON_TZ = ZoneInfo("America/Chicago")
@@ -1838,10 +1847,12 @@ CONCRETE_REQUEST_REQUIRED_FIELDS = [
 def inventory_new_concrete():
     if request.method == "POST":
         needs_pump = request.form.get("pump_type") in ("Ground Pump", "Overhead Pump")
+        needs_lab = request.form.get("lab_required") == "Yes"
         needs_drilling = request.form.get("drilling_required") == "Yes"
         required_fields = [
             f for f in CONCRETE_REQUEST_REQUIRED_FIELDS
             if (needs_pump or f not in ("pump_size", "pump_arrival_time"))
+            and (needs_lab or f != "lab_time")
             and (needs_drilling or f != "drilling_time")
         ]
         missing = [f for f in required_fields if not request.form.get(f, "").strip()]
@@ -2463,9 +2474,9 @@ CONCRETE_REQUEST_FIELDS = """
 - pump_size (text, REQUIRED only if pump_type is Ground Pump or Overhead Pump -- skip asking if pump_type is None)
 - pump_arrival_time (time, REQUIRED only if pump_type is Ground Pump or Overhead Pump -- skip asking if pump_type is None) -- format HH:MM 24-hour
 - lab_required (Yes/No, REQUIRED)
-- lab_time (time, REQUIRED) -- format HH:MM 24-hour, even if lab_required is No
+- lab_time (time, REQUIRED only if lab_required is Yes -- skip asking if lab_required is No) -- format HH:MM 24-hour
 - drilling_required (Yes/No, REQUIRED)
-- drilling_time (time, REQUIRED) -- format HH:MM 24-hour, even if drilling_required is No
+- drilling_time (time, REQUIRED only if drilling_required is Yes -- skip asking if drilling_required is No) -- format HH:MM 24-hour
 """.strip()
 
 # The one field on the web form NOT asked about by voice -- "requested_date"
@@ -2538,33 +2549,18 @@ def generate_atlas_speech(text):
         return None, f"ElevenLabs connection error: {str(e)}"
 
 
-def call_claude_assistant_turn(user_text, draft):
-    """One turn of the voice assistant. `draft` is the session's running
-    state: {"mode": "chat"|"concrete_request", "fields": {...}, "history": [...]}.
-    Returns (spoken_reply, updated_draft, submitted_id_or_None).
-
-    The model is given the field spec for a concrete request and asked to
-    hold a normal conversation, asking only for whatever's still missing,
-    then to emit a small JSON "state" block alongside its spoken reply so
-    the server knows what it decided -- without that, there'd be no
-    reliable way to tell "still collecting info" from "ready to submit"
-    apart from re-parsing free text every turn.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return "This assistant isn't set up yet -- ask Ayoub to add an Anthropic API key.", draft, None
-
-    snapshot = gather_business_snapshot()
-    history = draft.get("history", [])
-    history_text = "\n".join(f"{h['role']}: {h['text']}" for h in history[-10:])
-
-    system = (
-        "You are Atlas, the voice assistant inside BuildIQ. If asked your "
-        "name, say Atlas. "
-        "People talk to you hands-free, often on a job site, instead of "
-        "filling out a form. You'll be read out loud by text-to-speech --  "
-        "keep replies short and conversational, no markdown, no lists "
-        "unless truly needed.\n\n"
+def _build_atlas_system_prompt(snapshot, fields):
+    """The fixed instructions + live context, sent as the system prompt on
+    every turn. The conversation itself travels separately as a real
+    messages array now, not flattened into this text."""
+    return (
+        "You are Atlas, the assistant inside BuildIQ. If asked your name, "
+        "say Atlas. People talk to you like they'd talk to Claude or "
+        "ChatGPT -- hold a real conversation, remember what's already been "
+        "said, and don't repeat a question that's already been answered. "
+        "Replies may be read aloud by text-to-speech, so keep them "
+        "conversational and avoid markdown or lists unless they're truly "
+        "needed.\n\n"
         "You can do two things:\n"
         "1. Answer questions about the current state of the business using "
         "the snapshot below.\n"
@@ -2587,63 +2583,152 @@ def call_claude_assistant_turn(user_text, draft):
         "set mode back to chat.\n\n"
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
-        + json.dumps(draft.get("fields", {})) + "\n\n"
-        "CONVERSATION SO FAR:\n" + (history_text or "(nothing yet)") + "\n\n"
+        + json.dumps(fields) + "\n\n"
         "Respond in exactly two parts:\n"
-        "1. Your natural spoken reply.\n"
+        "1. Your natural reply.\n"
         "2. On its own line, a state block in EXACTLY this format:\n"
         '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit"}</state>'
     )
 
-    import urllib.request
-    import urllib.error
-    body = json.dumps({
-        "model": "claude-sonnet-4-6", "max_tokens": 600,
-        "system": system,
-        "messages": [{"role": "user", "content": user_text}],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/messages", data=body,
-        headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-        method="POST",
-    )
+
+def stream_atlas_turn(user_text, draft):
+    """Streams one turn of the assistant as an SSE generator. Yields
+    'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
+    for actually returning a streaming Response built from this generator.
+
+    Unlike the old implementation, prior turns travel as a real messages
+    array (draft["history"] is now a list of {"role","content"} dicts fed
+    straight to the API), not flattened into a text blob in the system
+    prompt -- this is what gives it real multi-turn memory instead of a
+    blurry paraphrase of the conversation so far.
+
+    The trailing <state>...</state> block the model emits is never shown
+    to the person -- it's buffered out of the visible stream and parsed
+    once the response finishes.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        msg = "This assistant isn't set up yet -- ask Ayoub to add an Anthropic API key."
+        yield f"data: {json.dumps({'type': 'delta', 'text': msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+        return
+
+    snapshot = gather_business_snapshot()
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}))
+
+    history = draft.get("history", [])[-20:]  # last 10 exchanges, real turns
+    messages = [{"role": h["role"], "content": h["content"]} for h in history]
+    messages.append({"role": "user", "content": user_text})
+
+    raw_text = ""
+    visible_sent = ""
+    STATE_TAG = "<state>"
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw_text = data["content"][0]["text"]
-    except urllib.error.HTTPError as e:
-        return f"I hit an error talking to Claude: {e.code} {e.reason}.", draft, None
-    except Exception as e:
-        return f"I hit an error: {str(e)}.", draft, None
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json={"model": "claude-sonnet-4-6", "max_tokens": 600, "system": system, "messages": messages, "stream": True},
+            stream=True, timeout=60,
+        )
+        resp.raise_for_status()
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload in ("", "[DONE]"):
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "content_block_delta":
+                continue
+            delta_text = event.get("delta", {}).get("text", "")
+            if not delta_text:
+                continue
+            raw_text += delta_text
+
+            # Only stream out text we're sure isn't (part of) the state
+            # tag -- hold back a small trailing window until we know.
+            tag_idx = raw_text.find(STATE_TAG)
+            if tag_idx != -1:
+                safe_upto = tag_idx
+            else:
+                safe_upto = max(0, len(raw_text) - len(STATE_TAG))
+            if safe_upto > len(visible_sent):
+                new_chunk = raw_text[len(visible_sent):safe_upto]
+                if new_chunk:
+                    yield f"data: {json.dumps({'type': 'delta', 'text': new_chunk})}\n\n"
+                    visible_sent = raw_text[:safe_upto]
+            if tag_idx != -1:
+                break
+    except requests.exceptions.RequestException as e:
+        yield f"data: {json.dumps({'type': 'delta', 'text': f'I hit an error talking to Claude: {str(e)}.'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+        return
+
+    # Drain any remaining stream (the state block itself) without emitting it.
+    try:
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload in ("", "[DONE]"):
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "content_block_delta":
+                raw_text += event.get("delta", {}).get("text", "")
+    except requests.exceptions.RequestException:
+        pass
 
     spoken, state = _parse_assistant_reply(raw_text)
+    if not visible_sent and spoken:
+        # Fallback: state tag was never found mid-stream (model skipped
+        # it, or it arrived in one big chunk) -- send the whole spoken
+        # reply now rather than showing nothing.
+        yield f"data: {json.dumps({'type': 'delta', 'text': spoken})}\n\n"
+
     mode = state.get("mode", "chat")
     fields = state.get("fields", {}) if mode == "concrete_request" else {}
     action = state.get("action", "none")
 
-    new_draft = {"mode": mode, "fields": fields, "history": history + [
-        {"role": "user", "text": user_text}, {"role": "assistant", "text": spoken}
-    ]}
+    new_history = history + [
+        {"role": "user", "content": user_text},
+        {"role": "assistant", "content": spoken},
+    ]
+    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:]}
 
     submitted_id = None
     if action == "submit":
         needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
+        needs_lab = fields.get("lab_required") == "Yes"
         needs_drilling = fields.get("drilling_required") == "Yes"
         required_now = [
             f for f in VOICE_REQUIRED_FIELDS
             if (needs_pump or f not in ("pump_size", "pump_arrival_time"))
+            and (needs_lab or f != "lab_time")
             and (needs_drilling or f != "drilling_time")
         ]
         missing = [f for f in required_now if not str(fields.get(f, "")).strip()]
-        required_ok = not missing
-        if required_ok:
+        if not missing:
             fields["requested_date"] = date.today().isoformat()
             submitted_id = create_concrete_request(fields, current_user.name or current_user.email)
             new_draft = {"mode": "chat", "fields": {}, "history": []}
         else:
-            spoken += " Actually, I'm still missing something required -- let's finish that first."
+            extra = " Actually, I'm still missing something required -- let's finish that first."
+            yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
+            spoken += extra
 
-    return spoken, new_draft, submitted_id
+    audio_b64, audio_error = generate_atlas_speech(spoken)
+
+    draft.clear()
+    draft.update(new_draft)
+
+    yield f"data: {json.dumps({'type': 'done', 'mode': new_draft.get('mode'), 'submitted_id': submitted_id, 'audio': audio_b64, 'audio_error': audio_error})}\n\n"
 
 
 @app.route("/assistant")
@@ -2748,37 +2833,49 @@ def assistant_ask():
     if not is_atlas_allowed():
         return {"error": "not authorized"}, 403
 
+    transcribe_error = None
     if request.content_type and "multipart/form-data" in request.content_type:
         audio_file = request.files.get("audio")
         if not audio_file:
-            return {"answer": "I didn't receive any audio."}
-        audio_bytes, mime_type = audio_file.read(), audio_file.mimetype
-        question, transcribe_error = transcribe_via_whisper(audio_bytes, mime_type)
-        if question is None and transcribe_error is None:
-            # Whisper not configured -- fall back to ElevenLabs.
-            question, transcribe_error = transcribe_via_elevenlabs(audio_bytes, mime_type)
-        if transcribe_error:
-            return {"answer": "I couldn't hear that clearly -- try again.", "transcribe_error": transcribe_error}
-        question = (question or "").strip()
+            question = ""
+        else:
+            audio_bytes, mime_type = audio_file.read(), audio_file.mimetype
+            question, transcribe_error = transcribe_via_whisper(audio_bytes, mime_type)
+            if question is None and transcribe_error is None:
+                # Whisper not configured -- fall back to ElevenLabs.
+                question, transcribe_error = transcribe_via_elevenlabs(audio_bytes, mime_type)
+            question = (question or "").strip()
     else:
         question = (request.get_json(silent=True) or {}).get("question", "").strip()
 
-    if not question:
-        return {"answer": "I didn't catch a question."}
+    token = session.get("atlas_token")
+    if not token:
+        token = secrets.token_hex(16)
+        session["atlas_token"] = token
+    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": []})
 
-    draft = session.get("voice_draft") or {"mode": "chat", "fields": {}, "history": []}
-    answer, new_draft, submitted_id = call_claude_assistant_turn(question, draft)
-    session["voice_draft"] = new_draft
+    def generate():
+        yield f"data: {json.dumps({'type': 'question', 'text': question, 'transcribe_error': transcribe_error})}\n\n"
+        if transcribe_error:
+            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+            return
+        if not question:
+            no_question_msg = "I didn't catch a question."
+            yield f"data: {json.dumps({'type': 'delta', 'text': no_question_msg})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+            return
+        for chunk in stream_atlas_turn(question, draft):
+            yield chunk
 
-    audio_b64, audio_error = generate_atlas_speech(answer)
-
-    return {"question": question, "answer": answer, "submitted_id": submitted_id, "mode": new_draft.get("mode"), "audio": audio_b64, "audio_error": audio_error}
+    return Response(stream_with_context(generate()), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/assistant/reset", methods=["POST"])
 @login_required
 def assistant_reset():
-    session.pop("voice_draft", None)
+    token = session.get("atlas_token")
+    if token:
+        ATLAS_SESSIONS.pop(token, None)
     return {"ok": True}
 
 

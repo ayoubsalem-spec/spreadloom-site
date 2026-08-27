@@ -1,95 +1,119 @@
 {% extends "base.html" %}
 {% block content %}
 <meta name="csrf-token" content="{{ csrf_token() }}">
-<div style="max-width:640px; margin:0 auto; text-align:center; padding-top:40px;">
-    <h1 style="margin-bottom:4px;">Atlas</h1>
-    <p class="sub" style="margin-bottom:36px;">Tap the button, ask a question, tap again when you're done.</p>
+<style>
+    .atlas-shell { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; height: calc(100vh - 140px); min-height: 480px; }
+    .atlas-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 16px; flex-shrink: 0; }
+    .atlas-header h1 { display: flex; align-items: center; gap: 10px; }
+    .atlas-live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 0 rgba(94,234,212,0.5); animation: atlas-pulse 1.8s infinite; }
+    @keyframes atlas-pulse { 0% { box-shadow: 0 0 0 0 rgba(94,234,212,0.4); } 70% { box-shadow: 0 0 0 8px rgba(94,234,212,0); } 100% { box-shadow: 0 0 0 0 rgba(94,234,212,0); } }
 
-    <button id="talk-btn" style="
-        width:180px; height:180px; border-radius:50%; border:none;
-        background: radial-gradient(circle at 35% 30%, #E8C766, #B8860B);
-        color:#0B1220; font-weight:700; font-size:16px; cursor:pointer;
-        box-shadow: 0 0 0 0 rgba(212,165,55,0.5); transition: box-shadow 0.2s;
-        -webkit-user-select:none; user-select:none;
-    ">HOLD TO ASK</button>
+    .atlas-messages { flex: 1; overflow-y: auto; padding: 8px 4px 16px; display: flex; flex-direction: column; gap: 14px; }
+    .atlas-msg { max-width: 78%; padding: 12px 16px; border-radius: 10px; font-size: 14px; line-height: 1.5; }
+    .atlas-msg.user { align-self: flex-end; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); border-bottom-right-radius: 2px; }
+    .atlas-msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--brass-dim); color: var(--text); border-bottom-left-radius: 2px; }
+    .atlas-msg.assistant .atlas-msg-label { font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; color: var(--brass); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; display: block; }
+    .atlas-msg.system { align-self: center; background: rgba(94,234,212,0.1); border: 1px solid var(--teal); color: var(--teal); font-family: 'IBM Plex Mono', monospace; font-size: 12px; padding: 8px 16px; border-radius: 6px; }
+    .atlas-msg.error { align-self: center; background: rgba(248,113,113,0.08); border: 1px solid var(--red); color: #FCA5A5; font-size: 12.5px; padding: 8px 16px; border-radius: 6px; }
+    .atlas-typing { align-self: flex-start; display: flex; gap: 4px; padding: 12px 16px; }
+    .atlas-typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); animation: atlas-typing 1.2s infinite; }
+    .atlas-typing span:nth-child(2) { animation-delay: 0.2s; }
+    .atlas-typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes atlas-typing { 0%, 60%, 100% { opacity: 0.3; } 30% { opacity: 1; } }
 
-    <p id="status-line" class="sub" style="margin-top:24px; min-height:20px;"></p>
+    .atlas-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text-dim); }
+    .atlas-empty-mark { width: 64px; height: 64px; border-radius: 50%; border: 1.5px solid var(--brass); display: flex; align-items: center; justify-content: center; margin-bottom: 18px; }
 
-    <div id="transcript-box" style="
-        display:none; margin-top:20px; text-align:left; background:var(--card, #141F35);
-        border:1px solid var(--border, #263047); border-radius:10px; padding:18px 20px;
-    ">
-        <p class="sub" style="margin:0 0 6px;">YOU ASKED</p>
-        <p id="question-text" style="margin:0 0 16px; color:var(--text, #E8ECF4);"></p>
-        <p class="sub" style="margin:0 0 6px;">ANSWER</p>
-        <p id="answer-text" style="margin:0; color:var(--text, #E8ECF4);"></p>
-        <button id="replay-btn" style="display:none; margin-top:10px; background:none; border:1px solid var(--border, #263047); color:var(--gold, #D4A537); padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px;">
-            🔊 Replay
-        </button>
-        <p id="audio-error" style="display:none; margin-top:8px; color:#E88; font-size:12px;"></p>
-        <p id="submitted-badge" style="display:none; margin:14px 0 0; padding:8px 12px; background:rgba(94,234,212,0.12); border:1px solid var(--teal, #5EEAD4); border-radius:6px; color:var(--teal, #5EEAD4); font-size:13px;">
-            ✓ Concrete request submitted
-        </p>
+    .atlas-inputbar { flex-shrink: 0; border-top: 1px solid var(--line); padding-top: 14px; margin-top: 8px; }
+    .atlas-inputrow { display: flex; gap: 8px; align-items: flex-end; }
+    .atlas-textinput { flex: 1; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; color: var(--text); font-family: 'Inter', sans-serif; font-size: 14px; resize: none; max-height: 120px; }
+    .atlas-textinput:focus { outline: none; border-color: var(--brass-dim); }
+    .atlas-send-btn { background: linear-gradient(135deg, var(--brass), var(--brass-dim)); border: none; color: var(--ink); font-weight: 700; border-radius: 8px; width: 44px; height: 44px; flex-shrink: 0; cursor: pointer; font-size: 16px; }
+    .atlas-send-btn:disabled { opacity: 0.4; cursor: default; }
+    .atlas-mic-btn { background: var(--surface-2); border: 1px solid var(--line); color: var(--text-dim); border-radius: 8px; width: 44px; height: 44px; flex-shrink: 0; cursor: pointer; font-size: 17px; transition: all 0.15s; }
+    .atlas-mic-btn.listening { background: rgba(201,162,75,0.15); border-color: var(--brass); color: var(--brass); box-shadow: 0 0 0 4px rgba(201,162,75,0.15); }
+    .atlas-status { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); margin-top: 8px; min-height: 14px; }
+    .atlas-reset-link { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); cursor: pointer; }
+    .atlas-reset-link:hover { color: var(--text-dim); }
+</style>
+
+<div class="atlas-shell">
+    <div class="atlas-header">
+        <div>
+            <span class="rc-eyebrow">BuildIQ Assistant</span>
+            <h1><span class="atlas-live-dot"></span>Atlas</h1>
+            <p class="sub" style="margin-top:2px;">Ask about the business, or submit a concrete request &mdash; type or talk.</p>
+        </div>
+        <span id="reset-btn" class="atlas-reset-link" style="display:none;">Start Over</span>
     </div>
 
-    <button id="reset-btn" style="display:none; margin-top:16px; background:none; border:1px solid var(--border, #263047); color:var(--sub, #9AA5B8); padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px;">
-        Start Over
-    </button>
+    <div id="atlas-messages" class="atlas-messages">
+        <div id="atlas-empty" class="atlas-empty">
+            <div class="atlas-empty-mark">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 2L4 6v6c0 5 3.5 8.5 8 10 4.5-1.5 8-5 8-10V6l-8-4z" stroke="#C9A24B" stroke-width="1.5"/></svg>
+            </div>
+            <p style="font-family:'Space Grotesk',sans-serif; font-size:15px; color:var(--text); margin-bottom:6px;">What do you need?</p>
+            <p style="font-size:12.5px; max-width:320px;">Ask "how many active bids do we have" or say "I need to submit a concrete request for Patel Farm."</p>
+        </div>
+    </div>
 
-    <p class="sub" style="margin-top:30px; font-size:12px;">
-        Uses your browser's free built-in voice recognition when available. On devices where that's not supported (like iPhone), needs a transcription service configured on the server.
-    </p>
+    <div class="atlas-inputbar">
+        <div class="atlas-inputrow">
+            <textarea id="text-input" class="atlas-textinput" rows="1" placeholder="Message Atlas..."></textarea>
+            <button id="mic-btn" class="atlas-mic-btn" title="Talk">&#127908;</button>
+            <button id="send-btn" class="atlas-send-btn" title="Send">&#8593;</button>
+        </div>
+        <p id="status-line" class="atlas-status"></p>
+    </div>
 </div>
 
 <script>
 (function () {
-    var btn = document.getElementById('talk-btn');
+    var messagesEl = document.getElementById('atlas-messages');
+    var emptyEl = document.getElementById('atlas-empty');
+    var textInput = document.getElementById('text-input');
+    var sendBtn = document.getElementById('send-btn');
+    var micBtn = document.getElementById('mic-btn');
     var statusLine = document.getElementById('status-line');
-    var transcriptBox = document.getElementById('transcript-box');
-    var questionText = document.getElementById('question-text');
-    var answerText = document.getElementById('answer-text');
+    var resetBtn = document.getElementById('reset-btn');
     var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
-    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    // iOS Safari (and every browser on iPhone, since they all use Apple's
-    // engine underneath) exposes the SpeechRecognition object but doesn't
-    // reliably return results from it -- it just hangs on "Listening..."
-    // forever. Feature-detection alone isn't enough; force the recording
-    // fallback on iOS regardless of whether the object exists.
-    var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    var recognition = null;
-    if (SpeechRecognition && !isIOS) {
-        recognition = new SpeechRecognition();
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        recognition.lang = 'en-US';
-    }
-
-    var hasRecorder = navigator.mediaDevices && window.MediaRecorder;
-    if (!recognition && !hasRecorder) {
-        statusLine.textContent = "Your browser doesn't support voice input -- try Chrome or Safari, latest version.";
-        btn.disabled = true;
-        btn.style.opacity = 0.4;
-        return;
-    }
-
-    var mediaRecorder = null;
-    var audioChunks = [];
-    var listening = false;
-    var silenceCheckInterval = null;
-    var silenceAudioCtx = null;
-
     function setStatus(text) { statusLine.textContent = text; }
+    function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+    function addMessage(role, text) {
+        emptyEl.style.display = 'none';
+        var div = document.createElement('div');
+        div.className = 'atlas-msg ' + role;
+        if (role === 'assistant') {
+            var label = document.createElement('span');
+            label.className = 'atlas-msg-label';
+            label.textContent = 'Atlas';
+            div.appendChild(label);
+        }
+        var body = document.createElement('span');
+        body.textContent = text;
+        div.appendChild(body);
+        messagesEl.appendChild(div);
+        scrollToBottom();
+        return div;
+    }
+
+    function addTyping() {
+        emptyEl.style.display = 'none';
+        var div = document.createElement('div');
+        div.className = 'atlas-typing';
+        div.id = 'atlas-typing-indicator';
+        div.innerHTML = '<span></span><span></span><span></span>';
+        messagesEl.appendChild(div);
+        scrollToBottom();
+    }
+    function removeTyping() {
+        var el = document.getElementById('atlas-typing-indicator');
+        if (el) el.remove();
+    }
 
     function unlockSpeechIfNeeded() {
-        // iOS Safari blocks speechSynthesis.speak() unless it's called
-        // directly inside a user gesture -- an async speak() call after
-        // a fetch() response comes back doesn't count, and fails silently
-        // with no error at all. Speaking one silent utterance here, inside
-        // an actual button press/release, unlocks it for that moment.
-        // Not gated to "once" -- requesting the microphone for recording
-        // appears to reset this unlock on iOS, so it's re-primed on both
-        // press and release rather than assumed to stick for the session.
         if (!window.speechSynthesis) return;
         var warm = new SpeechSynthesisUtterance('.');
         warm.volume = 0;
@@ -97,55 +121,29 @@
     }
 
     function speak(text, audioB64) {
-        var errorLine = document.getElementById('audio-error');
-        var replayBtn = document.getElementById('replay-btn');
-        errorLine.style.display = 'none';
-
         if (audioB64) {
             var audio = new Audio('data:audio/mpeg;base64,' + audioB64);
             var playPromise = audio.play();
             if (playPromise && playPromise.catch) {
-                playPromise.catch(function (err) {
-                    errorLine.textContent = 'Audio blocked by browser -- it\'ll play automatically as soon as you tap anywhere, or tap Replay now.';
-                    errorLine.style.display = 'block';
+                playPromise.catch(function () {
                     armAutoReplayOnNextTap(function () { audio.play().catch(function () {}); });
                 });
             }
-            replayBtn.style.display = 'inline-block';
-            replayBtn.onclick = function () { audio.play(); };
             return;
         }
-        if (!window.speechSynthesis) {
-            errorLine.textContent = 'No audio available -- browser does not support speech synthesis and no ElevenLabs audio was returned.';
-            errorLine.style.display = 'block';
-            return;
-        }
+        if (!window.speechSynthesis) return;
         window.speechSynthesis.cancel();
         var utter = new SpeechSynthesisUtterance(text);
         utter.rate = 1.0;
-        utter.onerror = function (e) {
-            errorLine.textContent = 'Audio blocked by browser -- it\'ll play automatically as soon as you tap anywhere, or tap Replay now.';
-            errorLine.style.display = 'block';
+        utter.onerror = function () {
             armAutoReplayOnNextTap(function () {
                 window.speechSynthesis.cancel();
                 window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
             });
         };
         window.speechSynthesis.speak(utter);
-        replayBtn.style.display = 'inline-block';
-        replayBtn.onclick = function () {
-            window.speechSynthesis.cancel();
-            window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
-        };
     }
 
-    // iOS blocks audio that isn't triggered by a direct tap -- no amount
-    // of pre-priming reliably works around that, it's an Apple platform
-    // rule, not a bug in this code. Rather than force a precise tap on
-    // the small Replay button, treat literally the NEXT tap anywhere on
-    // the page (which usually happens naturally -- tapping the mic again
-    // to ask something else) as that direct gesture, and use it to play
-    // the answer that got blocked.
     var autoReplayArmed = false;
     function armAutoReplayOnNextTap(playFn) {
         if (autoReplayArmed) return;
@@ -161,90 +159,155 @@
     }
 
     function askServer(question) {
-        setStatus('Thinking...');
-        fetch('{{ url_for("assistant_ask") }}', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-            body: JSON.stringify({ question: question })
-        })
-        .then(function (r) { return r.json(); })
-        .then(handleResponse)
-        .catch(function () {
-            setStatus('Something went wrong reaching the assistant.');
-        });
+        addMessage('user', question);
+        streamFromServer(function (formOrNull) {
+            return fetch('{{ url_for("assistant_ask") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                body: JSON.stringify({ question: question })
+            });
+        }, true);
     }
 
     function askServerWithAudio(blob) {
-        setStatus('Thinking...');
         var formData = new FormData();
         formData.append('audio', blob, 'atlas.webm');
-        fetch('{{ url_for("assistant_ask") }}', {
-            method: 'POST',
-            headers: { 'X-CSRFToken': csrfToken },
-            body: formData
-        })
-        .then(function (r) { return r.json(); })
-        .then(handleResponse)
-        .catch(function () {
-            setStatus('Something went wrong reaching the assistant.');
+        streamFromServer(function () {
+            return fetch('{{ url_for("assistant_ask") }}', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': csrfToken },
+                body: formData
+            });
+        }, false);
+    }
+
+    // Shared SSE consumer for both the typed and voice paths. `questionAlreadyShown`
+    // is true for typed input (we show it immediately) and false for voice
+    // (the transcript comes back from the server as the first event).
+    function streamFromServer(doFetch, questionAlreadyShown) {
+        setStatus('Thinking...');
+        sendBtn.disabled = true;
+        var assistantBubble = null;
+        var assistantText = '';
+
+        doFetch().then(function (response) {
+            var reader = response.body.getReader();
+            var decoder = new TextDecoder();
+            var buffer = '';
+
+            function pump() {
+                return reader.read().then(function (result) {
+                    if (result.done) return;
+                    buffer += decoder.decode(result.value, { stream: true });
+                    var parts = buffer.split('\n\n');
+                    buffer = parts.pop();
+                    parts.forEach(function (part) {
+                        var line = part.split('\n').find(function (l) { return l.indexOf('data:') === 0; });
+                        if (!line) return;
+                        var evt;
+                        try { evt = JSON.parse(line.slice(5).trim()); } catch (e) { return; }
+                        handleEvent(evt);
+                    });
+                    return pump();
+                });
+            }
+
+            function handleEvent(evt) {
+                if (evt.type === 'question') {
+                    if (!questionAlreadyShown) addMessage('user', evt.text);
+                    if (evt.transcribe_error) addMessage('error', 'Could not transcribe: ' + evt.transcribe_error);
+                } else if (evt.type === 'delta') {
+                    if (!assistantBubble) {
+                        removeTyping();
+                        assistantBubble = addMessage('assistant', '');
+                    }
+                    assistantText += evt.text;
+                    assistantBubble.querySelector('span:last-child').textContent = assistantText;
+                    scrollToBottom();
+                } else if (evt.type === 'done') {
+                    setStatus('');
+                    sendBtn.disabled = false;
+                    if (assistantText) speak(assistantText, evt.audio);
+                    if (evt.audio_error) addMessage('error', 'Atlas voice unavailable, using free voice instead: ' + evt.audio_error);
+                    if (evt.submitted_id) addMessage('system', '\u2713 Concrete request #' + evt.submitted_id + ' submitted');
+                    resetBtn.style.display = (evt.mode === 'concrete_request') ? 'inline-block' : 'none';
+                }
+            }
+
+            addTyping();
+            return pump();
+        }).catch(function () {
+            removeTyping();
+            setStatus('');
+            sendBtn.disabled = false;
+            addMessage('error', 'Something went wrong reaching the assistant.');
         });
     }
 
-    function handleResponse(data) {
-        var answer = data.answer || "I didn't get an answer back.";
-        transcriptBox.style.display = 'block';
-        questionText.textContent = data.question || '(unclear)';
-        answerText.textContent = answer;
-        setStatus('');
-        speak(answer, data.audio);
-        var badge = document.getElementById('submitted-badge');
-        var resetBtn = document.getElementById('reset-btn');
-        var errorLine = document.getElementById('audio-error');
-        if (data.transcribe_error) {
-            errorLine.textContent = 'Could not transcribe: ' + data.transcribe_error;
-            errorLine.style.display = 'block';
-        } else if (data.audio_error) {
-            errorLine.textContent = 'Atlas voice unavailable, using free voice instead: ' + data.audio_error;
-            errorLine.style.display = 'block';
-        }
-        if (data.submitted_id) {
-            badge.style.display = 'block';
-            badge.textContent = '✓ Concrete request #' + data.submitted_id + ' submitted';
-        } else {
-            badge.style.display = 'none';
-        }
-        resetBtn.style.display = (data.mode === 'concrete_request') ? 'inline-block' : 'none';
+    function sendTyped() {
+        var text = textInput.value.trim();
+        if (!text) return;
+        textInput.value = '';
+        textInput.style.height = 'auto';
+        unlockSpeechIfNeeded();
+        askServer(text);
     }
+    sendBtn.addEventListener('click', sendTyped);
+    textInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTyped(); }
+    });
+    textInput.addEventListener('input', function () {
+        textInput.style.height = 'auto';
+        textInput.style.height = Math.min(textInput.scrollHeight, 120) + 'px';
+    });
+
+    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var recognition = null;
+    if (SpeechRecognition && !isIOS) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+    }
+
+    var hasRecorder = navigator.mediaDevices && window.MediaRecorder;
+    if (!recognition && !hasRecorder) {
+        micBtn.disabled = true;
+        micBtn.style.opacity = 0.3;
+        micBtn.title = "Voice not supported in this browser";
+    }
+
+    var mediaRecorder = null;
+    var audioChunks = [];
+    var listening = false;
+    var silenceCheckInterval = null;
+    var silenceAudioCtx = null;
 
     function startListening() {
         if (listening) return;
         listening = true;
         setStatus('Listening...');
-        btn.style.boxShadow = '0 0 0 14px rgba(212,165,55,0.25)';
+        micBtn.classList.add('listening');
 
         if (recognition) {
-            // Free, built-in browser recognition -- zero cost, no server call.
-            // Not reliably supported on iOS Safari, which is why the
-            // MediaRecorder fallback below exists for browsers without it.
             recognition.onresult = function (event) {
                 var question = event.results[0][0].transcript;
                 askServer(question);
             };
             recognition.onerror = function (event) {
-                setStatus('Didn\'t catch that (' + event.error + ') -- try again.');
+                setStatus("Didn't catch that (" + event.error + ') -- try again.');
                 listening = false;
-                btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+                micBtn.classList.remove('listening');
             };
             recognition.onend = function () {
                 listening = false;
-                btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+                micBtn.classList.remove('listening');
             };
             try { recognition.start(); } catch (e) { /* already started, ignore */ }
             return;
         }
 
-        // Fallback: record audio and let the server transcribe it (needs
-        // OPENAI_API_KEY or ELEVENLABS_API_KEY configured server-side).
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
             audioChunks = [];
             var mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
@@ -255,10 +318,10 @@
             });
             mediaRecorder.addEventListener('stop', function () {
                 stream.getTracks().forEach(function (t) { t.stop(); });
-                btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+                micBtn.classList.remove('listening');
                 stopSilenceWatch();
                 if (audioChunks.length === 0) {
-                    setStatus('Didn\'t catch that -- try again.');
+                    setStatus("Didn't catch that -- try again.");
                     listening = false;
                     return;
                 }
@@ -271,18 +334,13 @@
         }).catch(function (err) {
             setStatus('Microphone access denied or unavailable (' + err.name + ').');
             listening = false;
-            btn.style.boxShadow = '0 0 0 0 rgba(212,165,55,0.5)';
+            micBtn.classList.remove('listening');
         });
     }
 
-    // Like ChatGPT's voice mode: once you've started talking, stop
-    // listening automatically after a beat of silence -- no second tap
-    // needed. Only applies to the iOS/MediaRecorder path; the desktop
-    // browser recognition path already does this natively on its own
-    // (continuous = false stops it as soon as it detects you're done).
     function watchForSilence(stream) {
         var AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return; // no silence auto-stop available -- manual tap-to-stop still works
+        if (!AudioCtx) return;
         silenceAudioCtx = new AudioCtx();
         var source = silenceAudioCtx.createMediaStreamSource(stream);
         var analyser = silenceAudioCtx.createAnalyser();
@@ -290,9 +348,9 @@
         source.connect(analyser);
         var data = new Uint8Array(analyser.frequencyBinCount);
 
-        var SILENCE_THRESHOLD = 8;      // average frequency amplitude below this counts as quiet
-        var SILENCE_HOLD_MS = 1300;     // how long it has to stay quiet before auto-stopping
-        var MAX_DURATION_MS = 30000;    // safety cap regardless of silence detection
+        var SILENCE_THRESHOLD = 8;
+        var SILENCE_HOLD_MS = 1300;
+        var MAX_DURATION_MS = 30000;
         var hasSpokenYet = false;
         var silenceStartedAt = null;
         var recordingStartedAt = Date.now();
@@ -324,28 +382,22 @@
 
     function stopListening() {
         if (!listening) return;
-        if (recognition) {
-            recognition.stop();
-            return;
-        }
+        if (recognition) { recognition.stop(); return; }
         if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     }
 
-    // Tap once to start, tap again to stop -- no more holding the button.
     function toggleListening() {
         if (listening) stopListening();
         else startListening();
     }
-    btn.addEventListener('click', function () { unlockSpeechIfNeeded(); toggleListening(); });
-    btn.addEventListener('touchend', function (e) { e.preventDefault(); unlockSpeechIfNeeded(); toggleListening(); });
+    micBtn.addEventListener('click', function () { unlockSpeechIfNeeded(); toggleListening(); });
 
-    document.getElementById('reset-btn').addEventListener('click', function () {
+    resetBtn.addEventListener('click', function () {
         fetch('{{ url_for("assistant_reset") }}', {
             method: 'POST',
             headers: { 'X-CSRFToken': csrfToken }
         }).then(function () {
-            document.getElementById('reset-btn').style.display = 'none';
-            document.getElementById('submitted-badge').style.display = 'none';
+            resetBtn.style.display = 'none';
             setStatus('Started over.');
         });
     });
