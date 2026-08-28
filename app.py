@@ -4,7 +4,7 @@ BuildIQ -- Darycet's unified technology platform.
 One Flask app, one login, one database. Sections are prefixed by URL path
 rather than split into separate Flask Blueprint objects, to keep this first
 version simple to read top-to-bottom. Sections:
-  /            -- home (app picker)
+  /            -- home (app pcker)
   /tracker/... -- Bid Tracker (formerly Command Center: projects + quotes)
   /sitepulse/... -- SitePulse (equipment + outside rentals)
   /inventory/... -- Site Inventory (concrete requests + material inventory)
