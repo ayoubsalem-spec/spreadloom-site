@@ -549,6 +549,242 @@ def apply_due_scheduled_moves(asset_id=None):
         db.commit()
 
 
+def _clean_project_id(db, raw_value):
+    """Validate a project_id coming from a form before it's ever stored.
+    Returns a real int id if it refers to an actual tracker_projects row,
+    otherwise None -- never stores a stray/tampered/stale value. Also
+    used by edit forms: if the field wasn't in the submission at all
+    (None), the caller is expected to fall back to the existing value
+    itself rather than call this, so an omitted field can never silently
+    clear a link.
+    """
+    if not raw_value:
+        return None
+    try:
+        pid = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    row = db.execute("SELECT id FROM tracker_projects WHERE id = ?", (pid,)).fetchone()
+    return pid if row else None
+
+
+def _backfill_project_links(db):
+    """Phase 1 project-identity backfill. Runs every startup (cheap,
+    idempotent) and only ever touches rows where project_id is still
+    NULL -- once a row is linked (by this or by a person), it's never
+    revisited or overwritten. Exact-match only: never guesses between
+    multiple candidates, those go to project_link_review instead.
+    """
+    now = datetime.utcnow().isoformat()
+    targets = [
+        ("inventory_concrete_requests", "project"),
+        ("inventory_purchase_requests", "job_name"),
+        ("sitepulse_usage_log", "job_name"),
+        ("sitepulse_rentals", "job_name"),
+    ]
+    for table, text_col in targets:
+        rows = db.execute(
+            f"SELECT id, {text_col} FROM {table} WHERE project_id IS NULL AND {text_col} IS NOT NULL AND TRIM({text_col}) != ''"
+        ).fetchall()
+        for row_id, raw_text in rows:
+            free_text = raw_text.strip()
+            matches = db.execute(
+                "SELECT id FROM tracker_projects WHERE LOWER(TRIM(name)) = LOWER(?)", (free_text,)
+            ).fetchall()
+            if len(matches) == 1:
+                db.execute(f"UPDATE {table} SET project_id = ? WHERE id = ?", (matches[0][0], row_id))
+            elif len(matches) > 1:
+                already_flagged = db.execute(
+                    "SELECT id FROM project_link_review WHERE source_table = ? AND source_id = ? AND resolved = 0",
+                    (table, row_id)
+                ).fetchone()
+                if not already_flagged:
+                    db.execute(
+                        "INSERT INTO project_link_review (source_table, source_id, free_text_value, reason, candidate_project_ids, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (table, row_id, free_text, "ambiguous: multiple projects share this name",
+                         ",".join(str(m[0]) for m in matches), now)
+                    )
+            # 0 matches: left alone, no review needed -- most likely a
+            # real job that simply isn't (yet) a Project Hunt bid.
+
+
+PERMISSION_CATALOG = [
+    # (key, category, label)
+    # -- module access --
+    ("module:project_hunt:view", "module", "Project Hunt"),
+    ("module:equipment_center:view", "module", "Equipment Center"),
+    ("module:sitepulse:view", "module", "SitePulse"),
+    ("module:product_intelligence:view", "module", "Product Intelligence"),
+    ("module:atlas:view", "module", "Atlas"),
+    ("module:bidflow:view", "module", "BidFlow (not yet built)"),
+    ("module:engineering:view", "module", "Engineering (not yet built)"),
+    ("module:finance:view", "module", "Finance (not yet built)"),
+    ("module:team_admin:view", "module", "Team / Admin"),
+    # -- actions --
+    ("action:project_hunt:manage", "action", "Manage Projects"),
+    ("action:equipment_center:manage", "action", "Manage Equipment"),
+    ("action:sitepulse:manage", "action", "Manage SitePulse Requests"),
+    ("action:sitepulse:place_order", "action", "Place Purchase Orders"),
+    ("action:product_intelligence:manage", "action", "Manage Product Intelligence"),
+    ("action:team_admin:manage_users", "action", "Manage Users"),
+    ("action:team_admin:manage_whatsapp", "action", "Manage WhatsApp Groups"),
+    # -- Atlas-specific: separate from the manual action permissions above
+    # on purpose (a person can be allowed to do something manually
+    # without allowing Atlas to do it on their behalf, or vice versa) --
+    ("atlas:view_business_data", "atlas", "Atlas: View Business Data"),
+    ("atlas:create_requests", "atlas", "Atlas: Create Requests"),
+]
+
+# name -> set of permission keys granted by that role
+ROLE_DEFAULT_PERMISSIONS = {
+    "Administrator": [key for key, _, _ in PERMISSION_CATALOG],  # everything
+    "Project Manager": [
+        "module:project_hunt:view", "action:project_hunt:manage",
+        "module:equipment_center:view", "action:equipment_center:manage",
+        "module:sitepulse:view", "action:sitepulse:manage",
+        "module:atlas:view", "atlas:view_business_data", "atlas:create_requests",
+    ],
+    "Procurement": [
+        "module:sitepulse:view", "action:sitepulse:manage", "action:sitepulse:place_order",
+        "module:equipment_center:view", "action:equipment_center:manage",
+    ],
+    "Estimator": [
+        "module:project_hunt:view",
+        "module:equipment_center:view", "action:equipment_center:manage",
+        "module:sitepulse:view", "action:sitepulse:manage",
+    ],
+    "Operations": [
+        "module:equipment_center:view", "action:equipment_center:manage",
+        "module:sitepulse:view", "action:sitepulse:manage",
+    ],
+    "Employee": [
+        "module:equipment_center:view", "action:equipment_center:manage",
+        "module:sitepulse:view", "action:sitepulse:manage",
+    ],
+}
+
+
+def _seed_roles_and_permissions(db):
+    """Idempotent: inserts each role/permission once, never overwrites an
+    existing row (so any hand-edited role_permissions from the admin UI
+    survive every restart untouched)."""
+    now = datetime.utcnow().isoformat()
+    for name in ROLE_DEFAULT_PERMISSIONS:
+        db.execute("INSERT OR IGNORE INTO roles (name, created_at) VALUES (?, ?)", (name, now))
+    for key, category, label in PERMISSION_CATALOG:
+        db.execute("INSERT OR IGNORE INTO permissions (key, category, label) VALUES (?, ?, ?)", (key, category, label))
+
+    # Only wire up role_permissions the FIRST time a role is seeded (i.e.
+    # if it currently has zero permission rows) -- once an admin has
+    # edited a role's permissions from the UI, this must never silently
+    # re-apply the defaults over their changes.
+    for role_name, perm_keys in ROLE_DEFAULT_PERMISSIONS.items():
+        role_row = db.execute("SELECT id FROM roles WHERE name = ?", (role_name,)).fetchone()
+        if not role_row:
+            continue
+        role_id = role_row[0]
+        existing = db.execute("SELECT COUNT(*) FROM role_permissions WHERE role_id = ?", (role_id,)).fetchone()[0]
+        if existing > 0:
+            continue
+        for key in perm_keys:
+            perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
+            if perm_row:
+                db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (role_id, perm_row[0]))
+
+
+def _backfill_user_roles(db):
+    """One-time-per-user backfill: gives every existing account whose
+    email appears in the legacy hardcoded lists an equivalent role (or,
+    where no single role fits, a role plus explicit overrides). Only
+    runs for a user if they have ZERO roles and ZERO overrides already --
+    never touches an account an admin has since configured by hand.
+
+    This does not remove or replace ADMIN_EMAILS / FULL_ACCESS_EMAILS /
+    ATLAS_ACCESS_EMAILS / PROCUREMENT_EMAILS / WHATSAPP_ADMIN_EMAILS --
+    those keep gating the existing routes exactly as before. This backfill
+    only populates the NEW system so it can be verified against the old
+    one before anything old is ever removed.
+    """
+    now = datetime.utcnow().isoformat()
+    role_id_by_name = {name: rid for rid, name in db.execute("SELECT id, name FROM roles").fetchall()}
+    perm_id_by_key = {key: pid for pid, key in db.execute("SELECT id, key FROM permissions").fetchall()}
+
+    def already_configured(user_id):
+        has_role = db.execute("SELECT 1 FROM user_roles WHERE user_id = ?", (user_id,)).fetchone()
+        has_override = db.execute("SELECT 1 FROM user_permission_overrides WHERE user_id = ?", (user_id,)).fetchone()
+        return bool(has_role or has_override)
+
+    def assign_role(user_id, role_name):
+        rid = role_id_by_name.get(role_name)
+        if rid:
+            db.execute("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)", (user_id, rid))
+
+    def grant_override(user_id, perm_key):
+        pid = perm_id_by_key.get(perm_key)
+        if pid:
+            db.execute(
+                "INSERT OR IGNORE INTO user_permission_overrides (user_id, permission_id, state, granted_by, updated_at) VALUES (?, ?, 'grant', 'phase2_backfill', ?)",
+                (user_id, pid, now)
+            )
+
+    users = db.execute("SELECT id, email FROM users").fetchall()
+    for uid, email in users:
+        if already_configured(uid):
+            continue  # an admin (or a prior run) already set this user up -- never overwrite
+
+        if email in ADMIN_EMAILS:
+            assign_role(uid, "Administrator")
+        elif email in FULL_ACCESS_EMAILS:
+            assign_role(uid, "Project Manager")
+            if email in PROCUREMENT_EMAILS:
+                assign_role(uid, "Procurement")
+            if email in ATLAS_ACCESS_EMAILS:
+                pass  # Project Manager role already grants Atlas access
+        elif email in ATLAS_ACCESS_EMAILS:
+            # In today's hardcoded lists this is only
+            # rebecca@nomaengineering.com -- Atlas access without full
+            # Project Hunt access. No single role fits that shape, so:
+            # baseline Employee role + explicit Atlas overrides. This is
+            # exactly the case the override system exists for.
+            assign_role(uid, "Employee")
+            grant_override(uid, "module:atlas:view")
+            grant_override(uid, "atlas:view_business_data")
+            grant_override(uid, "atlas:create_requests")
+        elif email in PROCUREMENT_EMAILS:
+            assign_role(uid, "Procurement")
+        else:
+            assign_role(uid, "Employee")
+
+
+def user_has_permission(user, key):
+    """The single resolver every permission check in Phase 2 goes through.
+    Explicit deny always wins over everything. Explicit grant wins over
+    role membership. No override at all falls back to whatever the
+    user's role(s) grant. An unknown permission key is a deny, not a
+    crash -- a typo in a tool's `permission` field fails closed."""
+    if not key:
+        return True
+    if not (user and getattr(user, "is_authenticated", False)):
+        return False
+    db = get_db()
+    perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
+    if not perm_row:
+        return False
+    pid = perm_row["id"]
+    override = db.execute(
+        "SELECT state FROM user_permission_overrides WHERE user_id = ? AND permission_id = ?",
+        (user.id, pid)
+    ).fetchone()
+    if override:
+        return override["state"] == "grant"
+    role_grant = db.execute(
+        "SELECT 1 FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id "
+        "WHERE ur.user_id = ? AND rp.permission_id = ? LIMIT 1",
+        (user.id, pid)
+    ).fetchone()
+    return role_grant is not None
+
+
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.executescript("""
@@ -596,7 +832,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS sitepulse_usage_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER NOT NULL,
-            usage_type TEXT DEFAULT 'Internal Job', job_name TEXT, job_address TEXT,
+            usage_type TEXT DEFAULT 'Internal Job', job_name TEXT, project_id INTEGER, job_address TEXT,
             client TEXT, out_date TEXT, duration_unit TEXT, return_date TEXT, notes TEXT,
             photo_filename TEXT, created_at TEXT,
             entry_kind TEXT DEFAULT 'usage', from_location TEXT, to_location TEXT,
@@ -618,7 +854,7 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS sitepulse_rentals (
             id INTEGER PRIMARY KEY AUTOINCREMENT, vendor TEXT NOT NULL,
-            equipment_description TEXT NOT NULL, job_name TEXT, rate_amount TEXT,
+            equipment_description TEXT NOT NULL, job_name TEXT, project_id INTEGER, rate_amount TEXT,
             rate_period TEXT DEFAULT 'Daily', rented_date TEXT NOT NULL, due_date TEXT,
             returned_date TEXT, notes TEXT, created_at TEXT, updated_at TEXT
         );
@@ -667,6 +903,55 @@ def init_db():
             sort_order INTEGER DEFAULT 0,
             updated_at TEXT NOT NULL
         );
+        -- Phase 1 project-identity migration: when a free-text project
+        -- name matches more than one tracker_projects row (or needs a
+        -- human to confirm), it's recorded here instead of guessed.
+        -- Nothing here is ever auto-resolved; this is purely a review
+        -- queue for a person to link manually later.
+        CREATE TABLE IF NOT EXISTS project_link_review (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_table TEXT NOT NULL,
+            source_id INTEGER NOT NULL,
+            free_text_value TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            candidate_project_ids TEXT,
+            resolved INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        -- Phase 2: Roles + Permissions. Additive alongside the existing
+        -- hardcoded email lists -- those are NOT removed this phase. See
+        -- _seed_roles_and_permissions() / _backfill_user_roles().
+        CREATE TABLE IF NOT EXISTS roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL,
+            label TEXT NOT NULL,
+            description TEXT
+        );
+        CREATE TABLE IF NOT EXISTS role_permissions (
+            role_id INTEGER NOT NULL,
+            permission_id INTEGER NOT NULL,
+            PRIMARY KEY (role_id, permission_id)
+        );
+        CREATE TABLE IF NOT EXISTS user_roles (
+            user_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, role_id)
+        );
+        CREATE TABLE IF NOT EXISTS user_permission_overrides (
+            user_id INTEGER NOT NULL,
+            permission_id INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            granted_by TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, permission_id)
+        );
         CREATE TABLE IF NOT EXISTS feature_request_status_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             feature_request_id INTEGER NOT NULL,
@@ -698,6 +983,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS inventory_concrete_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
+            project_id INTEGER,
             job_site_address TEXT, area_description TEXT, pour_date TEXT NOT NULL,
             pour_time TEXT, mix_design_psi TEXT, mix_slump TEXT, concrete_amount TEXT,
             truck_spacing TEXT, pump_type TEXT, pump_size TEXT, pump_arrival_time TEXT,
@@ -717,7 +1003,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS inventory_purchase_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pr_number TEXT, request_date TEXT NOT NULL,
-            job_name TEXT, location_description TEXT,
+            job_name TEXT, project_id INTEGER, location_description TEXT,
             requested_by TEXT, needed_on TEXT, source_of_supply TEXT,
             requestor_signature TEXT, requestor_date TEXT,
             ordered_by TEXT, ordered_date TEXT, vendor_company TEXT, vendor_company_phone TEXT,
@@ -818,11 +1104,87 @@ def init_db():
         "ALTER TABLE inventory_concrete_requests ADD COLUMN full_reminder_sent_at TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
+        # Phase 1: project identity columns (see project_link_review above).
+        # Nullable and additive -- existing free-text values are untouched.
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN project_id INTEGER",
+        "ALTER TABLE inventory_purchase_requests ADD COLUMN project_id INTEGER",
+        "ALTER TABLE sitepulse_usage_log ADD COLUMN project_id INTEGER",
+        "ALTER TABLE sitepulse_rentals ADD COLUMN project_id INTEGER",
     ]:
         try:
             db.execute(column_sql)
         except sqlite3.OperationalError:
             pass
+
+    # Belt-and-suspenders: project_link_review table, same pattern as
+    # departments below.
+    try:
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS project_link_review (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_table TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                free_text_value TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                candidate_project_ids TEXT,
+                resolved INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )"""
+        )
+    except sqlite3.OperationalError:
+        pass
+
+    # Indexes on the new project_id columns -- safe to run every startup,
+    # CREATE INDEX IF NOT EXISTS is a no-op once they exist.
+    for index_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_concrete_project_id ON inventory_concrete_requests(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_purchase_project_id ON inventory_purchase_requests(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_usage_log_project_id ON sitepulse_usage_log(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_rentals_project_id ON sitepulse_rentals(project_id)",
+    ]:
+        try:
+            db.execute(index_sql)
+        except sqlite3.OperationalError:
+            pass
+
+    _backfill_project_links(db)
+
+    # Phase 2: same belt-and-suspenders pattern for the roles/permissions
+    # tables, plus their indexes.
+    for table_sql in [
+        """CREATE TABLE IF NOT EXISTS roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            description TEXT, created_at TEXT NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS permissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL, label TEXT NOT NULL, description TEXT)""",
+        """CREATE TABLE IF NOT EXISTS role_permissions (
+            role_id INTEGER NOT NULL, permission_id INTEGER NOT NULL,
+            PRIMARY KEY (role_id, permission_id))""",
+        """CREATE TABLE IF NOT EXISTS user_roles (
+            user_id INTEGER NOT NULL, role_id INTEGER NOT NULL,
+            PRIMARY KEY (user_id, role_id))""",
+        """CREATE TABLE IF NOT EXISTS user_permission_overrides (
+            user_id INTEGER NOT NULL, permission_id INTEGER NOT NULL, state TEXT NOT NULL,
+            granted_by TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (user_id, permission_id))""",
+    ]:
+        try:
+            db.execute(table_sql)
+        except sqlite3.OperationalError:
+            pass
+
+    for index_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_role_permissions_role ON role_permissions(role_id)",
+        "CREATE INDEX IF NOT EXISTS idx_user_roles_user ON user_roles(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_user_overrides_user ON user_permission_overrides(user_id)",
+    ]:
+        try:
+            db.execute(index_sql)
+        except sqlite3.OperationalError:
+            pass
+
+    _seed_roles_and_permissions(db)
+    _backfill_user_roles(db)
 
     # Belt-and-suspenders: create departments here too, as its own
     # standalone statement, in case it didn't take earlier (e.g. an
@@ -1205,11 +1567,14 @@ def sitepulse_view_asset(asset_id):
             pass
     monthly_totals_sorted = sorted(monthly_totals.items(), reverse=True)
 
+    tracker_projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
     return render_template("sitepulse/asset.html", a=a, usage=usage, maintenance=maintenance,
                             scheduled_moves=scheduled_moves,
                             mileage_entries=mileage_entries, monthly_totals=monthly_totals_sorted,
                             status_options=SP_STATUS_OPTIONS, usage_type_options=["Internal Job", "External Rental"],
-                            today=date.today().isoformat())
+                            today=date.today().isoformat(), tracker_projects=tracker_projects)
 
 
 @app.route("/sitepulse/asset/<int:asset_id>/edit-details", methods=["POST"])
@@ -1370,9 +1735,10 @@ def sitepulse_new_usage(asset_id):
     now = datetime.utcnow().isoformat()
     photo_filename = save_photo(request.files.get("photo"))
     cur = db.execute(
-        """INSERT INTO sitepulse_usage_log (asset_id, usage_type, job_name, job_address, client,
-           out_date, duration_unit, return_date, notes, photo_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO sitepulse_usage_log (asset_id, usage_type, job_name, project_id, job_address, client,
+           out_date, duration_unit, return_date, notes, photo_filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (asset_id, request.form.get("usage_type", "Internal Job"), request.form.get("job_name", ""),
+         _clean_project_id(db, request.form.get("project_id")),
          request.form.get("job_address", ""), request.form.get("client", ""), request.form.get("out_date", ""),
          request.form.get("duration_unit", ""), request.form.get("return_date", ""), request.form.get("notes", ""),
          photo_filename, now)
@@ -1396,9 +1762,10 @@ def sitepulse_update_usage(usage_id):
     new_photo = save_photo(request.files.get("photo"))
     photo_filename = new_photo if new_photo else entry["photo_filename"]
     db.execute(
-        """UPDATE sitepulse_usage_log SET usage_type=?, job_name=?, job_address=?, client=?, out_date=?,
+        """UPDATE sitepulse_usage_log SET usage_type=?, job_name=?, project_id=?, job_address=?, client=?, out_date=?,
            duration_unit=?, return_date=?, notes=?, photo_filename=? WHERE id=?""",
         (request.form.get("usage_type", "Internal Job"), request.form.get("job_name", ""),
+         _clean_project_id(db, request.form.get("project_id")),
          request.form.get("job_address", ""), request.form.get("client", ""), request.form.get("out_date", ""),
          request.form.get("duration_unit", ""), return_date, request.form.get("notes", ""), photo_filename, usage_id)
     )
@@ -1601,14 +1968,18 @@ def sitepulse_rentals_list():
 @app.route("/sitepulse/rentals/new", methods=["GET", "POST"])
 @login_required
 def sitepulse_new_rental():
+    db = get_db()
+    tracker_projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
     if request.method == "POST":
-        db = get_db()
         now = datetime.utcnow().isoformat()
         cur = db.execute(
-            """INSERT INTO sitepulse_rentals (vendor, equipment_description, job_name, rate_amount,
+            """INSERT INTO sitepulse_rentals (vendor, equipment_description, job_name, project_id, rate_amount,
                rate_period, rented_date, due_date, notes, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request.form["vendor"], request.form["equipment_description"], request.form.get("job_name", ""),
+             _clean_project_id(db, request.form.get("project_id")),
              request.form.get("rate_amount", ""), request.form.get("rate_period", "Daily"),
              request.form["rented_date"], request.form.get("due_date", ""), request.form.get("notes", ""), now, now)
         )
@@ -1616,7 +1987,7 @@ def sitepulse_new_rental():
         db.commit()
         flash("Rental logged.")
         return redirect(url_for("sitepulse_rentals_list"))
-    return render_template("sitepulse/new_rental.html", today=date.today().isoformat())
+    return render_template("sitepulse/new_rental.html", today=date.today().isoformat(), tracker_projects=tracker_projects)
 
 
 @app.route("/sitepulse/rentals/<int:rental_id>/update", methods=["POST"])
@@ -1808,13 +2179,13 @@ def create_concrete_request(fields, requested_by):
     drilling_time = f("drilling_time") if f("drilling_required") == "Yes" else ""
 
     cur = db.execute(
-        """INSERT INTO inventory_concrete_requests (project, job_site_address, area_description,
+        """INSERT INTO inventory_concrete_requests (project, project_id, job_site_address, area_description,
            pour_date, pour_time, mix_design_psi, mix_slump, concrete_amount, truck_spacing,
            pump_type, pump_size, pump_arrival_time, lab_required, lab_time, drilling_required, drilling_time,
            requested_by, requested_signature, requested_date, ordered_by, ordered_signature,
            ordered_date, status, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (f("project"), f("job_site_address"), f("area_description"), f("pour_date"), f("pour_time"),
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (f("project"), fields.get("project_id") or None, f("job_site_address"), f("area_description"), f("pour_date"), f("pour_time"),
          f("mix_design_psi"), f("mix_slump"), f("concrete_amount"), f("truck_spacing"),
          f("pump_type"), pump_size, pump_arrival_time, f("lab_required", "No"), f("lab_time"),
          f("drilling_required", "No"), drilling_time, requested_by, f("requested_signature"),
@@ -1845,6 +2216,10 @@ CONCRETE_REQUEST_REQUIRED_FIELDS = [
 @app.route("/inventory/concrete/new", methods=["GET", "POST"])
 @login_required
 def inventory_new_concrete():
+    db = get_db()
+    tracker_projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
     if request.method == "POST":
         needs_pump = request.form.get("pump_type") in ("Ground Pump", "Overhead Pump")
         needs_lab = request.form.get("lab_required") == "Yes"
@@ -1858,11 +2233,11 @@ def inventory_new_concrete():
         missing = [f for f in required_fields if not request.form.get(f, "").strip()]
         if missing:
             flash("Please fill in every field on the form before submitting.", "error")
-            return render_template("inventory/new_concrete_request.html", today=date.today().isoformat(), form=request.form)
+            return render_template("inventory/new_concrete_request.html", today=date.today().isoformat(), form=request.form, tracker_projects=tracker_projects)
         create_concrete_request(request.form.to_dict(), current_user.name or current_user.email)
         flash("Concrete request submitted.")
         return redirect(url_for("inventory_concrete_list"))
-    return render_template("inventory/new_concrete_request.html", today=date.today().isoformat())
+    return render_template("inventory/new_concrete_request.html", today=date.today().isoformat(), tracker_projects=tracker_projects)
 
 
 def _time_minus_hours(hhmm, hours):
@@ -1984,12 +2359,13 @@ def inventory_edit_concrete(request_id):
         drilling_required_val = request.form.get("drilling_required", "No")
         drilling_time_val = request.form.get("drilling_time", "") if drilling_required_val == "Yes" else ""
         db.execute(
-            """UPDATE inventory_concrete_requests SET project=?, job_site_address=?, area_description=?,
+            """UPDATE inventory_concrete_requests SET project=?, project_id=?, job_site_address=?, area_description=?,
                pour_date=?, pour_time=?, mix_design_psi=?, mix_slump=?, concrete_amount=?, truck_spacing=?,
                pump_type=?, pump_size=?, pump_arrival_time=?, lab_required=?, lab_time=?, drilling_required=?,
                drilling_time=?, updated_at=?
                WHERE id=?""",
-            (request.form.get("project", ""), request.form.get("job_site_address", ""),
+            (request.form.get("project", ""), _clean_project_id(db, request.form.get("project_id")),
+             request.form.get("job_site_address", ""),
              request.form.get("area_description", ""), request.form["pour_date"], request.form.get("pour_time", ""),
              request.form.get("mix_design_psi", ""), request.form.get("mix_slump", ""),
              request.form.get("concrete_amount", ""), request.form.get("truck_spacing", ""),
@@ -2002,7 +2378,10 @@ def inventory_edit_concrete(request_id):
         db.commit()
         flash("Concrete request updated.")
         return redirect(url_for("inventory_view_concrete", request_id=request_id))
-    return render_template("inventory/edit_concrete_request.html", r=r, today=date.today().isoformat())
+    tracker_projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
+    return render_template("inventory/edit_concrete_request.html", r=r, today=date.today().isoformat(), tracker_projects=tracker_projects)
 
 
 @app.route("/inventory/concrete/<int:request_id>/order", methods=["GET", "POST"])
@@ -2117,17 +2496,22 @@ def _generate_pr_number(db):
 @app.route("/inventory/purchase/new", methods=["GET", "POST"])
 @login_required
 def inventory_new_purchase():
+    db = get_db()
+    tracker_projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
     if request.method == "POST":
         db = get_db()
         now = datetime.utcnow().isoformat()
         requestor_display = current_user.name or current_user.email
 
         cur = db.execute(
-            """INSERT INTO inventory_purchase_requests (pr_number, request_date, job_name,
+            """INSERT INTO inventory_purchase_requests (pr_number, request_date, job_name, project_id,
                location_description, requested_by, needed_on, source_of_supply,
                requestor_signature, requestor_date, status, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (_generate_pr_number(db), request.form["request_date"], request.form.get("job_name", ""),
+             request.form.get("project_id") or None,
              request.form.get("location_description", ""), requestor_display,
              request.form.get("needed_on", ""), request.form.get("source_of_supply", ""),
              request.form.get("requestor_signature", ""), request.form.get("requestor_date", ""),
@@ -2165,7 +2549,7 @@ def inventory_new_purchase():
         flash("Purchase request submitted.")
         return redirect(url_for("inventory_purchase_list"))
 
-    return render_template("inventory/new_purchase_request.html", today=date.today().isoformat())
+    return render_template("inventory/new_purchase_request.html", today=date.today().isoformat(), tracker_projects=tracker_projects)
 
 
 @app.route("/inventory/purchase/<int:request_id>")
@@ -2239,9 +2623,10 @@ def inventory_edit_purchase(request_id):
         return redirect(url_for("inventory_purchase_list"))
     if request.method == "POST":
         db.execute(
-            """UPDATE inventory_purchase_requests SET pr_number=?, request_date=?, job_name=?,
+            """UPDATE inventory_purchase_requests SET pr_number=?, request_date=?, job_name=?, project_id=?,
                location_description=?, needed_on=?, source_of_supply=?, updated_at=? WHERE id=?""",
             (request.form.get("pr_number", ""), request.form["request_date"], request.form.get("job_name", ""),
+             _clean_project_id(db, request.form.get("project_id")),
              request.form.get("location_description", ""), request.form.get("needed_on", ""),
              request.form.get("source_of_supply", ""), datetime.utcnow().isoformat(), request_id)
         )
@@ -2264,7 +2649,10 @@ def inventory_edit_purchase(request_id):
         flash("Purchase request updated.")
         return redirect(url_for("inventory_view_purchase", request_id=request_id))
     existing_items = db.execute("SELECT * FROM inventory_purchase_request_items WHERE purchase_request_id = ?", (request_id,)).fetchall()
-    return render_template("inventory/edit_purchase_request.html", r=r, items=existing_items)
+    tracker_projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
+    return render_template("inventory/edit_purchase_request.html", r=r, items=existing_items, tracker_projects=tracker_projects)
 
 
 @app.route("/inventory/purchase/<int:request_id>/status", methods=["POST"])
@@ -2434,18 +2822,26 @@ def gather_business_snapshot():
             lines.append(f"  - {a['name']}: {a['status']}" + (f" @ {a['location']}" if a["location"] else ""))
 
     open_concrete = db.execute(
-        "SELECT project, pour_date, status FROM inventory_concrete_requests WHERE status != 'Completed' ORDER BY pour_date"
+        """SELECT c.project, c.pour_date, c.status, tp.client AS linked_client
+           FROM inventory_concrete_requests c
+           LEFT JOIN tracker_projects tp ON tp.id = c.project_id
+           WHERE c.status != 'Completed' ORDER BY c.pour_date"""
     ).fetchall()
     lines.append(f"\nCONCRETE REQUESTS (open, {len(open_concrete)}):")
     for r in open_concrete[:15]:
-        lines.append(f"  - {r['project'] or 'Untitled'}: {r['status']}, pour {r['pour_date'] or 'TBD'}")
+        client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
+        lines.append(f"  - {r['project'] or 'Untitled'}{client_note}: {r['status']}, pour {r['pour_date'] or 'TBD'}")
 
     open_purchase = db.execute(
-        "SELECT job_name, needed_on, status FROM inventory_purchase_requests WHERE status != 'Completed' ORDER BY needed_on"
+        """SELECT p.job_name, p.needed_on, p.status, tp.client AS linked_client
+           FROM inventory_purchase_requests p
+           LEFT JOIN tracker_projects tp ON tp.id = p.project_id
+           WHERE p.status != 'Completed' ORDER BY p.needed_on"""
     ).fetchall()
     lines.append(f"\nPURCHASE REQUESTS (open, {len(open_purchase)}):")
     for r in open_purchase[:15]:
-        lines.append(f"  - {r['job_name'] or 'Untitled'}: {r['status']}, needed {r['needed_on'] or 'TBD'}")
+        client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
+        lines.append(f"  - {r['job_name'] or 'Untitled'}{client_note}: {r['status']}, needed {r['needed_on'] or 'TBD'}")
 
     try:
         projects = db.execute(
@@ -2591,6 +2987,168 @@ def _build_atlas_system_prompt(snapshot, fields):
     )
 
 
+class ToolResult:
+    """What every tool handler's outcome gets wrapped into before it's
+    ever seen by execute_tool's caller. Atlas never sees a raw exception,
+    a raw DB row, or a raw traceback -- only this."""
+    def __init__(self, success, data=None, error=None):
+        self.success = success
+        self.data = data
+        self.error = error
+
+    def to_dict(self):
+        return {"success": self.success, "data": self.data, "error": self.error}
+
+
+class AtlasTool:
+    """One registered Atlas capability. `parameters` is a light schema:
+    {name: {"type": "string"|"integer"|"number", "required": bool, "enum": [...]}}.
+    `permission` is the *manual* permission a human doing this through the
+    UI would need; `atlas_permission` is the separate Atlas-specific one --
+    execute_tool requires BOTH, which is the mechanism that makes "a user
+    can do X manually but not hand it to Atlas, or vice versa" actually
+    enforced rather than just a design intention.
+    """
+    def __init__(self, name, description, parameters, permission, atlas_permission,
+                 kind, handler, confirm=None):
+        self.name = name
+        self.description = description
+        self.parameters = parameters or {}
+        self.permission = permission
+        self.atlas_permission = atlas_permission
+        self.kind = kind  # "read" | "write"
+        self.confirm = confirm if confirm is not None else (kind == "write")
+        self.handler = handler
+
+
+ATLAS_TOOLS = {}
+
+
+def register_tool(name, description, parameters, permission, atlas_permission, kind, handler, confirm=None):
+    """The only way a capability becomes callable by Atlas. Nothing else
+    -- no raw SQL, no arbitrary Python, no route dispatch -- is ever
+    reachable from the model's output. If it's not in ATLAS_TOOLS, it
+    does not run."""
+    ATLAS_TOOLS[name] = AtlasTool(name, description, parameters, permission, atlas_permission, kind, handler, confirm)
+
+
+def _validate_tool_params(tool, raw_params):
+    """Minimal but real schema enforcement: every required parameter must
+    be present and non-empty; every provided parameter must be declared
+    on the tool (unknown keys are dropped, not passed through); enum
+    fields must match one of the declared values. Returns (clean_params,
+    error_message_or_None).
+    """
+    if not isinstance(raw_params, dict):
+        return None, "parameters must be an object"
+    clean = {}
+    for pname, spec in tool.parameters.items():
+        value = raw_params.get(pname)
+        required = spec.get("required", False)
+        if (value is None or value == "") and required:
+            return None, f"missing required parameter: {pname}"
+        if value is None or value == "":
+            continue
+        enum = spec.get("enum")
+        if enum and value not in enum:
+            return None, f"invalid value for {pname}: must be one of {enum}"
+        ptype = spec.get("type", "string")
+        if ptype == "integer":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                return None, f"invalid value for {pname}: must be an integer"
+        clean[pname] = value
+    return clean, None
+
+
+def execute_tool(tool_name, raw_params, user, confirmed=False):
+    """The single centralized gateway every Atlas action must pass
+    through -- this is what Phase 2's authorization requirement actually
+    means in code. Every call is validated, permission-checked against
+    BOTH the manual and Atlas-specific permission, confirmation-gated if
+    it's a write, executed, and logged -- in that order, every time, with
+    no bypass path. The parser in stream_atlas_turn never calls a
+    handler directly; it only ever calls this.
+    """
+    tool = ATLAS_TOOLS.get(tool_name)
+    if not tool:
+        log_activity("atlas", "tool_call", 0, "atlas_unknown_tool", new_value=tool_name)
+        get_db().commit()
+        return ToolResult(False, error=f"unknown tool: {tool_name}")
+
+    clean_params, err = _validate_tool_params(tool, raw_params or {})
+    if err:
+        log_activity("atlas", "tool_call", 0, "atlas_validation_failed", field=tool_name, new_value=err)
+        get_db().commit()
+        return ToolResult(False, error=err)
+
+    manual_ok = user_has_permission(user, tool.permission)
+    atlas_ok = user_has_permission(user, tool.atlas_permission)
+    if not (manual_ok and atlas_ok):
+        log_activity("atlas", "tool_call", 0, "atlas_denied", field=tool_name,
+                      new_value=f"manual_ok={manual_ok} atlas_ok={atlas_ok}")
+        get_db().commit()
+        return ToolResult(False, error="not permitted")
+
+    if tool.kind == "write" and tool.confirm and not confirmed:
+        log_activity("atlas", "tool_call", 0, "atlas_unconfirmed", field=tool_name)
+        get_db().commit()
+        return ToolResult(False, error="confirmation required")
+
+    try:
+        data = tool.handler(user=user, **clean_params)
+    except Exception as e:
+        log_activity("atlas", "tool_call", 0, "atlas_error", field=tool_name, new_value=str(e))
+        get_db().commit()
+        return ToolResult(False, error="something went wrong running that")
+
+    action_label = f"atlas_{tool.kind}_{tool_name}"
+    entity_id = data.get("id") if isinstance(data, dict) else 0
+    log_activity("atlas", tool_name, entity_id or 0, action_label, new_value=str(clean_params))
+    get_db().commit()
+    return ToolResult(True, data=data)
+
+
+def _tool_create_concrete_request(user, **fields):
+    """Handler for the 'create_concrete_request' tool -- a thin wrapper
+    around the exact same create_concrete_request() the web form has
+    always used. No new insert logic, no new validation logic; only the
+    call site changed (see stream_atlas_turn's submit branch)."""
+    submitted_id = create_concrete_request(fields, user.name or user.email)
+    return {"id": submitted_id, "submitted_id": submitted_id}
+
+
+register_tool(
+    name="create_concrete_request",
+    description="Submit a new concrete pour request once every required field has been collected and the person has confirmed.",
+    parameters={
+        "project": {"type": "string", "required": True},
+        "project_id": {"type": "integer", "required": False},
+        "job_site_address": {"type": "string", "required": False},
+        "area_description": {"type": "string", "required": False},
+        "pour_date": {"type": "string", "required": True},
+        "pour_time": {"type": "string", "required": False},
+        "mix_design_psi": {"type": "string", "required": False},
+        "mix_slump": {"type": "string", "required": False},
+        "concrete_amount": {"type": "string", "required": False},
+        "truck_spacing": {"type": "string", "required": False},
+        "pump_type": {"type": "string", "required": False},
+        "pump_size": {"type": "string", "required": False},
+        "pump_arrival_time": {"type": "string", "required": False},
+        "lab_required": {"type": "string", "required": False},
+        "lab_time": {"type": "string", "required": False},
+        "drilling_required": {"type": "string", "required": False},
+        "drilling_time": {"type": "string", "required": False},
+    },
+    permission="action:sitepulse:manage",
+    atlas_permission="atlas:create_requests",
+    kind="write",
+    confirm=True,
+    handler=_tool_create_concrete_request,
+)
+
+
 def stream_atlas_turn(user_text, draft):
     """Streams one turn of the assistant as an SSE generator. Yields
     'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
@@ -2632,6 +3190,17 @@ def stream_atlas_turn(user_text, draft):
             stream=True, timeout=60,
         )
         resp.raise_for_status()
+        # One continuous pass over the stream, all the way to the end --
+        # breaking out early to "drain the rest" in a second loop was the
+        # bug that caused this: requests' iter_lines() buffers whatever
+        # it's already pulled off the socket inside that generator's own
+        # frame, and abandoning the generator via `break` throws away
+        # anything sitting in that buffer, up to and including the
+        # closing </state> tag. That silently truncated the state block,
+        # so the model would say "confirming submission" while the
+        # backend never actually saw action=submit and nothing was ever
+        # created -- exactly the "I don't actually have the ability to
+        # submit" contradiction on the next turn.
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
                 continue
@@ -2651,6 +3220,9 @@ def stream_atlas_turn(user_text, draft):
 
             # Only stream out text we're sure isn't (part of) the state
             # tag -- hold back a small trailing window until we know.
+            # Once the tag shows up, stop emitting new deltas but keep
+            # looping so the rest of the stream (the full state JSON and
+            # its closing tag) still gets read and accumulated.
             tag_idx = raw_text.find(STATE_TAG)
             if tag_idx != -1:
                 safe_upto = tag_idx
@@ -2661,29 +3233,10 @@ def stream_atlas_turn(user_text, draft):
                 if new_chunk:
                     yield f"data: {json.dumps({'type': 'delta', 'text': new_chunk})}\n\n"
                     visible_sent = raw_text[:safe_upto]
-            if tag_idx != -1:
-                break
     except requests.exceptions.RequestException as e:
         yield f"data: {json.dumps({'type': 'delta', 'text': f'I hit an error talking to Claude: {str(e)}.'})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
         return
-
-    # Drain any remaining stream (the state block itself) without emitting it.
-    try:
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            payload = line[len("data:"):].strip()
-            if payload in ("", "[DONE]"):
-                continue
-            try:
-                event = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") == "content_block_delta":
-                raw_text += event.get("delta", {}).get("text", "")
-    except requests.exceptions.RequestException:
-        pass
 
     spoken, state = _parse_assistant_reply(raw_text)
     if not visible_sent and spoken:
@@ -2716,8 +3269,14 @@ def stream_atlas_turn(user_text, draft):
         missing = [f for f in required_now if not str(fields.get(f, "")).strip()]
         if not missing:
             fields["requested_date"] = date.today().isoformat()
-            submitted_id = create_concrete_request(fields, current_user.name or current_user.email)
-            new_draft = {"mode": "chat", "fields": {}, "history": []}
+            result = execute_tool("create_concrete_request", fields, current_user, confirmed=True)
+            if result.success:
+                submitted_id = result.data.get("submitted_id")
+                new_draft = {"mode": "chat", "fields": {}, "history": []}
+            else:
+                extra = f" Actually, I couldn't submit that -- {result.error}."
+                yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
+                spoken += extra
         else:
             extra = " Actually, I'm still missing something required -- let's finish that first."
             yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
@@ -3152,13 +3711,17 @@ def product_intelligence():
 
     tomorrow = (today + timedelta(days=1)).isoformat()
     unordered_pours = db.execute(
-        "SELECT id, project FROM inventory_concrete_requests WHERE pour_date = ? AND status = 'Submitted'",
+        """SELECT c.id, c.project, c.project_id, tp.name AS linked_project_name
+           FROM inventory_concrete_requests c
+           LEFT JOIN tracker_projects tp ON tp.id = c.project_id
+           WHERE c.pour_date = ? AND c.status = 'Submitted'""",
         (tomorrow,)
     ).fetchall()
     for c in unordered_pours:
+        display_name = c["linked_project_name"] or c["project"]
         attention_items.append({
             "priority": "med", "title": "Concrete pour tomorrow \u2014 no order placed",
-            "meta": f"SITEPULSE \u00b7 {c['project']}", "action_label": "Open",
+            "meta": f"SITEPULSE \u00b7 {display_name}", "action_label": "Open",
             "url": url_for("inventory_concrete_list")
         })
 
@@ -3433,6 +3996,94 @@ def admin_users():
     return render_template("requests/admin_users.html", users=users, department_options=department_options)
 
 
+@app.route("/admin/users/<int:user_id>/permissions", methods=["GET", "POST"])
+@login_required
+def admin_user_permissions(user_id):
+    # Deliberately gated with the same existing is_admin() hardcoded
+    # check every other admin-only page already uses -- Phase 2 does not
+    # switch real route gating over to the new system yet, per the
+    # "preserve existing access during migration" requirement.
+    if not is_admin():
+        flash("This page is restricted to admins.", "error")
+        return redirect(url_for("home"))
+
+    db = get_db()
+    target_user = db.execute("SELECT id, name, email FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target_user:
+        flash("User not found.", "error")
+        return redirect(url_for("admin_users"))
+
+    if request.method == "POST":
+        action = request.form.get("action")
+        now = datetime.utcnow().isoformat()
+
+        if action == "assign_role":
+            role_id = request.form.get("role_id")
+            if role_id:
+                db.execute("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)", (user_id, role_id))
+                db.commit()
+                flash("Role assigned.")
+
+        elif action == "remove_role":
+            role_id = request.form.get("role_id")
+            db.execute("DELETE FROM user_roles WHERE user_id = ? AND role_id = ?", (user_id, role_id))
+            db.commit()
+            flash("Role removed.")
+
+        elif action == "set_override":
+            permission_id = request.form.get("permission_id")
+            state = request.form.get("state")  # 'grant' or 'deny'
+            if permission_id and state in ("grant", "deny"):
+                db.execute(
+                    """INSERT INTO user_permission_overrides (user_id, permission_id, state, granted_by, updated_at)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(user_id, permission_id) DO UPDATE SET state=excluded.state, granted_by=excluded.granted_by, updated_at=excluded.updated_at""",
+                    (user_id, permission_id, state, current_user.email, now)
+                )
+                db.commit()
+                flash(f"Permission {state}ed.")
+
+        elif action == "remove_override":
+            permission_id = request.form.get("permission_id")
+            db.execute("DELETE FROM user_permission_overrides WHERE user_id = ? AND permission_id = ?", (user_id, permission_id))
+            db.commit()
+            flash("Override removed -- back to role-inherited.")
+
+        return redirect(url_for("admin_user_permissions", user_id=user_id))
+
+    all_roles = db.execute("SELECT id, name, description FROM roles ORDER BY name").fetchall()
+    user_role_ids = {r["role_id"] for r in db.execute("SELECT role_id FROM user_roles WHERE user_id = ?", (user_id,)).fetchall()}
+    overrides = {r["permission_id"]: r["state"] for r in db.execute(
+        "SELECT permission_id, state FROM user_permission_overrides WHERE user_id = ?", (user_id,)
+    ).fetchall()}
+    role_granted_perm_ids = set()
+    for rid in user_role_ids:
+        for r in db.execute("SELECT permission_id FROM role_permissions WHERE role_id = ?", (rid,)).fetchall():
+            role_granted_perm_ids.add(r["permission_id"])
+
+    all_permissions = db.execute("SELECT id, key, category, label, description FROM permissions ORDER BY category, label").fetchall()
+    permissions_by_category = {}
+    for p in all_permissions:
+        state = overrides.get(p["id"])
+        if state == "grant":
+            effective, source = True, "granted"
+        elif state == "deny":
+            effective, source = False, "denied"
+        elif p["id"] in role_granted_perm_ids:
+            effective, source = True, "inherited"
+        else:
+            effective, source = False, "inherited"
+        permissions_by_category.setdefault(p["category"], []).append({
+            "id": p["id"], "key": p["key"], "label": p["label"], "description": p["description"],
+            "effective": effective, "source": source,
+        })
+
+    return render_template(
+        "requests/admin_user_permissions.html", target_user=target_user, all_roles=all_roles,
+        user_role_ids=user_role_ids, permissions_by_category=permissions_by_category
+    )
+
+
 def tr_call_claude(prompt, max_tokens=800):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
 
@@ -3607,6 +4258,13 @@ def tracker_delete_project(project_id):
                  old_value=project["name"] if project else None)
     db.execute("DELETE FROM tracker_quotes WHERE project_id = ?", (project_id,))
     db.execute("DELETE FROM tracker_docs WHERE project_id = ?", (project_id,))
+    # Phase 1: unlink (never cascade-delete) anything referencing this
+    # project from other modules -- the concrete request, PO, rental, or
+    # usage log entry is still a real record of work that happened; it
+    # just stops being tied to a project that no longer exists. The
+    # original free-text value is untouched either way.
+    for table in ("inventory_concrete_requests", "inventory_purchase_requests", "sitepulse_usage_log", "sitepulse_rentals"):
+        db.execute(f"UPDATE {table} SET project_id = NULL WHERE project_id = ?", (project_id,))
     db.execute("DELETE FROM tracker_projects WHERE id = ?", (project_id,))
     db.commit()
     flash("Project deleted.")

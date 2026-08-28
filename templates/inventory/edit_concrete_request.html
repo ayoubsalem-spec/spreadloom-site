@@ -7,6 +7,13 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <h3 style="font-size:15px; color:var(--gold); margin-bottom:6px;">Project Info</h3>
         <label>Project</label><input type="text" name="project" value="{{ r['project'] }}" required autofocus>
+        <label style="margin-top:10px;">Link to a Project Hunt project (optional)</label>
+        <select name="project_id">
+            <option value="">&mdash; Not linked / external job &mdash;</option>
+            {% for p in tracker_projects %}
+            <option value="{{ p['id'] }}" {{ 'selected' if r['project_id'] == p['id'] }}>{{ p['name'] }}{% if p['client'] %} ({{ p['client'] }}){% endif %}</option>
+            {% endfor %}
+        </select>
         <label>Job Site Address</label><input type="text" name="job_site_address" value="{{ r['job_site_address'] or '' }}" data-remember="job_site_address">
         <label>Description of Area to Pour</label><input type="text" name="area_description" value="{{ r['area_description'] or '' }}">
 

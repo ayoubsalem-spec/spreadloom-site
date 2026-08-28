@@ -14,6 +14,18 @@
             <div style="flex:1;"><label>Location / Description of Use</label><input type="text" name="location_description" data-remember="location_description"></div>
         </div>
         <div class="form-row">
+            <div style="flex:1;">
+                <label>Link to a Project Hunt project (optional)</label>
+                <select name="project_id">
+                    <option value="">&mdash; Not linked / external job &mdash;</option>
+                    {% for p in tracker_projects %}
+                    <option value="{{ p['id'] }}">{{ p['name'] }}{% if p['client'] %} ({{ p['client'] }}){% endif %}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div style="flex:1;"></div>
+        </div>
+        <div class="form-row">
             <div style="flex:1;"><label>Requested By</label><p style="margin:0; padding:11px 0; color:var(--text);"><strong>{{ current_user.name or current_user.email }}</strong></p></div>
             <div style="flex:1;"><label>Needed On</label><input type="date" name="needed_on"></div>
         </div>

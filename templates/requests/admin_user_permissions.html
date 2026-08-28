@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="{{ url_for('admin_users') }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; Users &amp; Departments</a>
+<h1>{{ target_user['name'] or target_user['email'] }}</h1>
+<p class="sub" style="margin-bottom:24px;">{{ target_user['email'] }}</p>
+
+<div style="margin-bottom:32px; padding:16px; border:1px solid #2a2a2a; border-radius:8px;">
+    <h3 style="margin-top:0;">Roles</h3>
+    <p class="sub" style="margin-bottom:12px;">A role grants its permissions to this user automatically. A user can hold more than one role.</p>
+    <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;">
+        {% for r in all_roles %}
+        <div style="display:flex; align-items:center; gap:6px; padding:6px 10px; border:1px solid #2a2a2a; border-radius:6px; {{ 'background:rgba(94,234,212,0.08); border-color:#5EEAD4;' if r['id'] in user_role_ids }}">
+            <span>{{ r['name'] }}</span>
+            <form method="POST" style="display:inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="role_id" value="{{ r['id'] }}">
+                {% if r['id'] in user_role_ids %}
+                <input type="hidden" name="action" value="remove_role">
+                <button type="submit" class="btn btn-sm" style="padding:2px 8px;" title="Remove role">&times;</button>
+                {% else %}
+                <input type="hidden" name="action" value="assign_role">
+                <button type="submit" class="btn btn-sm" style="padding:2px 8px;" title="Assign role">+</button>
+                {% endif %}
+            </form>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<h3>Permissions</h3>
+<p class="sub" style="margin-bottom:16px;">
+    <span style="color:#7E93A8;">Inherited</span> comes from a role above.
+    <span style="color:#5EEAD4;">Granted</span> and <span style="color:#F87171;">Denied</span> are explicit overrides for this person only -- an override always wins over their role.
+</p>
+
+{% for category, perms in permissions_by_category.items() %}
+<div style="margin-bottom:24px; padding:16px; border:1px solid #2a2a2a; border-radius:8px;">
+    <h4 style="margin-top:0; text-transform:capitalize;">{{ category }}</h4>
+    <table>
+        <tr><th>Permission</th><th>Status</th><th>Change</th></tr>
+        {% for p in perms %}
+        <tr>
+            <td>
+                {{ p['label'] }}
+                {% if p['description'] %}<div class="sub" style="font-size:12px;">{{ p['description'] }}</div>{% endif %}
+            </td>
+            <td>
+                {% if p['source'] == 'granted' %}
+                <span style="color:#5EEAD4; font-weight:600;">Granted (override)</span>
+                {% elif p['source'] == 'denied' %}
+                <span style="color:#F87171; font-weight:600;">Denied (override)</span>
+                {% elif p['effective'] %}
+                <span style="color:#7E93A8;">Inherited &mdash; On</span>
+                {% else %}
+                <span style="color:#7E93A8;">Inherited &mdash; Off</span>
+                {% endif %}
+            </td>
+            <td>
+                <div style="display:flex; gap:6px;">
+                    <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="set_override">
+                        <input type="hidden" name="permission_id" value="{{ p['id'] }}">
+                        <input type="hidden" name="state" value="grant">
+                        <button type="submit" class="btn btn-sm" {{ 'disabled' if p['source'] == 'granted' }}>Grant</button>
+                    </form>
+                    <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="set_override">
+                        <input type="hidden" name="permission_id" value="{{ p['id'] }}">
+                        <input type="hidden" name="state" value="deny">
+                        <button type="submit" class="btn btn-sm" {{ 'disabled' if p['source'] == 'denied' }}>Deny</button>
+                    </form>
+                    {% if p['source'] in ('granted', 'denied') %}
+                    <form method="POST"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="remove_override">
+                        <input type="hidden" name="permission_id" value="{{ p['id'] }}">
+                        <button type="submit" class="btn btn-sm">Clear override</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+</div>
+{% endfor %}
+{% endblock %}

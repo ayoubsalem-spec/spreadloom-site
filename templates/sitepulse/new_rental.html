@@ -10,6 +10,13 @@
         <input type="text" name="vendor" required>
         <label>Job / Site</label>
         <input type="text" name="job_name">
+        <label style="margin-top:10px;">Link to a Project Hunt project (optional)</label>
+        <select name="project_id">
+            <option value="">&mdash; Not linked / external job &mdash;</option>
+            {% for p in tracker_projects %}
+            <option value="{{ p['id'] }}">{{ p['name'] }}{% if p['client'] %} ({{ p['client'] }}){% endif %}</option>
+            {% endfor %}
+        </select>
         <div class="form-row">
             <div style="flex:1;"><label>Rate</label><input type="text" name="rate_amount"></div>
             <div style="flex:1;">

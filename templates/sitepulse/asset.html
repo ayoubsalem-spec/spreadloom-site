@@ -109,6 +109,13 @@
             </select>
             <label>Job Name</label>
             <input type="text" name="job_name">
+            <label>Link to a Project Hunt project (optional)</label>
+            <select name="project_id">
+                <option value="">&mdash; Not linked / external job &mdash;</option>
+                {% for p in tracker_projects %}
+                <option value="{{ p['id'] }}">{{ p['name'] }}{% if p['client'] %} ({{ p['client'] }}){% endif %}</option>
+                {% endfor %}
+            </select>
             <label>Job Address</label>
             <input type="text" name="job_address">
             <label>Client (leave blank for internal jobs)</label>
@@ -182,6 +189,13 @@
                         </select>
                         <label>Job Name</label>
                         <input type="text" name="job_name" value="{{ u['job_name'] or '' }}">
+                        <label>Link to a Project Hunt project (optional)</label>
+                        <select name="project_id">
+                            <option value="">&mdash; Not linked / external job &mdash;</option>
+                            {% for p in tracker_projects %}
+                            <option value="{{ p['id'] }}" {{ 'selected' if u['project_id'] == p['id'] }}>{{ p['name'] }}{% if p['client'] %} ({{ p['client'] }}){% endif %}</option>
+                            {% endfor %}
+                        </select>
                         <label>Job Address</label>
                         <input type="text" name="job_address" value="{{ u['job_address'] or '' }}">
                         <label>Client</label>
