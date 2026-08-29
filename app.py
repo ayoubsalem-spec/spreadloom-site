@@ -1,5 +1,5 @@
 """
-BuildIQ -- Darycet's unified technology platform.
+BuildIQ -- Darycet unified technology platform.
 
 One Flask app, one login, one database. Sections are prefixed by URL path
 rather than split into separate Flask Blueprint objects, to keep this first
