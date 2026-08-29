@@ -413,15 +413,28 @@ def is_project_hunt_allowed():
 
 
 def is_atlas_allowed():
-    return current_user.is_authenticated and current_user.email in ATLAS_ACCESS_EMAILS
+    # Phase 3A migration: now checks the real permission system first,
+    # OR'd with the original hardcoded list so nobody currently authorized
+    # can ever lose access during the transition. Once parity is proven
+    # (see scripts/permission_parity_check.py) the OR fallback can be
+    # dropped in a later, separately-approved step -- not yet.
+    if not current_user.is_authenticated:
+        return False
+    return user_has_permission(current_user, "module:atlas:view") or current_user.email in ATLAS_ACCESS_EMAILS
 
 
 def is_procurement():
-    return current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS
+    # Phase 3A migration -- same OR-with-legacy pattern as is_atlas_allowed().
+    if not current_user.is_authenticated:
+        return False
+    return user_has_permission(current_user, "action:sitepulse:place_order") or current_user.email in PROCUREMENT_EMAILS
 
 
 def is_whatsapp_admin():
-    return current_user.is_authenticated and current_user.email in WHATSAPP_ADMIN_EMAILS
+    # Phase 3A migration -- same OR-with-legacy pattern as is_atlas_allowed().
+    if not current_user.is_authenticated:
+        return False
+    return user_has_permission(current_user, "action:team_admin:manage_whatsapp") or current_user.email in WHATSAPP_ADMIN_EMAILS
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -638,6 +651,15 @@ PERMISSION_CATALOG = [
     ("action:product_intelligence:manage", "action", "Manage Product Intelligence"),
     ("action:team_admin:manage_users", "action", "Manage Users"),
     ("action:team_admin:manage_whatsapp", "action", "Manage WhatsApp Groups"),
+    # -- Phase 3A additions: these three existed as gaps in the Phase 2
+    # audit (is_admin()-gated routes with no specific matching key). Not
+    # wired into any route yet -- that migration is a later, separate
+    # step. Added now, seeded, and backfilled onto Administrator so the
+    # model is ready when that migration happens, with zero behavior
+    # change today.
+    ("action:system_data:manage", "action", "Manage System Data (Backup / Restore / Import / Export)"),
+    ("action:activity_log:view", "action", "View Activity Logs"),
+    ("action:sitepulse:manage_inventory", "action", "Manage SitePulse Inventory (incl. deletion)"),
     # -- Atlas-specific: separate from the manual action permissions above
     # on purpose (a person can be allowed to do something manually
     # without allowing Atlas to do it on their behalf, or vice versa) --
@@ -700,6 +722,26 @@ def _seed_roles_and_permissions(db):
             perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
             if perm_row:
                 db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (role_id, perm_row[0]))
+
+
+def _grant_administrator_new_permissions(db, keys):
+    """_seed_roles_and_permissions only wires up a role's permissions the
+    FIRST time that role has zero rows -- intentional, so an admin's
+    hand-edits from the UI are never silently overwritten. That means a
+    permission key added to the catalog after a role was first seeded
+    (like the three Phase 3A additions above) would never actually reach
+    Administrator without this. Idempotent, additive-only, and scoped to
+    exactly the keys passed in -- it can't remove or change anything an
+    admin has already configured, and every existing admin keeps every
+    permission they already had."""
+    role_row = db.execute("SELECT id FROM roles WHERE name = 'Administrator'").fetchone()
+    if not role_row:
+        return
+    role_id = role_row[0]
+    for key in keys:
+        perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
+        if perm_row:
+            db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (role_id, perm_row[0]))
 
 
 def _backfill_user_roles(db):
@@ -1194,6 +1236,11 @@ def init_db():
             pass
 
     _seed_roles_and_permissions(db)
+    _grant_administrator_new_permissions(db, [
+        "action:system_data:manage",
+        "action:activity_log:view",
+        "action:sitepulse:manage_inventory",
+    ])
     _backfill_user_roles(db)
 
     # Belt-and-suspenders: create departments here too, as its own
@@ -3451,6 +3498,20 @@ def assistant_reset():
 
 REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
 CONCRETE_STATUS_OPTIONS = ["Submitted", "Scheduled", "Completed"]
+# Not previously a named constant -- inventory_update_purchase_status /
+# inventory_place_purchase_order use these two literal strings directly.
+# Naming it here doesn't change behavior; it just gives the Phase 3A
+# Atlas tool (and anything else that needs it) one real source instead
+# of a second guess at the vocabulary.
+PURCHASE_STATUS_OPTIONS = ["Submitted", "Scheduled", "Completed"]
+
+# Phase 3A: the 7 read tools + get_attention_items, and the shared
+# attention engine they (and eventually Product Intelligence) both use.
+# See intelligence.py for what each one actually does. Placed here,
+# after SP_STATUS_OPTIONS/PURCHASE_STATUS_OPTIONS/register_tool/get_db/
+# user_has_permission all already exist in this module.
+import intelligence
+intelligence.register_atlas_tools(register_tool, SP_STATUS_OPTIONS, PURCHASE_STATUS_OPTIONS)
 
 
 def _log_request_status(db, request_id, status, changed_by, release_note=None):
