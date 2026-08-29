@@ -13,12 +13,14 @@
             <td>{{ u['created_at'][:10] if u['created_at'] else '\u2014' }}</td>
             <td>
                 <div style="display:flex; gap:8px;">
+                    {% if has_manage_users_access %}
                     <a href="{{ url_for('admin_user_permissions', user_id=u['id']) }}" class="btn btn-sm">Permissions</a>
                     <form method="POST" action="{{ url_for('delete_team_member', user_id=u['id']) }}" style="margin:0;"
                           onsubmit="return confirm('Remove ' + '{{ u['email'] }}' + '? They will need to sign up again from scratch.');">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <button type="submit" class="btn btn-sm" style="color:var(--red); border-color:var(--red);">Remove (let them re-signup)</button>
                     </form>
+                    {% endif %}
                 </div>
             </td>
         </tr>

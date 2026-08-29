@@ -25,6 +25,7 @@ import base64
 import io
 import requests
 import markdown as md_lib
+import bleach
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from reportlab.lib.pagesizes import letter
@@ -38,7 +39,39 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
+
+# ---------------------------------------------------------------------------
+# SECRET_KEY hardening -- production must never silently start with a
+# known/default secret. APP_ENV defaults to "production" (fail-closed) so
+# a deployment that forgets to set it is treated as production, not as an
+# accidental opt-in to the insecure dev fallback. Only an explicit
+# APP_ENV=development (or dev/test/testing, for CI/local test runs)
+# unlocks the dev-only fallback key below.
+# ---------------------------------------------------------------------------
+APP_ENV = os.environ.get("APP_ENV", "production").strip().lower()
+_DEV_ENVS = ("development", "dev", "test", "testing")
+_DEV_ONLY_SECRET_KEY = "dev-only-insecure-secret-do-not-use-in-production"
+
+_secret_key = os.environ.get("SECRET_KEY", "").strip()
+if not _secret_key:
+    if APP_ENV in _DEV_ENVS:
+        _secret_key = _DEV_ONLY_SECRET_KEY
+    else:
+        raise RuntimeError(
+            "SECRET_KEY is not set. Refusing to start with APP_ENV="
+            f"'{APP_ENV}' and no secret key configured. Set the SECRET_KEY "
+            "environment variable, or set APP_ENV=development for local "
+            "development/testing only (never in production)."
+        )
+elif _secret_key == _DEV_ONLY_SECRET_KEY and APP_ENV not in _DEV_ENVS:
+    # Someone explicitly set SECRET_KEY to the known dev value outside a
+    # dev/test environment -- treat that the same as "no secret set".
+    raise RuntimeError(
+        "SECRET_KEY is set to the known development-only value while "
+        f"APP_ENV='{APP_ENV}'. Refusing to start. Set a real SECRET_KEY."
+    )
+app.secret_key = _secret_key
+del _secret_key  # never leave the resolved value sitting in a module-level name
 csrf = CSRFProtect(app)
 
 # Atlas conversation state lives here, server-side, keyed by a small token
@@ -409,32 +442,39 @@ WHATSAPP_ADMIN_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", TEMP_TEST_A
 
 
 def is_project_hunt_allowed():
-    return current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS
+    # RUNTIME AUTHORIZATION -- resolves purely through user_has_permission(),
+    # which itself implements explicit-deny > explicit-grant > role > false.
+    # FULL_ACCESS_EMAILS is never consulted here; it is read-only migration/
+    # backfill data (see _backfill_user_roles()). A legacy-listed person's
+    # actual access comes from the role that was backfilled onto their
+    # account -- if that grant is ever explicitly denied in the Permissions
+    # Center, this function must return False even though their email is
+    # still in the legacy list.
+    if not current_user.is_authenticated:
+        return False
+    return user_has_permission(current_user, "module:project_hunt:view")
 
 
 def is_atlas_allowed():
-    # Phase 3A migration: now checks the real permission system first,
-    # OR'd with the original hardcoded list so nobody currently authorized
-    # can ever lose access during the transition. Once parity is proven
-    # (see scripts/permission_parity_check.py) the OR fallback can be
-    # dropped in a later, separately-approved step -- not yet.
+    # RUNTIME AUTHORIZATION -- same as is_project_hunt_allowed() above:
+    # user_has_permission() alone, no legacy-list fallback.
     if not current_user.is_authenticated:
         return False
-    return user_has_permission(current_user, "module:atlas:view") or current_user.email in ATLAS_ACCESS_EMAILS
+    return user_has_permission(current_user, "module:atlas:view")
 
 
 def is_procurement():
-    # Phase 3A migration -- same OR-with-legacy pattern as is_atlas_allowed().
+    # RUNTIME AUTHORIZATION -- same as is_project_hunt_allowed() above.
     if not current_user.is_authenticated:
         return False
-    return user_has_permission(current_user, "action:sitepulse:place_order") or current_user.email in PROCUREMENT_EMAILS
+    return user_has_permission(current_user, "action:sitepulse:place_order")
 
 
 def is_whatsapp_admin():
-    # Phase 3A migration -- same OR-with-legacy pattern as is_atlas_allowed().
+    # RUNTIME AUTHORIZATION -- same as is_project_hunt_allowed() above.
     if not current_user.is_authenticated:
         return False
-    return user_has_permission(current_user, "action:team_admin:manage_whatsapp") or current_user.email in WHATSAPP_ADMIN_EMAILS
+    return user_has_permission(current_user, "action:team_admin:manage_whatsapp")
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -456,16 +496,66 @@ def close_db(exception):
 
 
 def is_admin():
+    """MIGRATION/BACKFILL ONLY -- not called anywhere in the runtime
+    authorization path. Reads the legacy list directly; used only by
+    _backfill_user_roles() (to decide which role to grant) and
+    _is_protected_admin_account() (a data-protection rule, not an
+    access grant -- see its docstring). If you're adding a new route
+    check, use _authorized()/user_has_permission() instead, never this."""
     return current_user.is_authenticated and current_user.email in ADMIN_EMAILS
+
+
+def _authorized(permission_key):
+    """RUNTIME AUTHORIZATION for every migrated route below. Resolves
+    purely through user_has_permission() -- explicit deny > explicit
+    grant > inherited role > false. Does NOT consult is_admin() or any
+    other legacy list. A legacy admin's access exists only because
+    _backfill_user_roles() granted them the Administrator role (or
+    equivalent); if that grant is ever explicitly denied for a specific
+    permission in the Permissions Center, this returns False for that
+    permission even for someone whose email is still in ADMIN_EMAILS."""
+    return user_has_permission(current_user, permission_key)
+
+
+
+def _is_protected_admin_account(user_row):
+    """A target account is protected from deletion if it's in the legacy
+    ADMIN_EMAILS list OR holds the Administrator role in the new system --
+    covers an admin created purely through the new system too, not just
+    the hardcoded list."""
+    if user_row["email"] in ADMIN_EMAILS:
+        return True
+    db = get_db()
+    row = db.execute(
+        "SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+        "WHERE ur.user_id = ? AND r.name = 'Administrator' LIMIT 1",
+        (user_row["id"],)
+    ).fetchone()
+    return row is not None
 
 
 @app.context_processor
 def inject_permissions():
     return {
-        "has_project_hunt_access": current_user.is_authenticated and current_user.email in FULL_ACCESS_EMAILS,
+        "has_project_hunt_access": is_project_hunt_allowed(),
         "has_atlas_access": is_atlas_allowed(),
-        "is_procurement": current_user.is_authenticated and current_user.email in PROCUREMENT_EMAILS,
-        "is_admin_user": is_admin(),
+        "is_procurement": is_procurement(),
+        # is_admin_user is now purely permission-based (module:team_admin:view),
+        # not the legacy is_admin() email check -- kept for template
+        # backward-compatibility (nothing currently reads it after the nav
+        # cleanup, but it's cheap to keep correct rather than delete).
+        "is_admin_user": _authorized("module:team_admin:view"),
+        # Real nav-visibility flags, each mirroring the exact permission
+        # its route enforces server-side -- pure user_has_permission(),
+        # no legacy-list fallback. Backend remains the source of truth;
+        # these only decide what's shown.
+        "has_product_intelligence_access": _authorized("module:product_intelligence:view"),
+        "has_team_admin_access": _authorized("module:team_admin:view"),
+        "has_whatsapp_admin_access": is_whatsapp_admin(),
+        "has_system_data_access": _authorized("action:system_data:manage"),
+        "has_activity_log_access": _authorized("action:activity_log:view"),
+        "has_manage_users_access": _authorized("action:team_admin:manage_users"),
+        "has_manage_inventory_access": _authorized("action:sitepulse:manage_inventory"),
     }
 
 
@@ -476,7 +566,7 @@ def restrict_project_hunt():
     here for every /tracker/* request rather than per-route, so a new route
     added later can't accidentally skip this."""
     if request.path.startswith("/tracker") and current_user.is_authenticated:
-        if current_user.email not in FULL_ACCESS_EMAILS:
+        if not is_project_hunt_allowed():
             flash("You don't have access to Project Hunt.", "error")
             return redirect(url_for("home"))
 
@@ -813,9 +903,13 @@ def user_has_permission(user, key):
     Explicit deny always wins over everything. Explicit grant wins over
     role membership. No override at all falls back to whatever the
     user's role(s) grant. An unknown permission key is a deny, not a
-    crash -- a typo in a tool's `permission` field fails closed."""
+    crash -- a typo in a tool's `permission` field fails closed. A
+    missing/empty key is ALSO a deny, not an automatic grant -- fail
+    closed always, never fail open. (This was a real bug: `if not key:
+    return True` let a None/empty key silently authorize anything that
+    called this resolver with one -- fixed after CTO audit.)"""
     if not key:
-        return True
+        return False
     if not (user and getattr(user, "is_authenticated", False)):
         return False
     db = get_db()
@@ -1344,6 +1438,15 @@ def signup():
              datetime.utcnow().isoformat())
         )
         db.commit()
+        # Runtime authorization no longer consults the legacy lists at
+        # all (see is_admin()/_authorized() etc below) -- so a
+        # legacy-listed person must be backfilled into a real role the
+        # moment their account exists, not just at the next server
+        # restart. _backfill_user_roles() is idempotent and only ever
+        # touches a user with zero roles/overrides, so calling it here
+        # is safe and cannot re-run for anyone already configured.
+        _backfill_user_roles(db)
+        db.commit()
         flash("Account created. Log in below.")
         return redirect(url_for("login"))
     return render_template("signup.html")
@@ -1372,7 +1475,7 @@ def logout():
 @app.route("/team")
 @login_required
 def team_list():
-    if not is_admin():
+    if not _authorized("module:team_admin:view"):
         return redirect(url_for("home"))
     db = get_db()
     users = db.execute("SELECT * FROM users ORDER BY created_at ASC").fetchall()
@@ -1382,14 +1485,14 @@ def team_list():
 @app.route("/team/<int:user_id>/delete", methods=["POST"])
 @login_required
 def delete_team_member(user_id):
-    if not is_admin():
+    if not _authorized("action:team_admin:manage_users"):
         return redirect(url_for("home"))
     db = get_db()
     target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     if not target:
         flash("User not found.", "error")
         return redirect(url_for("team_list"))
-    if target["email"] in ADMIN_EMAILS:
+    if _is_protected_admin_account(target):
         flash("Can't remove an admin account this way.", "error")
         return redirect(url_for("team_list"))
     db.execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -1489,6 +1592,9 @@ def sp_statusclass(status):
 @app.route("/sitepulse/")
 @login_required
 def sitepulse_dashboard():
+    if not _authorized("module:equipment_center:view"):
+        flash("You don't have access to Equipment Center.", "error")
+        return redirect(url_for("home"))
     apply_due_scheduled_moves()
     db = get_db()
     status_filter = request.args.get("status", "")
@@ -1570,6 +1676,9 @@ def sitepulse_dashboard():
 @app.route("/sitepulse/asset/new", methods=["GET", "POST"])
 @login_required
 def sitepulse_new_asset():
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     if request.method == "POST":
         db = get_db()
         now = datetime.utcnow().isoformat()
@@ -1593,6 +1702,9 @@ def sitepulse_new_asset():
 @app.route("/sitepulse/asset/<int:asset_id>")
 @login_required
 def sitepulse_view_asset(asset_id):
+    if not _authorized("module:equipment_center:view"):
+        flash("You don't have access to Equipment Center.", "error")
+        return redirect(url_for("home"))
     apply_due_scheduled_moves(asset_id)
     db = get_db()
     a = db.execute("SELECT * FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
@@ -1637,6 +1749,9 @@ def sitepulse_view_asset(asset_id):
 @app.route("/sitepulse/asset/<int:asset_id>/edit-details", methods=["POST"])
 @login_required
 def sitepulse_edit_asset_details(asset_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     db.execute(
         """UPDATE sitepulse_assets SET name=?, description=?, year=?, serial_number=?, value=?,
@@ -1655,6 +1770,9 @@ def sitepulse_edit_asset_details(asset_id):
 @app.route("/sitepulse/asset/<int:asset_id>/update", methods=["POST"])
 @login_required
 def sitepulse_update_asset(asset_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     old = db.execute("SELECT name, status, location FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()
     asset_name = old["name"]
@@ -1740,6 +1858,9 @@ def sitepulse_update_asset(asset_id):
 @app.route("/sitepulse/move/<int:move_id>/complete", methods=["POST"])
 @login_required
 def sitepulse_complete_scheduled_move(move_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     move = db.execute("SELECT * FROM sitepulse_usage_log WHERE id = ? AND entry_kind='move'", (move_id,)).fetchone()
     if not move:
@@ -1757,6 +1878,9 @@ def sitepulse_complete_scheduled_move(move_id):
 @app.route("/sitepulse/move/<int:move_id>/cancel", methods=["POST"])
 @login_required
 def sitepulse_cancel_scheduled_move(move_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     move = db.execute("SELECT * FROM sitepulse_usage_log WHERE id = ? AND entry_kind='move'", (move_id,)).fetchone()
     if not move:
@@ -1776,6 +1900,9 @@ def sitepulse_cancel_scheduled_move(move_id):
 @app.route("/sitepulse/asset/<int:asset_id>/status", methods=["POST"])
 @login_required
 def sitepulse_quick_status(asset_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     new_status = request.form["status"]
     old = db.execute("SELECT status FROM sitepulse_assets WHERE id = ?", (asset_id,)).fetchone()["status"]
@@ -1788,6 +1915,9 @@ def sitepulse_quick_status(asset_id):
 @app.route("/sitepulse/asset/<int:asset_id>/usage/new", methods=["POST"])
 @login_required
 def sitepulse_new_usage(asset_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     now = datetime.utcnow().isoformat()
     photo_filename = save_photo(request.files.get("photo"))
@@ -1810,6 +1940,9 @@ def sitepulse_new_usage(asset_id):
 @app.route("/sitepulse/usage/<int:usage_id>/update", methods=["POST"])
 @login_required
 def sitepulse_update_usage(usage_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     entry = db.execute("SELECT * FROM sitepulse_usage_log WHERE id = ?", (usage_id,)).fetchone()
     if not entry:
@@ -1838,6 +1971,9 @@ def sitepulse_update_usage(usage_id):
 @app.route("/sitepulse/usage/<int:usage_id>/delete", methods=["POST"])
 @login_required
 def sitepulse_delete_usage(usage_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     entry = db.execute("SELECT * FROM sitepulse_usage_log WHERE id = ?", (usage_id,)).fetchone()
     if not entry:
@@ -1854,6 +1990,9 @@ def sitepulse_delete_usage(usage_id):
 @app.route("/sitepulse/asset/<int:asset_id>/maintenance/new", methods=["POST"])
 @login_required
 def sitepulse_new_maintenance(asset_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     now = datetime.utcnow().isoformat()
     photo_filename = save_photo(request.files.get("photo"))
@@ -1881,6 +2020,9 @@ def sitepulse_new_maintenance(asset_id):
 @app.route("/sitepulse/asset/<int:asset_id>/mileage/new", methods=["POST"])
 @login_required
 def sitepulse_new_mileage(asset_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     now = datetime.utcnow().isoformat()
     db.execute(
@@ -1899,6 +2041,9 @@ def sitepulse_new_mileage(asset_id):
 @app.route("/sitepulse/maintenance/<int:entry_id>/update", methods=["POST"])
 @login_required
 def sitepulse_update_maintenance(entry_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     entry = db.execute("SELECT * FROM sitepulse_maintenance_log WHERE id = ?", (entry_id,)).fetchone()
     if not entry:
@@ -1921,6 +2066,9 @@ def sitepulse_update_maintenance(entry_id):
 @app.route("/sitepulse/maintenance/<int:entry_id>/delete", methods=["POST"])
 @login_required
 def sitepulse_delete_maintenance(entry_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     entry = db.execute("SELECT * FROM sitepulse_maintenance_log WHERE id = ?", (entry_id,)).fetchone()
     if not entry:
@@ -1937,7 +2085,7 @@ def sitepulse_delete_maintenance(entry_id):
 @app.route("/sitepulse/activity")
 @login_required
 def sitepulse_activity_log():
-    if not is_admin():
+    if not _authorized("action:activity_log:view"):
         flash("Not authorized.", "error")
         return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
@@ -1952,7 +2100,7 @@ def sitepulse_activity_log():
 @app.route("/sitepulse/asset/<int:asset_id>/activity")
 @login_required
 def sitepulse_asset_activity_log(asset_id):
-    if not is_admin():
+    if not _authorized("action:activity_log:view"):
         flash("Not authorized.", "error")
         return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
@@ -1969,6 +2117,9 @@ def sitepulse_asset_activity_log(asset_id):
 @app.route("/sitepulse/geocode")
 @login_required
 def sitepulse_geocode():
+    if not _authorized("module:equipment_center:view"):
+        flash("You don't have access to Equipment Center.", "error")
+        return redirect(url_for("home"))
     address = request.args.get("address", "").strip()
     if not address:
         return {"lat": None, "lon": None}
@@ -1990,6 +2141,9 @@ def sitepulse_geocode():
 @app.route("/sitepulse/rentals")
 @login_required
 def sitepulse_rentals_list():
+    if not _authorized("module:equipment_center:view"):
+        flash("You don't have access to Equipment Center.", "error")
+        return redirect(url_for("home"))
     db = get_db()
     today_str = date.today().isoformat()
     show = request.args.get("show", "active")
@@ -2025,6 +2179,9 @@ def sitepulse_rentals_list():
 @app.route("/sitepulse/rentals/new", methods=["GET", "POST"])
 @login_required
 def sitepulse_new_rental():
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     tracker_projects = db.execute(
         "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
@@ -2050,6 +2207,9 @@ def sitepulse_new_rental():
 @app.route("/sitepulse/rentals/<int:rental_id>/update", methods=["POST"])
 @login_required
 def sitepulse_update_rental(rental_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     db.execute(
         """UPDATE sitepulse_rentals SET vendor=?, equipment_description=?, job_name=?, rate_amount=?,
@@ -2068,6 +2228,9 @@ def sitepulse_update_rental(rental_id):
 @app.route("/sitepulse/rentals/<int:rental_id>/return", methods=["POST"])
 @login_required
 def sitepulse_return_rental(rental_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     returned_date = request.form.get("returned_date") or date.today().isoformat()
     db.execute("UPDATE sitepulse_rentals SET returned_date=?, updated_at=? WHERE id=?",
@@ -2081,6 +2244,9 @@ def sitepulse_return_rental(rental_id):
 @app.route("/sitepulse/rentals/<int:rental_id>/delete", methods=["POST"])
 @login_required
 def sitepulse_delete_rental(rental_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
     r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
     db.execute("DELETE FROM sitepulse_rentals WHERE id = ?", (rental_id,))
@@ -2097,12 +2263,18 @@ def sitepulse_delete_rental(rental_id):
 @app.route("/inventory/")
 @login_required
 def inventory_home():
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
     return render_template("inventory/home.html")
 
 
 @app.route("/inventory/materials")
 @login_required
 def inventory_materials_list():
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
     db = get_db()
     search = request.args.get("q", "").strip()
     if search:
@@ -2119,6 +2291,9 @@ def inventory_materials_list():
 @app.route("/inventory/materials/new", methods=["GET", "POST"])
 @login_required
 def inventory_new_material():
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     if request.method == "POST":
         db = get_db()
         now = datetime.utcnow().isoformat()
@@ -2141,7 +2316,7 @@ def inventory_new_material():
 @app.route("/inventory/materials/<int:material_id>/delete", methods=["POST"])
 @login_required
 def inventory_delete_material(material_id):
-    if not is_admin():
+    if not _authorized("action:sitepulse:manage_inventory"):
         flash("Not authorized.", "error")
         return redirect(url_for("inventory_materials_list"))
     db = get_db()
@@ -2183,6 +2358,9 @@ def send_due_concrete_reminders():
 @app.route("/inventory/concrete")
 @login_required
 def inventory_concrete_list():
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
     send_due_concrete_reminders()
     db = get_db()
 
@@ -2273,6 +2451,9 @@ CONCRETE_REQUEST_REQUIRED_FIELDS = [
 @app.route("/inventory/concrete/new", methods=["GET", "POST"])
 @login_required
 def inventory_new_concrete():
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     tracker_projects = db.execute(
         "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
@@ -2389,6 +2570,9 @@ def build_concrete_order_notification(r):
 @app.route("/inventory/concrete/<int:request_id>")
 @login_required
 def inventory_view_concrete(request_id):
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2401,6 +2585,9 @@ def inventory_view_concrete(request_id):
 @app.route("/inventory/concrete/<int:request_id>/edit", methods=["GET", "POST"])
 @login_required
 def inventory_edit_concrete(request_id):
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2491,6 +2678,9 @@ def inventory_place_concrete_order(request_id):
 @app.route("/inventory/concrete/<int:request_id>/status", methods=["POST"])
 @login_required
 def inventory_update_concrete_status(request_id):
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2512,6 +2702,9 @@ def inventory_update_concrete_status(request_id):
 @app.route("/inventory/concrete/<int:request_id>/delete", methods=["POST"])
 @login_required
 def inventory_delete_concrete(request_id):
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2527,6 +2720,9 @@ def inventory_delete_concrete(request_id):
 @app.route("/inventory/purchase")
 @login_required
 def inventory_purchase_list():
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
     db = get_db()
     rows = db.execute("SELECT * FROM inventory_purchase_requests ORDER BY request_date DESC").fetchall()
     return render_template("inventory/purchase_requests.html", requests=rows)
@@ -2553,6 +2749,9 @@ def _generate_pr_number(db):
 @app.route("/inventory/purchase/new", methods=["GET", "POST"])
 @login_required
 def inventory_new_purchase():
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     tracker_projects = db.execute(
         "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
@@ -2612,6 +2811,9 @@ def inventory_new_purchase():
 @app.route("/inventory/purchase/<int:request_id>")
 @login_required
 def inventory_view_purchase(request_id):
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2624,7 +2826,7 @@ def inventory_view_purchase(request_id):
 @app.route("/inventory/activity")
 @login_required
 def inventory_activity_log():
-    if not is_admin():
+    if not _authorized("action:activity_log:view"):
         flash("Not authorized.", "error")
         return redirect(url_for("inventory_materials_list"))
     db = get_db()
@@ -2637,7 +2839,7 @@ def inventory_activity_log():
 @app.route("/inventory/concrete/<int:request_id>/activity")
 @login_required
 def inventory_concrete_activity_log(request_id):
-    if not is_admin():
+    if not _authorized("action:activity_log:view"):
         flash("Not authorized.", "error")
         return redirect(url_for("inventory_concrete_list"))
     db = get_db()
@@ -2655,7 +2857,7 @@ def inventory_concrete_activity_log(request_id):
 @app.route("/inventory/purchase/<int:request_id>/activity")
 @login_required
 def inventory_purchase_activity_log(request_id):
-    if not is_admin():
+    if not _authorized("action:activity_log:view"):
         flash("Not authorized.", "error")
         return redirect(url_for("inventory_purchase_list"))
     db = get_db()
@@ -2673,6 +2875,9 @@ def inventory_purchase_activity_log(request_id):
 @app.route("/inventory/purchase/<int:request_id>/edit", methods=["GET", "POST"])
 @login_required
 def inventory_edit_purchase(request_id):
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2715,6 +2920,9 @@ def inventory_edit_purchase(request_id):
 @app.route("/inventory/purchase/<int:request_id>/status", methods=["POST"])
 @login_required
 def inventory_update_purchase_status(request_id):
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2784,6 +2992,9 @@ def inventory_place_purchase_order(request_id):
 @app.route("/inventory/purchase/<int:request_id>/delete", methods=["POST"])
 @login_required
 def inventory_delete_purchase(request_id):
+    if not _authorized("action:sitepulse:manage"):
+        flash("You don't have permission to make changes in SitePulse.", "error")
+        return redirect(url_for("inventory_home"))
     db = get_db()
     r = db.execute("SELECT * FROM inventory_purchase_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
@@ -2810,11 +3021,43 @@ TR_STATUS_BADGE_CLASS = {
 }
 
 
+MARKDOWN_ALLOWED_TAGS = [
+    "p", "br", "strong", "em", "b", "i", "u", "s", "del", "sup", "sub",
+    "ul", "ol", "li", "a", "code", "pre", "blockquote",
+    "h1", "h2", "h3", "h4", "h5", "h6", "hr",
+    "table", "thead", "tbody", "tr", "th", "td",
+]
+MARKDOWN_ALLOWED_ATTRS = {
+    "a": ["href", "title", "rel"],
+    "th": ["align"],
+    "td": ["align"],
+}
+MARKDOWN_ALLOWED_PROTOCOLS = ["http", "https", "mailto"]
+
+
 @app.template_filter("markdown")
 def tr_markdown_filter(text):
+    """Renders Markdown to HTML, then sanitizes the result through bleach
+    (a maintained HTML-sanitization library, not a homemade regex filter)
+    before it's ever marked |safe in a template. python-markdown passes
+    raw HTML in the source straight through unescaped -- without this
+    sanitization step, a value like '<script>...</script>' or
+    '<img onerror=...>' stored in a field such as a quote's RFQ/follow-up
+    email text would execute as live HTML for anyone who views that page
+    (stored XSS). Only a fixed allowlist of real Markdown-output tags/
+    attributes survives; everything else (script, style, iframe, event
+    handler attributes, javascript: URLs, etc.) is stripped, not merely
+    escaped for display."""
     if not text:
         return ""
-    return md_lib.markdown(text, extensions=["extra"])
+    rendered = md_lib.markdown(text, extensions=["extra"])
+    return bleach.clean(
+        rendered,
+        tags=MARKDOWN_ALLOWED_TAGS,
+        attributes=MARKDOWN_ALLOWED_ATTRS,
+        protocols=MARKDOWN_ALLOWED_PROTOCOLS,
+        strip=True,
+    )
 
 
 @app.template_filter("statusclass")
@@ -3085,7 +3328,27 @@ def register_tool(name, description, parameters, permission, atlas_permission, k
     """The only way a capability becomes callable by Atlas. Nothing else
     -- no raw SQL, no arbitrary Python, no route dispatch -- is ever
     reachable from the model's output. If it's not in ATLAS_TOOLS, it
-    does not run."""
+    does not run.
+
+    Rejects a malformed registration immediately (ValueError, at import
+    time, loud and unmissable) rather than letting it into ATLAS_TOOLS --
+    a tool with a missing/empty permission or atlas_permission would
+    otherwise call user_has_permission(user, None), and after the
+    fail-closed fix that correctly denies everyone... but "correctly
+    denies everyone" for a tool that was supposed to work is still a
+    bug worth catching at registration time rather than discovering at
+    first use. This is a stricter check than the resolver's fail-closed
+    behavior needs to provide on its own -- defense at both layers."""
+    if not name or not isinstance(name, str):
+        raise ValueError("register_tool: name must be a non-empty string")
+    if not permission or not isinstance(permission, str):
+        raise ValueError(f"register_tool({name!r}): permission must be a non-empty string, got {permission!r}")
+    if not atlas_permission or not isinstance(atlas_permission, str):
+        raise ValueError(f"register_tool({name!r}): atlas_permission must be a non-empty string, got {atlas_permission!r}")
+    if kind not in ("read", "write"):
+        raise ValueError(f"register_tool({name!r}): kind must be 'read' or 'write', got {kind!r}")
+    if not callable(handler):
+        raise ValueError(f"register_tool({name!r}): handler must be callable")
     ATLAS_TOOLS[name] = AtlasTool(name, description, parameters, permission, atlas_permission, kind, handler, confirm)
 
 
@@ -3643,7 +3906,7 @@ def _trend_paths(counts, width=900, height=140, pad_top=8, pad_bottom=8):
 @app.route("/admin/product-intelligence")
 @login_required
 def product_intelligence():
-    if not is_admin():
+    if not _authorized("module:product_intelligence:view"):
         flash("Product Intelligence is restricted to admins.", "error")
         return redirect(url_for("home"))
     db = get_db()
@@ -3909,7 +4172,7 @@ def product_intelligence():
 @app.route("/admin/roadmap/<int:item_id>/update", methods=["POST"])
 @login_required
 def roadmap_item_update(item_id):
-    if not is_admin():
+    if not _authorized("action:product_intelligence:manage"):
         flash("Product Intelligence is restricted to admins.", "error")
         return redirect(url_for("home"))
     db = get_db()
@@ -3933,7 +4196,7 @@ def roadmap_item_update(item_id):
 @app.route("/admin/product-intelligence/<int:request_id>", methods=["GET", "POST"])
 @login_required
 def product_intelligence_detail(request_id):
-    if not is_admin():
+    if not _authorized("action:product_intelligence:manage"):
         flash("Product Intelligence is restricted to admins.", "error")
         return redirect(url_for("home"))
     db = get_db()
@@ -4016,7 +4279,7 @@ def product_intelligence_detail(request_id):
 @app.route("/admin/product-intelligence/preview")
 @login_required
 def product_intelligence_preview():
-    if not is_admin():
+    if not _authorized("module:product_intelligence:view"):
         flash("Product Intelligence is restricted to admins.", "error")
         return redirect(url_for("home"))
     db = get_db()
@@ -4032,11 +4295,19 @@ def product_intelligence_preview():
 @app.route("/admin/users", methods=["GET", "POST"])
 @login_required
 def admin_users():
-    if not is_admin():
+    if not _authorized("module:team_admin:view"):
         flash("This page is restricted to admins.", "error")
         return redirect(url_for("home"))
     db = get_db()
     if request.method == "POST":
+        # Viewing this page only requires module:team_admin:view; actually
+        # changing a department or adding one is a write action and gets
+        # its own, stricter check per the "write actions must be
+        # separately protected" requirement.
+        if not _authorized("action:team_admin:manage_users"):
+            flash("You don't have permission to make changes here.", "error")
+            return redirect(url_for("admin_users"))
+
         action = request.form.get("action", "assign_department")
 
         if action == "add_department":
@@ -4067,14 +4338,59 @@ def admin_users():
     return render_template("requests/admin_users.html", users=users, department_options=department_options)
 
 
+def _actor_is_administrator(db, user_id):
+    """Does this user currently hold the Administrator role? Used only
+    by the privilege-escalation guard below -- deliberately a role
+    membership check, not a new permission key, per the "don't invent
+    a permission for this" decision (see admin_user_permissions'
+    docstring for the reasoning)."""
+    row = db.execute(
+        "SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id "
+        "WHERE ur.user_id = ? AND r.name = 'Administrator' LIMIT 1",
+        (user_id,)
+    ).fetchone()
+    return row is not None
+
+
+# Permissions whose grant IS an escalation path (manage_users can be used
+# to repeat this whole exercise on someone else) or unlocks destructive
+# system-wide action (system_data:manage covers backup/restore/import/
+# export). Narrower than "everything Administrator has" -- this is what
+# actually needs a full-Administrator actor to hand out, not every
+# permission in the catalog.
+HIGH_PRIVILEGE_PERMISSION_KEYS = {
+    "action:team_admin:manage_users",
+    "action:system_data:manage",
+}
+
+
 @app.route("/admin/users/<int:user_id>/permissions", methods=["GET", "POST"])
 @login_required
 def admin_user_permissions(user_id):
-    # Deliberately gated with the same existing is_admin() hardcoded
-    # check every other admin-only page already uses -- Phase 2 does not
-    # switch real route gating over to the new system yet, per the
-    # "preserve existing access during migration" requirement.
-    if not is_admin():
+    """Manage one user's roles and permission overrides.
+
+    PRIVILEGE-ESCALATION GUARD (added after CTO audit): action:team_admin:
+    manage_users is meant to let ordinary admin staff handle routine user
+    management -- assigning a role, tweaking one permission. Left
+    unguarded, that same permission could be used to hand out Administrator
+    access (to anyone, including the actor themselves), grant other
+    high-privilege permissions, or strip the last Administrator from the
+    system entirely -- turning "manage users" into unrestricted privilege
+    escalation. Deliberately NOT solved by adding a new permission key
+    (there's nothing a new key would let this code check that role
+    membership doesn't already tell us): the guard below requires the
+    ACTOR to already hold the Administrator role before they can (a)
+    grant the Administrator role to anyone, (b) grant any key in
+    HIGH_PRIVILEGE_PERMISSION_KEYS to anyone, (c) remove the Administrator
+    role from anyone, or (d) remove an explicit DENY on a high-privilege
+    key (which would silently restore role-inherited access to it). It
+    also blocks a user from changing their OWN roles/overrides through
+    this page at all, and blocks removing the last remaining
+    Administrator. None of this changes what action:team_admin:
+    manage_users itself means or who has it -- only what an ordinary
+    (non-Administrator) holder of it can do with it.
+    """
+    if not _authorized("action:team_admin:manage_users"):
         flash("This page is restricted to admins.", "error")
         return redirect(url_for("home"))
 
@@ -4087,24 +4403,85 @@ def admin_user_permissions(user_id):
     if request.method == "POST":
         action = request.form.get("action")
         now = datetime.utcnow().isoformat()
+        admin_role_row = db.execute("SELECT id FROM roles WHERE name = 'Administrator'").fetchone()
+        admin_role_id = admin_role_row["id"] if admin_role_row else None
+        actor_is_admin = _actor_is_administrator(db, current_user.id)
+
+        def _valid_role_id(raw):
+            """Parses and validates a role_id from form input. Returns the
+            int id if it's a real integer AND a real row in roles, else
+            None. Guards against hostile/malformed input (non-numeric
+            strings, negative numbers, ids for roles that don't exist)
+            causing either a server 500 from int()/int-column comparisons,
+            or a meaningless orphan user_roles row pointing at a
+            nonexistent role."""
+            try:
+                rid = int(raw)
+            except (TypeError, ValueError):
+                return None
+            row = db.execute("SELECT id FROM roles WHERE id = ?", (rid,)).fetchone()
+            return rid if row else None
+
+        def _valid_permission_id(raw):
+            """Same validation as _valid_role_id, for permission_id."""
+            try:
+                pid = int(raw)
+            except (TypeError, ValueError):
+                return None
+            row = db.execute("SELECT id FROM permissions WHERE id = ?", (pid,)).fetchone()
+            return pid if row else None
+
+        # Self-modification block: never let this page change the acting
+        # user's own roles/overrides, in either direction -- no
+        # self-escalation, and no accidental self-lockout either.
+        if user_id == current_user.id:
+            flash("You can't change your own roles or permissions from this page.", "error")
+            return redirect(url_for("admin_user_permissions", user_id=user_id))
 
         if action == "assign_role":
-            role_id = request.form.get("role_id")
-            if role_id:
-                db.execute("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)", (user_id, role_id))
-                db.commit()
-                flash("Role assigned.")
+            role_id = _valid_role_id(request.form.get("role_id"))
+            if role_id is None:
+                flash("Not a valid role.", "error")
+                return redirect(url_for("admin_user_permissions", user_id=user_id))
+            if role_id == admin_role_id and not actor_is_admin:
+                flash("Only an Administrator can grant Administrator access.", "error")
+                return redirect(url_for("admin_user_permissions", user_id=user_id))
+            db.execute("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)", (user_id, role_id))
+            db.commit()
+            flash("Role assigned.")
 
         elif action == "remove_role":
-            role_id = request.form.get("role_id")
+            role_id = _valid_role_id(request.form.get("role_id"))
+            if role_id is None:
+                flash("Not a valid role.", "error")
+                return redirect(url_for("admin_user_permissions", user_id=user_id))
+            if admin_role_id and role_id == admin_role_id:
+                if not actor_is_admin:
+                    flash("Only an Administrator can remove Administrator access.", "error")
+                    return redirect(url_for("admin_user_permissions", user_id=user_id))
+                remaining = db.execute(
+                    "SELECT COUNT(*) FROM user_roles WHERE role_id = ? AND user_id != ?",
+                    (admin_role_id, user_id)
+                ).fetchone()[0]
+                if remaining == 0:
+                    flash("Can't remove the last Administrator.", "error")
+                    return redirect(url_for("admin_user_permissions", user_id=user_id))
             db.execute("DELETE FROM user_roles WHERE user_id = ? AND role_id = ?", (user_id, role_id))
             db.commit()
             flash("Role removed.")
 
         elif action == "set_override":
-            permission_id = request.form.get("permission_id")
+            permission_id = _valid_permission_id(request.form.get("permission_id"))
             state = request.form.get("state")  # 'grant' or 'deny'
-            if permission_id and state in ("grant", "deny"):
+            if permission_id is None:
+                flash("Not a valid permission.", "error")
+                return redirect(url_for("admin_user_permissions", user_id=user_id))
+            if state in ("grant", "deny"):
+                if state == "grant":
+                    perm_row = db.execute("SELECT key FROM permissions WHERE id = ?", (permission_id,)).fetchone()
+                    if perm_row and perm_row["key"] in HIGH_PRIVILEGE_PERMISSION_KEYS and not actor_is_admin:
+                        flash("Only an Administrator can grant this permission.", "error")
+                        return redirect(url_for("admin_user_permissions", user_id=user_id))
                 db.execute(
                     """INSERT INTO user_permission_overrides (user_id, permission_id, state, granted_by, updated_at)
                        VALUES (?, ?, ?, ?, ?)
@@ -4115,7 +4492,19 @@ def admin_user_permissions(user_id):
                 flash(f"Permission {state}ed.")
 
         elif action == "remove_override":
-            permission_id = request.form.get("permission_id")
+            permission_id = _valid_permission_id(request.form.get("permission_id"))
+            if permission_id is None:
+                flash("Not a valid permission.", "error")
+                return redirect(url_for("admin_user_permissions", user_id=user_id))
+            existing_override = db.execute(
+                "SELECT state, permission_id FROM user_permission_overrides WHERE user_id = ? AND permission_id = ?",
+                (user_id, permission_id)
+            ).fetchone()
+            if existing_override and existing_override["state"] == "deny":
+                perm_row = db.execute("SELECT key FROM permissions WHERE id = ?", (permission_id,)).fetchone()
+                if perm_row and perm_row["key"] in HIGH_PRIVILEGE_PERMISSION_KEYS and not actor_is_admin:
+                    flash("Only an Administrator can remove this restriction.", "error")
+                    return redirect(url_for("admin_user_permissions", user_id=user_id))
             db.execute("DELETE FROM user_permission_overrides WHERE user_id = ? AND permission_id = ?", (user_id, permission_id))
             db.commit()
             flash("Override removed -- back to role-inherited.")
@@ -4323,6 +4712,9 @@ def tracker_archive():
 @app.route("/tracker/project/<int:project_id>/delete", methods=["POST"])
 @login_required
 def tracker_delete_project(project_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
     log_activity("tracker", "project", project_id, "deleted", asset_id=project_id,
@@ -4345,6 +4737,9 @@ def tracker_delete_project(project_id):
 @app.route("/tracker/quote/<int:quote_id>/upload", methods=["POST"])
 @login_required
 def tracker_upload_quote_file(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     from flask import send_file
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
@@ -4393,6 +4788,9 @@ def tracker_download_quote_file(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/delete_file", methods=["POST"])
 @login_required
 def tracker_delete_quote_file(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4410,6 +4808,9 @@ def tracker_delete_quote_file(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/edit", methods=["GET", "POST"])
 @login_required
 def tracker_edit_quote(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4447,6 +4848,9 @@ def tracker_edit_quote(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/delete", methods=["POST"])
 @login_required
 def tracker_delete_quote(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4463,6 +4867,9 @@ def tracker_delete_quote(quote_id):
 @app.route("/tracker/project/new", methods=["GET", "POST"])
 @login_required
 def tracker_new_project():
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     if request.method == "POST":
         db = get_db()
         now = datetime.utcnow().isoformat()
@@ -4512,6 +4919,9 @@ def tracker_view_project(project_id):
 @app.route("/tracker/project/<int:project_id>/update", methods=["POST"])
 @login_required
 def tracker_update_project(project_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     old_project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
     new_status = request.form["status"]
@@ -4533,6 +4943,9 @@ def tracker_update_project(project_id):
 @app.route("/tracker/project/<int:project_id>/edit", methods=["GET", "POST"])
 @login_required
 def tracker_edit_project(project_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
     if not project:
@@ -4566,6 +4979,9 @@ def tracker_edit_project(project_id):
 @app.route("/tracker/project/<int:project_id>/quote/new", methods=["GET", "POST"])
 @login_required
 def tracker_new_quote(project_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
     if not project:
@@ -4593,6 +5009,9 @@ def tracker_new_quote(project_id):
 @app.route("/tracker/quote/<int:quote_id>/update_status", methods=["POST"])
 @login_required
 def tracker_update_quote_status(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4615,6 +5034,9 @@ def tracker_update_quote_status(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/generate_rfq", methods=["POST"])
 @login_required
 def tracker_generate_rfq(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4631,6 +5053,9 @@ def tracker_generate_rfq(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/generate_followup", methods=["POST"])
 @login_required
 def tracker_generate_followup(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4647,6 +5072,9 @@ def tracker_generate_followup(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/clear_rfq", methods=["POST"])
 @login_required
 def tracker_clear_rfq(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4660,6 +5088,9 @@ def tracker_clear_rfq(quote_id):
 @app.route("/tracker/quote/<int:quote_id>/clear_followup", methods=["POST"])
 @login_required
 def tracker_clear_followup(quote_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     quote = db.execute("SELECT * FROM tracker_quotes WHERE id = ?", (quote_id,)).fetchone()
     if not quote:
@@ -4673,6 +5104,9 @@ def tracker_clear_followup(quote_id):
 @app.route("/tracker/project/<int:project_id>/doc/new", methods=["POST"])
 @login_required
 def tracker_new_doc(project_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     cur = db.execute(
         "INSERT INTO tracker_docs (project_id, doc_name, doc_type, status, notes, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -4688,6 +5122,9 @@ def tracker_new_doc(project_id):
 @app.route("/tracker/doc/<int:doc_id>/edit", methods=["GET", "POST"])
 @login_required
 def tracker_edit_doc(doc_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     doc = db.execute("SELECT * FROM tracker_docs WHERE id = ?", (doc_id,)).fetchone()
     if not doc:
@@ -4718,6 +5155,9 @@ def tracker_edit_doc(doc_id):
 @app.route("/tracker/doc/<int:doc_id>/delete", methods=["POST"])
 @login_required
 def tracker_delete_doc(doc_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     doc = db.execute("SELECT * FROM tracker_docs WHERE id = ?", (doc_id,)).fetchone()
     if not doc:
@@ -4733,6 +5173,9 @@ def tracker_delete_doc(doc_id):
 @app.route("/tracker/doc/<int:doc_id>/update", methods=["POST"])
 @login_required
 def tracker_update_doc(doc_id):
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     doc = db.execute("SELECT * FROM tracker_docs WHERE id = ?", (doc_id,)).fetchone()
     new_status = request.form["status"]
@@ -4755,6 +5198,9 @@ def tracker_unit_prices():
 @app.route("/tracker/unit-prices/new", methods=["POST"])
 @login_required
 def tracker_new_unit_price():
+    if not _authorized("action:project_hunt:manage"):
+        flash("You don't have permission to make changes in Project Hunt.", "error")
+        return redirect(url_for("tracker_dashboard"))
     db = get_db()
     db.execute(
         "INSERT INTO tracker_unit_prices (category, item, unit, price, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -4795,7 +5241,7 @@ def tracker_project_activity_log(project_id):
 @app.route("/admin/backup")
 @login_required
 def admin_backup():
-    if not is_admin():
+    if not _authorized("action:system_data:manage"):
         flash("Only admins can download the full database backup.", "error")
         return redirect(url_for("home"))
     if not os.path.exists(DB_PATH):
@@ -4808,7 +5254,7 @@ def admin_backup():
 @app.route("/admin/restore", methods=["GET", "POST"])
 @login_required
 def admin_restore():
-    if not is_admin():
+    if not _authorized("action:system_data:manage"):
         flash("Only admins can restore the database from a backup.", "error")
         return redirect(url_for("home"))
     if request.method == "POST":
@@ -4841,7 +5287,7 @@ def admin_restore():
 @app.route("/admin/export/excel")
 @login_required
 def admin_export_excel():
-    if not is_admin():
+    if not _authorized("action:system_data:manage"):
         flash("Only admins can export company data.", "error")
         return redirect(url_for("home"))
     import io
@@ -4924,7 +5370,7 @@ def admin_export_excel():
 @app.route("/admin/import", methods=["GET", "POST"])
 @login_required
 def admin_import():
-    if not is_admin():
+    if not _authorized("action:system_data:manage"):
         flash("Not authorized.", "error")
         return redirect(url_for("home"))
 

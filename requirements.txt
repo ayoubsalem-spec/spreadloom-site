@@ -5,4 +5,5 @@ werkzeug
 requests
 openpyxl
 markdown
+bleach
 reportlab

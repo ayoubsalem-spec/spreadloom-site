@@ -24,7 +24,7 @@
             <td><strong>{{ m['item_name'] }}</strong></td>
             <td>{{ m['quantity'] or '' }} {{ m['unit'] or '' }}</td>
             <td>{{ m['shelf_location'] or '\u2014' }}</td>
-            <td>{% if current_user.email == "ayoub@darycet.com" %}
+            <td>{% if has_manage_inventory_access %}
                 <form method="POST" action="{{ url_for('inventory_delete_material', material_id=m['id']) }}">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-sm" style="color:var(--red); border-color:var(--red);">Delete</button>

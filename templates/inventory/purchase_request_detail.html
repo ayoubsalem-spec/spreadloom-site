@@ -90,5 +90,5 @@
 
 <a href="{{ url_for('inventory_purchase_list') }}" class="btn btn-sm">&larr; Back to Purchase Requests</a>
 <a href="{{ url_for('inventory_edit_purchase', request_id=r['id']) }}" class="btn btn-sm">Edit</a>
-{% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('inventory_purchase_activity_log', request_id=r['id']) }}" class="btn btn-sm">View Activity Log</a>{% endif %}
+{% if has_activity_log_access %}<a href="{{ url_for('inventory_purchase_activity_log', request_id=r['id']) }}" class="btn btn-sm">View Activity Log</a>{% endif %}
 {% endblock %}

@@ -338,7 +338,7 @@
 </div>
 
 <a href="{{ url_for('sitepulse_dashboard') }}" class="btn btn-sm">&larr; Back to Equipment List</a>
-{% if current_user.email == "ayoub@darycet.com" %}<a href="{{ url_for('sitepulse_asset_activity_log', asset_id=a['id']) }}" class="btn btn-sm">View Activity Log</a>{% endif %}
+{% if has_activity_log_access %}<a href="{{ url_for('sitepulse_asset_activity_log', asset_id=a['id']) }}" class="btn btn-sm">View Activity Log</a>{% endif %}
 <script>
 (function() {
     var outDateEl = document.getElementById('new_out_date');

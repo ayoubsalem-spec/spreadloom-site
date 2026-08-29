@@ -33,7 +33,9 @@
 <div class="cc-main">
 
 <div style="display:flex; justify-content:flex-end; gap:10px; margin-bottom:14px;">
+    {% if has_team_admin_access %}
     <a href="{{ url_for('team_list') }}" class="btn">Users &amp; Permissions</a>
+    {% endif %}
     <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
 </div>
 

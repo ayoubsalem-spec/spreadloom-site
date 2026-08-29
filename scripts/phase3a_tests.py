@@ -1,24 +1,34 @@
 """
-Phase 3A regression tests -- run this after pulling the update, and
-again before ever removing the legacy-email OR-fallback from
-is_whatsapp_admin() / is_atlas_allowed() / is_procurement().
+Phase 3A regression tests -- run this after pulling any update to the
+permission system.
 
 Uses the real app, the real execute_tool() gateway, and real DB rows --
-not mocks. Safe to run against a copy of the database; it creates a
-few temporary users/records and does not modify anything that already
-existed (it never deletes or updates an existing row).
+not mocks. Runs entirely against its own disposable, auto-created
+database (see _test_db_setup.isolate_test_database(), called below
+before `import app`) -- it is NOT pointed at, and cannot be pointed at,
+any existing/company database, including a copy you might otherwise
+think to hand it. It creates and cleans up its own temporary users/
+records every run and never touches anything outside its own isolated
+database file. For migration rehearsal against a real existing
+database, use scripts/migration_rehearsal.py instead -- that is a
+deliberately separate workflow.
 
 Usage (from the project root):
-    python3 scripts/phase3a_tests.py
+    APP_ENV=development python3 scripts/phase3a_tests.py
 """
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import sqlite3
 from datetime import datetime, date, timedelta
 from flask_login import login_user
 
+import _test_db_setup
+_test_db_setup.isolate_test_database()  # MUST happen before `import app` -- app.py reads DATA_DIR at import time
+
 import app as appmod
+import _test_hygiene as hygiene
 
 PASS = []
 FAIL = []
@@ -33,7 +43,15 @@ def check(label, condition):
 
 
 def main():
-    db = appmod.get_db()
+    # Plain, independent sqlite3 connection -- not appmod.get_db() -- and
+    # no outer Flask app context held across the script (see
+    # scripts/security_correction_tests.py's main() docstring for why
+    # that combination is unsafe when a test client is involved). This
+    # script doesn't use a test client, only test_request_context(), but
+    # the same reuse-instead-of-fresh-push behavior applies there too, so
+    # it uses the same safe pattern for consistency.
+    db = sqlite3.connect(appmod.DB_PATH)
+    db.row_factory = sqlite3.Row
     now = datetime.utcnow().isoformat()
     today = date.today()
 
@@ -139,9 +157,9 @@ def main():
 
     db.commit()
 
-    print()
-    print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
-
+    # Exact fixture cleanup must run BEFORE the orphan assertion --
+    # otherwise a bug in this very cleanup step could create an orphan
+    # that the assertion, running earlier, would never see (CTO finding).
     print()
     print("Cleaning up temporary test fixtures...")
     for email in ("__test_admin@test.local", "__test_employee@test.local"):
@@ -153,6 +171,24 @@ def main():
             db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
 
+    # ORDERING MATTERS (CTO finding): the orphan assertion runs against
+    # the state left by the exact fixture cleanup directly above --
+    # BEFORE any broad safety-net cleanup can hide a defect, and AFTER
+    # every normal destructive cleanup step this suite performs (so a
+    # bug in that cleanup itself would also be caught, not just orphans
+    # created earlier in the run). Only after the assertion has been
+    # recorded does the narrowly-scoped emergency net run.
+    orphans = hygiene.assert_no_orphan_privilege_rows(db)
+    for o in orphans:
+        FAIL.append(f"DB hygiene: {o}")
+        print(f"FAIL  DB hygiene: {o}")
+    if not orphans:
+        check("no orphan user_roles/user_permission_overrides/role_permissions rows remain", True)
+    hygiene.emergency_cleanup_orphans(db)
+
+    print()
+    print(f"RESULT: {len(PASS)} passed, {len(FAIL)} failed")
+
     if FAIL:
         print("FAILURES:")
         for f in FAIL:
@@ -162,5 +198,6 @@ def main():
 
 
 if __name__ == "__main__":
-    with appmod.app.app_context():
-        main()
+    # Deliberately NOT wrapped in "with appmod.app.app_context():" -- see
+    # main()'s comment.
+    main()
