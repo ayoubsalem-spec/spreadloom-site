@@ -47,10 +47,47 @@
         .titlebar .brand { display:flex; align-items:center; gap:10px; color:var(--text); font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; letter-spacing:0.3px; text-decoration:none; flex-shrink:0; }
         .mark { width:24px; height:24px; border:1.5px solid var(--brass); display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:var(--brass); font-family:'IBM Plex Mono',monospace; transform:rotate(45deg); flex-shrink:0; }
         .mark span { transform:rotate(-45deg); }
-        .titlebar nav { display:flex; gap:18px; flex-wrap:nowrap; overflow-x:auto; white-space:nowrap; scrollbar-width:none; }
+        .titlebar .nav-wrap { display:flex; align-items:center; gap:16px; min-width:0; flex:1 1 auto; }
+        .titlebar nav { display:flex; align-items:center; gap:22px; flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden; white-space:nowrap; scrollbar-width:none; min-width:0; }
         .titlebar nav::-webkit-scrollbar { display:none; }
         .titlebar nav a { text-decoration:none; color:var(--text-dim); font-weight:600; flex-shrink:0; }
         .titlebar nav a:hover, .titlebar nav a.active { color:var(--brass); }
+
+        /* Reserved for future Apps/System switcher once BuildIQ has more
+           than a handful of primary modules -- not built yet, but the nav
+           is split into .nav-primary / .nav-admin so that piece can slot
+           in later without restructuring the header. nav-admin lives
+           outside the scrollable <nav> (which clips overflow for its
+           horizontal-scroll-on-mobile behavior) so its dropdown isn't
+           clipped. */
+        .nav-primary { display:flex; align-items:center; gap:22px; }
+
+        .nav-admin { position:relative; flex-shrink:0; margin-left:4px; }
+        .nav-admin-trigger {
+            display:flex; align-items:center; gap:6px; background:none; border:1px solid transparent;
+            color:var(--text-dim); font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:600;
+            letter-spacing:0.5px; cursor:pointer; padding:6px 10px; border-radius:3px;
+        }
+        .nav-admin-trigger:hover, .nav-admin.open .nav-admin-trigger { color:var(--brass); border-color:var(--line); background:rgba(201,162,75,0.06); }
+        .nav-admin-trigger .caret { font-size:9px; transition:transform 0.15s ease; }
+        .nav-admin.open .nav-admin-trigger .caret { transform:rotate(180deg); }
+        .nav-admin-menu {
+            display:none; position:absolute; top:calc(100% + 8px); right:0; min-width:210px;
+            background:var(--surface-2); border:1px solid var(--line); border-radius:6px;
+            box-shadow:0 12px 28px rgba(0,0,0,0.45); padding:8px 0; z-index:60;
+        }
+        .nav-admin.open .nav-admin-menu { display:block; }
+        .nav-admin-group + .nav-admin-group { border-top:1px solid var(--line); margin-top:6px; padding-top:6px; }
+        .nav-admin-label {
+            font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--text-faint);
+            text-transform:uppercase; letter-spacing:1px; padding:6px 16px 4px;
+        }
+        .nav-admin-menu a {
+            display:block; padding:8px 16px; font-size:13px; font-weight:500; color:var(--text);
+            text-decoration:none; font-family:'Inter',sans-serif;
+        }
+        .nav-admin-menu a:hover { background:rgba(201,162,75,0.08); color:var(--brass); }
+        .nav-admin-menu a.danger:hover { background:rgba(248,113,113,0.08); color:var(--red); }
         .container { max-width:1100px; margin:0 auto; padding:32px 32px 60px; }
         .section-row { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:22px; flex-wrap:wrap; gap:12px; }
         .sub { color:var(--text-dim); font-size:13.5px; margin-top:4px; }
@@ -129,6 +166,8 @@
             .form-row { flex-direction:column; gap:0; }
             .container { padding:20px 16px 40px; }
             .titlebar nav { gap:14px; font-size:10px; }
+            .nav-primary { gap:14px; }
+            .nav-admin-menu { right:-14px; min-width:190px; }
             .inline-form { flex-direction:column; align-items:stretch; }
             .desktop-only { display:none; }
             .mobile-only { display:block; }
@@ -140,30 +179,85 @@
 <div class="titlebar">
     <a href="{{ url_for('home') }}" class="brand"><img src="{{ url_for('static', filename='logo-mark.png') }}" alt="BuildIQ" style="height:26px; width:26px; vertical-align:middle; border-radius:5px;">BUILDIQ</a>
     {% if current_user.is_authenticated %}
-    <nav>
-        {% if has_project_hunt_access %}<a href="{{ url_for('tracker_dashboard') }}" class="{{ 'active' if request.path.startswith('/tracker') }}">Project Hunt</a>{% endif %}
-        <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') }}">Equipment Center</a>
-        <a href="{{ url_for('inventory_materials_list') }}" class="{{ 'active' if request.path.startswith('/inventory') }}">SitePulse</a>
-        {% if has_atlas_access %}
-        <a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>
-        {% endif %}
-        <a href="{{ url_for('request_center') }}" class="{{ 'active' if request.path == '/requests' }}">Requests</a>
-        {% if is_admin_user %}
-        <a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>
-        {% endif %}
-        {% if current_user.email == "ayoub@darycet.com" %}
-        <a href="{{ url_for('sitepulse_activity_log') }}">Activity</a>
-        <a href="{{ url_for('admin_export_excel') }}">Export</a>
-        <a href="{{ url_for('admin_backup') }}">Backup</a>
-        <a href="{{ url_for('admin_restore') }}">Restore</a>
-        <a href="{{ url_for('admin_import') }}">Import</a>
-        <a href="{{ url_for('team_list') }}">Team</a>
-        {% endif %}
-        {% if current_user.email in ["ayoub@darycet.com", "rebecca@darycet.com"] %}
-        <a href="{{ url_for('whatsapp_site_groups_list') }}">WhatsApp Groups</a>
-        {% endif %}
-        <a href="{{ url_for('logout') }}">Log out</a>
-    </nav>
+    <div class="nav-wrap">
+        <nav>
+            <div class="nav-primary">
+                {% if has_project_hunt_access %}<a href="{{ url_for('tracker_dashboard') }}" class="{{ 'active' if request.path.startswith('/tracker') }}">Project Hunt</a>{% endif %}
+                <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') }}">Equipment Center</a>
+                <a href="{{ url_for('inventory_materials_list') }}" class="{{ 'active' if request.path.startswith('/inventory') }}">SitePulse</a>
+                {% if has_atlas_access %}
+                <a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>
+                {% endif %}
+                <a href="{{ url_for('request_center') }}" class="{{ 'active' if request.path == '/requests' }}">Requests</a>
+                {% if is_admin_user %}
+                <a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>
+                {% endif %}
+            </div>
+        </nav>
+
+        {# TEMPORARY -- test-admin@darycet.com added for testing; remove both
+           entries below (and the block in app.py) when done. #}
+        {% set show_admin_group = current_user.email in ["ayoub@darycet.com", "test-admin@darycet.com"] %}
+        {% set show_whatsapp = current_user.email in ["ayoub@darycet.com", "rebecca@darycet.com", "test-admin@darycet.com"] %}
+        <div class="nav-admin" id="nav-admin">
+            <button type="button" class="nav-admin-trigger" id="nav-admin-trigger" aria-haspopup="true" aria-expanded="false">
+                {{ current_user.name.split(' ')[0] if current_user.name else current_user.email.split('@')[0] }}
+                <span class="caret">&#9662;</span>
+            </button>
+            <div class="nav-admin-menu" role="menu">
+                {% if show_admin_group or show_whatsapp %}
+                <div class="nav-admin-group">
+                    <div class="nav-admin-label">Administration</div>
+                    {% if show_admin_group %}
+                    <a href="{{ url_for('team_list') }}">Team &amp; Permissions</a>
+                    {% endif %}
+                    {% if show_whatsapp %}
+                    <a href="{{ url_for('whatsapp_site_groups_list') }}">WhatsApp Groups</a>
+                    {% endif %}
+                    {% if show_admin_group %}
+                    <a href="{{ url_for('sitepulse_activity_log') }}">Activity</a>
+                    {% endif %}
+                </div>
+                {% endif %}
+                {% if show_admin_group %}
+                <div class="nav-admin-group">
+                    <div class="nav-admin-label">Data &amp; System</div>
+                    <a href="{{ url_for('admin_import') }}">Import</a>
+                    <a href="{{ url_for('admin_export_excel') }}">Export</a>
+                    <a href="{{ url_for('admin_backup') }}">Backup</a>
+                    <a href="{{ url_for('admin_restore') }}">Restore</a>
+                </div>
+                {% endif %}
+                <div class="nav-admin-group">
+                    <a href="{{ url_for('logout') }}" class="danger">Log out</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        (function () {
+            var wrap = document.getElementById('nav-admin');
+            var trigger = document.getElementById('nav-admin-trigger');
+            if (!wrap || !trigger) return;
+            trigger.addEventListener('click', function (e) {
+                e.stopPropagation();
+                var open = wrap.classList.toggle('open');
+                trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+            document.addEventListener('click', function (e) {
+                if (!wrap.contains(e.target)) {
+                    wrap.classList.remove('open');
+                    trigger.setAttribute('aria-expanded', 'false');
+                }
+            });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape') {
+                    wrap.classList.remove('open');
+                    trigger.setAttribute('aria-expanded', 'false');
+                }
+            });
+        })();
+    </script>
     {% else %}
     <nav></nav>
     {% endif %}

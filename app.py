@@ -1,5 +1,5 @@
 """
-BuildIQ -- Darycet unified technology platform.
+BuildIQ -- Darycet's unified technology platform.
 
 One Flask app, one login, one database. Sections are prefixed by URL path
 rather than split into separate Flask Blueprint objects, to keep this first
@@ -375,6 +375,16 @@ ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "heic", "webp"}
 MAX_PHOTO_SIZE_MB = 10
 
 ADMIN_EMAILS = ["ayoub@darycet.com", "rebecca@darycet.com"]
+
+# ---------------------------------------------------------------------------
+# TEMPORARY TEST ADMIN -- remove when testing is done.
+# To remove: delete this block, delete the user row (see
+# scripts/manage_temp_admin.py's --remove command), and remove this email
+# from the nav dropdown checks in templates/base.html.
+# ---------------------------------------------------------------------------
+TEMP_TEST_ADMIN_EMAIL = "test-admin@darycet.com"
+ADMIN_EMAILS.append(TEMP_TEST_ADMIN_EMAIL)
+
 # Domains allowed to sign up. Being on this list only grants basic access
 # (Equipment Center / SitePulse) -- Project Hunt and admin tooling stay
 # gated per-email below, never per-domain.
@@ -384,7 +394,7 @@ ALLOWED_SIGNUP_DOMAINS = ["@darycet.com", "@nomaengineering.com"]
 EXTRA_ALLOWED_SIGNUP_EMAILS = set()
 # Full access to every section, including Project Hunt -- named
 # individuals only, never a whole domain.
-FULL_ACCESS_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", "hghuneim@nomaengineering.com"}
+FULL_ACCESS_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", "hghuneim@nomaengineering.com", TEMP_TEST_ADMIN_EMAIL}
 # Atlas (voice assistant) access -- separate from Project Hunt so someone
 # can get Atlas without also getting Project Hunt. Everyone in
 # FULL_ACCESS_EMAILS gets it too, plus anyone listed here individually.
@@ -392,10 +402,10 @@ ATLAS_ACCESS_EMAILS = FULL_ACCESS_EMAILS | {"rebecca@nomaengineering.com"}
 # Only these can actually place a concrete/material order -- everyone else
 # can submit a request, but "Scheduled/Ordered" plus the vendor/contact
 # details is procurement's call.
-PROCUREMENT_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com"}
+PROCUREMENT_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", TEMP_TEST_ADMIN_EMAIL}
 # Who can manage the WhatsApp site-group routing -- narrower than full
 # admin, but wider than just Ayoub.
-WHATSAPP_ADMIN_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com"}
+WHATSAPP_ADMIN_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", TEMP_TEST_ADMIN_EMAIL}
 
 
 def is_project_hunt_allowed():
