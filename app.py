@@ -785,6 +785,17 @@ ROLE_DEFAULT_PERMISSIONS = {
     ],
 }
 
+# Product Intelligence 2.0 role simplification: going forward, only these
+# three roles are offered in the Users & Permissions assignment UI.
+# "Project Manager", "Estimator", and "Employee" remain fully defined
+# above (their permission bundles, seeding, and every existing
+# user_roles row referencing them keep working exactly as before) --
+# they're just no longer offered as a NEW assignment choice. This is a
+# UI-layer restriction only: user_has_permission() still resolves
+# through role_permissions/user_permission_overrides exactly as before,
+# nothing here changes what a role grants or how permissions resolve.
+ASSIGNABLE_ROLES = ["Administrator", "Procurement", "Operations"]
+
 
 def _seed_roles_and_permissions(db):
     """Idempotent: inserts each role/permission once, never overwrites an
@@ -1381,12 +1392,12 @@ def init_db():
     if existing_roadmap_count == 0:
         now = datetime.utcnow().isoformat()
         roadmap_seed = [
-            ("SitePulse", "now", "Filters and delivery dates shipped. Polishing purchase request flow next.", 70, 1),
-            ("Project Hunt", "now", "Bid tracker filters and KPI theme done. Vendor follow-up automation left.", 50, 2),
-            ("Equipment Center", "now", "Matching Product Intelligence's KPI colors and filters.", 50, 3),
-            ("BidFlow", "next", "Takeoff + bid system. Waiting on final Excel sheets from estimating.", 15, 4),
-            ("Atlas", "next", "Voice assistant -- scoping starts after BidFlow's data model is settled.", 0, 5),
-            ("Engineering", "later", "Parked intentionally.", 0, 6),
+            ("Product Core", "now", "Canonical Project Identity is live -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 90, 1),
+            ("Product Intelligence", "now", "Command Center experience refinement -- visual hierarchy, real-data intelligence, and honest empty states.", 60, 2),
+            ("Project Connectivity", "next", "Turning canonical Project Identity into useful connected project intelligence across modules.", 10, 3),
+            ("Atlas", "evolving", "BuildIQ's intelligence and action layer -- read tools shipped; continuously gaining capability rather than reaching a fixed 100%.", 40, 4),
+            ("BidFlow", "later", "Takeoff + bid system. Parked until the real estimating workflow/Excel sheets are available.", 0, 5),
+            ("Redline", "later", "Parked intentionally.", 0, 6),
             ("Finance", "later", "Parked intentionally.", 0, 7),
         ]
         for name, lane, note, pct, order in roadmap_seed:
@@ -1394,9 +1405,57 @@ def init_db():
                 "INSERT INTO roadmap_items (name, lane, note, progress_pct, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (name, lane, note, pct, order, now)
             )
+    else:
+        _correct_stale_roadmap_seed(db)
 
     db.commit()
     db.close()
+
+
+def _correct_stale_roadmap_seed(db):
+    """One-time, idempotent correction for a TEST database that already
+    has the OLD roadmap seed (SitePulse/Project Hunt/Equipment Center/
+    BidFlow/Atlas/Engineering/Finance, from before Product Intelligence
+    2.0's Build Direction story). Only fires if every one of those 7
+    original rows is still present with its EXACT original note text --
+    i.e. nothing an admin ever hand-edited via the roadmap UI. If even
+    one has been edited, this does nothing, so a real admin's changes
+    are never silently overwritten. Replaces them with the real current
+    strategic direction as stated by the product owner, matching the
+    NOW/NEXT/EVOLVING/LATER story (see Build Direction on the Product
+    Intelligence page)."""
+    original_seed = {
+        "SitePulse": "Filters and delivery dates shipped. Polishing purchase request flow next.",
+        "Project Hunt": "Bid tracker filters and KPI theme done. Vendor follow-up automation left.",
+        "Equipment Center": "Matching Product Intelligence's KPI colors and filters.",
+        "BidFlow": "Takeoff + bid system. Waiting on final Excel sheets from estimating.",
+        "Atlas": "Voice assistant -- scoping starts after BidFlow's data model is settled.",
+        "Engineering": "Parked intentionally.",
+        "Finance": "Parked intentionally.",
+    }
+    rows = {name: note for name, note in db.execute(
+        "SELECT name, note FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(original_seed)),
+        list(original_seed.keys())
+    ).fetchall()}
+    if rows != original_seed:
+        return  # something was hand-edited (or rows are missing) -- leave it alone
+
+    now = datetime.utcnow().isoformat()
+    db.execute("DELETE FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(original_seed)), list(original_seed.keys()))
+    new_seed = [
+        ("Product Core", "now", "Canonical Project Identity is live -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 90, 1),
+        ("Product Intelligence", "now", "Command Center experience refinement -- visual hierarchy, real-data intelligence, and honest empty states.", 60, 2),
+        ("Project Connectivity", "next", "Turning canonical Project Identity into useful connected project intelligence across modules.", 10, 3),
+        ("Atlas", "evolving", "BuildIQ's intelligence and action layer -- read tools shipped; continuously gaining capability rather than reaching a fixed 100%.", 40, 4),
+        ("BidFlow", "later", "Takeoff + bid system. Parked until the real estimating workflow/Excel sheets are available.", 0, 5),
+        ("Redline", "later", "Parked intentionally.", 0, 6),
+        ("Finance", "later", "Parked intentionally.", 0, 7),
+    ]
+    for name, lane, note, pct, order in new_seed:
+        db.execute(
+            "INSERT INTO roadmap_items (name, lane, note, progress_pct, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, lane, note, pct, order, now)
+        )
 
 
 init_db()
@@ -4063,10 +4122,12 @@ def product_intelligence():
     attention_items.sort(key=lambda x: priority_rank.get(x["priority"], 3))
     attention_items = attention_items[:6]
 
-    total_assets = db.execute("SELECT COUNT(*) FROM sitepulse_assets").fetchone()[0]
-    available_assets = db.execute("SELECT COUNT(*) FROM sitepulse_assets WHERE status = 'Available'").fetchone()[0]
-    fleet_uptime_pct = round(100 * available_assets / total_assets) if total_assets else None
-    resolution_rate_pct = round(100 * kpi["released"] / total_requests) if total_requests else 0
+    # NOTE: fleet_uptime_pct/resolution_rate_pct (a blended fleet-uptime +
+    # request-resolution percentage) used to power a "System Health" gauge
+    # that could show misleadingly low numbers (e.g. 0%) and imply BuildIQ
+    # itself was broken. Removed as part of Product Intelligence 2.0's
+    # System Health correction -- see platform_state below for its
+    # truthful replacement.
 
     day_labels = [(today - timedelta(days=i)) for i in range(13, -1, -1)]
     submitted_counts, resolved_counts = [], []
@@ -4151,21 +4212,117 @@ def product_intelligence():
     backlog_trend_up = len(backlog_counts) >= 2 and backlog_counts[-1] > backlog_counts[0]
 
     roadmap_rows = db.execute("SELECT * FROM roadmap_items ORDER BY sort_order ASC").fetchall()
-    roadmap_lanes = {"now": [], "next": [], "later": []}
+    roadmap_lanes = {"now": [], "next": [], "evolving": [], "later": []}
     for item in roadmap_rows:
         roadmap_lanes.setdefault(item["lane"], []).append(item)
     module_health = [r for r in roadmap_rows if r["lane"] in ("now", "next")][:4]
+
+    # ---- Product Intelligence 2.0: Command Center data ----
+    # Everything below is either a direct re-derivation of numbers already
+    # computed above, or a small new real query -- nothing here is
+    # fabricated, estimated, or hardcoded. Where BuildIQ genuinely doesn't
+    # have reliable data for a concept, the value is left None/empty and
+    # the template shows a truthful state instead of a number.
+
+    # Request Lifecycle: reuses status_counts already computed for `kpi`
+    # above. REQUESTED combines Submitted+Reviewing (BuildIQ's own two
+    # earliest real statuses) since the reference story's 5-stage
+    # lifecycle doesn't distinguish them -- everything else is a 1:1
+    # mapping onto REQUEST_STATUSES, the same statuses every other part
+    # of Product Intelligence already uses.
+    lifecycle = [
+        {"key": "requested", "label": "Requested", "count": status_counts.get("Submitted", 0) + status_counts.get("Reviewing", 0)},
+        {"key": "approved", "label": "Approved", "count": status_counts.get("Approved", 0)},
+        {"key": "building", "label": "Building", "count": status_counts.get("Building", 0)},
+        {"key": "testing", "label": "Testing", "count": status_counts.get("Testing", 0)},
+        {"key": "resolved", "label": "Resolved", "count": status_counts.get("Released", 0)},
+    ]
+
+    # Priority Builds hero: pulls specific named roadmap_items rows
+    # (the same table Build Direction reads) rather than a separate
+    # data source, so editing one place (the existing roadmap edit UI)
+    # keeps both sections truthful and in sync.
+    def _priority_build(name, status_label):
+        row = next((r for r in roadmap_rows if r["name"] == name), None)
+        if not row:
+            return None
+        return {"name": name, "status_label": status_label, "lane": row["lane"],
+                "note": row["note"], "progress_pct": row["progress_pct"]}
+    priority_builds = [b for b in [
+        _priority_build("Product Core", "FOUNDATION"),
+        _priority_build("Product Intelligence", "POLISHING \u00b7 ACTIVE"),
+        _priority_build("Atlas", "EVOLVING"),
+    ] if b]
+
+    # Situation panel: active builds/in-testing come straight from `kpi`
+    # above; blockers are the high-priority items already computed for
+    # Attention Required; changes-this-week is a real count from the
+    # same activity_log table the module sparklines already query.
+    week_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+    changes_this_week = db.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE created_at >= ?", (week_ago,)
+    ).fetchone()[0]
+    situation = {
+        "active_builds": kpi["building"],
+        "blockers": len([a for a in attention_items if a["priority"] == "high"]),
+        "in_testing": kpi["testing"],
+        "changes_this_week": changes_this_week,
+    }
+
+    # BuildIQ Pulse: same 14-day window already built for the trend
+    # lines above (day_labels/submitted_counts/resolved_counts) -- just
+    # summarized as real totals instead of (or alongside) the line chart.
+    requests_received_14d = sum(submitted_counts)
+    resolved_14d = sum(resolved_counts)
+    modules_active_14d = db.execute(
+        "SELECT COUNT(DISTINCT section) FROM activity_log WHERE created_at >= ?",
+        (day_labels[0].isoformat(),)
+    ).fetchone()[0]
+    platform_events_14d = db.execute(
+        "SELECT COUNT(*) FROM activity_log WHERE created_at >= ?",
+        (day_labels[0].isoformat(),)
+    ).fetchone()[0]
+    pulse = {
+        "requests_received": requests_received_14d,
+        "resolved": resolved_14d,
+        "modules_active": modules_active_14d,
+        "platform_events": platform_events_14d,
+        "has_trend_data": any(submitted_counts) or any(resolved_counts),
+    }
+
+    # Platform State: replaces the old "System Health" percentage, which
+    # mixed fleet uptime and request-resolution rate into one misleading
+    # number that could show 0% and look like BuildIQ was broken. These
+    # are genuinely determinable facts, not estimates: whether the Atlas
+    # LLM key and WhatsApp integration are configured (env vars either
+    # are or are not set), and that the application is running (trivially
+    # true if this code executed at all).
+    platform_state = {
+        "app_operational": True,
+        "atlas_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "whatsapp_configured": bool(ULTRAMSG_TOKEN),
+    }
+
+    # BuildIQ Ecosystem: reuses module_tiles (already real, already
+    # computed above) and adds Atlas (state only -- no fabricated count)
+    # and Product Core (the identity/connectivity foundation -- shown as
+    # a non-clickable conceptual node, not a metric-bearing module, since
+    # there's no dedicated Project Core page to click into).
+    ecosystem_atlas = {"name": "Atlas", "configured": platform_state["atlas_configured"],
+                        "url": url_for("assistant_page") if is_atlas_allowed() else None}
 
     return render_template(
         "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
         departments=departments, status_filter=status_filter, department_filter=department_filter,
         kpi=kpi, pipeline=pipeline, dept_breakdown=dept_breakdown, module_breakdown=module_breakdown,
         recent_activity=recent_activity, recently_released=recently_released,
-        attention_items=attention_items, fleet_uptime_pct=fleet_uptime_pct, resolution_rate_pct=resolution_rate_pct,
+        attention_items=attention_items,
         submitted_line=submitted_line, resolved_line=resolved_line, resolved_fill=resolved_fill,
         module_tiles=module_tiles, avg_resolve_days=avg_resolve_days, backlog_line=backlog_line,
         open_backlog_now=open_backlog_now, backlog_trend_up=backlog_trend_up,
-        roadmap_lanes=roadmap_lanes, module_health=module_health
+        roadmap_lanes=roadmap_lanes, module_health=module_health,
+        lifecycle=lifecycle, priority_builds=priority_builds, situation=situation,
+        pulse=pulse, platform_state=platform_state, ecosystem_atlas=ecosystem_atlas,
     )
 
 
@@ -4177,7 +4334,7 @@ def roadmap_item_update(item_id):
         return redirect(url_for("home"))
     db = get_db()
     lane = request.form.get("lane", "later")
-    if lane not in ("now", "next", "later"):
+    if lane not in ("now", "next", "evolving", "later"):
         lane = "later"
     try:
         progress_pct = max(0, min(100, int(request.form.get("progress_pct", 0))))
@@ -4446,6 +4603,16 @@ def admin_user_permissions(user_id):
             if role_id == admin_role_id and not actor_is_admin:
                 flash("Only an Administrator can grant Administrator access.", "error")
                 return redirect(url_for("admin_user_permissions", user_id=user_id))
+            # Product Intelligence 2.0 role simplification: this is "the
+            # normal Users & Permissions interface" the CTO's instruction
+            # refers to -- only the 3 simplified roles can be newly
+            # assigned through it. Existing legacy role assignments are
+            # untouched (this only guards new assignment, never removal),
+            # and nothing about permission resolution itself changes.
+            role_name_row = db.execute("SELECT name FROM roles WHERE id = ?", (role_id,)).fetchone()
+            if role_name_row and role_name_row["name"] not in ASSIGNABLE_ROLES:
+                flash(f"\"{role_name_row['name']}\" is a legacy role and can no longer be newly assigned here.", "error")
+                return redirect(url_for("admin_user_permissions", user_id=user_id))
             db.execute("INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)", (user_id, role_id))
             db.commit()
             flash("Role assigned.")
@@ -4512,6 +4679,7 @@ def admin_user_permissions(user_id):
         return redirect(url_for("admin_user_permissions", user_id=user_id))
 
     all_roles = db.execute("SELECT id, name, description FROM roles ORDER BY name").fetchall()
+    assignable_role_ids = {r["id"] for r in all_roles if r["name"] in ASSIGNABLE_ROLES}
     user_role_ids = {r["role_id"] for r in db.execute("SELECT role_id FROM user_roles WHERE user_id = ?", (user_id,)).fetchall()}
     overrides = {r["permission_id"]: r["state"] for r in db.execute(
         "SELECT permission_id, state FROM user_permission_overrides WHERE user_id = ?", (user_id,)
@@ -4540,6 +4708,7 @@ def admin_user_permissions(user_id):
 
     return render_template(
         "requests/admin_user_permissions.html", target_user=target_user, all_roles=all_roles,
+        assignable_role_ids=assignable_role_ids,
         user_role_ids=user_role_ids, permissions_by_category=permissions_by_category
     )
 

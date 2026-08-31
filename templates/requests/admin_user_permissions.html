@@ -9,22 +9,25 @@
     <p class="sub" style="margin-bottom:12px;">A role grants its permissions to this user automatically. A user can hold more than one role.</p>
     <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px;">
         {% for r in all_roles %}
+        {% if r['id'] in assignable_role_ids or r['id'] in user_role_ids %}
         <div style="display:flex; align-items:center; gap:6px; padding:6px 10px; border:1px solid #2a2a2a; border-radius:6px; {{ 'background:rgba(94,234,212,0.08); border-color:#5EEAD4;' if r['id'] in user_role_ids }}">
-            <span>{{ r['name'] }}</span>
+            <span>{{ r['name'] }}{% if r['id'] not in assignable_role_ids %} <span class="sub" style="font-size:11px;">(legacy)</span>{% endif %}</span>
             <form method="POST" style="display:inline;">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="role_id" value="{{ r['id'] }}">
                 {% if r['id'] in user_role_ids %}
                 <input type="hidden" name="action" value="remove_role">
                 <button type="submit" class="btn btn-sm" style="padding:2px 8px;" title="Remove role">&times;</button>
-                {% else %}
+                {% elif r['id'] in assignable_role_ids %}
                 <input type="hidden" name="action" value="assign_role">
                 <button type="submit" class="btn btn-sm" style="padding:2px 8px;" title="Assign role">+</button>
                 {% endif %}
             </form>
         </div>
+        {% endif %}
         {% endfor %}
     </div>
+    <p class="sub" style="font-size:12px;">Only Administrator, Procurement, and Operations can be newly assigned. Legacy roles (Project Manager, Estimator, Employee) remain visible only if already assigned to this person, and can still be removed.</p>
 </div>
 
 <h3>Permissions</h3>

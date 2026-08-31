@@ -15,296 +15,245 @@
 {%- endif -%}
 {% endmacro %}
 
+<style>
+    /* Product Intelligence 2.0 -- additive only, reuses the existing
+       --brass/--teal/--cyan/--line/--text-dim tokens already defined in
+       base.html/requests/_styles.html. Nothing here touches those files. */
+    .pi2-header-row { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:22px; flex-wrap:wrap; }
+    .pi2-header-actions { display:flex; gap:8px; flex-shrink:0; }
+    .pi2-header-actions .btn { font-size:11px; padding:6px 12px; }
+
+    .pi2-strip { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:22px; }
+    @media (max-width:760px) { .pi2-strip { grid-template-columns:repeat(2,1fr); } }
+    .pi2-strip-item { background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:12px 14px; text-decoration:none; color:var(--text); display:block; }
+    .pi2-strip-item:hover { border-color:var(--brass-dim); }
+    .pi2-strip-item.active { border-color:var(--brass); box-shadow:0 0 0 1px rgba(201,162,75,0.25); }
+    .pi2-strip-value { font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; line-height:1; }
+    .pi2-strip-label { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.6px; margin-top:6px; }
+
+    .pi2-hero-grid { display:grid; grid-template-columns:1.6fr 1fr; gap:16px; margin-bottom:24px; align-items:stretch; }
+    @media (max-width:980px) { .pi2-hero-grid { grid-template-columns:1fr; } }
+
+    .pi2-spine { position:relative; padding-left:26px; }
+    .pi2-spine::before { content:""; position:absolute; left:8px; top:10px; bottom:10px; width:2px; background:linear-gradient(180deg, var(--brass) 0%, var(--teal) 50%, var(--cyan) 100%); opacity:0.4; }
+    .pi2-build-card { position:relative; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:12px; }
+    .pi2-build-card:last-child { margin-bottom:0; }
+    .pi2-build-card.active { border-color:rgba(201,162,75,0.5); background:linear-gradient(180deg, rgba(201,162,75,0.06), transparent); }
+    .pi2-build-card.evolving { border-color:rgba(94,234,212,0.4); }
+    .pi2-build-card.foundation { border-color:rgba(90,200,224,0.35); }
+    .pi2-build-dot { position:absolute; left:-22px; top:20px; width:11px; height:11px; border-radius:50%; border:2px solid var(--surface); }
+    .pi2-build-card.active .pi2-build-dot { background:var(--brass); }
+    .pi2-build-card.evolving .pi2-build-dot { background:var(--teal); }
+    .pi2-build-card.foundation .pi2-build-dot { background:#5AC8E0; }
+    .pi2-build-top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+    .pi2-build-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; }
+    .pi2-build-pill { font-family:'IBM Plex Mono',monospace; font-size:8.5px; font-weight:700; padding:2px 7px; border-radius:3px; border:1.5px solid; letter-spacing:0.4px; white-space:nowrap; }
+    .pi2-build-card.active .pi2-build-pill { color:var(--brass); border-color:var(--brass); }
+    .pi2-build-card.evolving .pi2-build-pill { color:var(--teal); border-color:var(--teal); }
+    .pi2-build-card.foundation .pi2-build-pill { color:#5AC8E0; border-color:#5AC8E0; }
+    .pi2-build-note { font-size:12px; color:var(--text-dim); margin:6px 0 10px; line-height:1.5; }
+    .pi2-build-track { height:5px; background:var(--line); border-radius:3px; overflow:hidden; }
+    .pi2-build-fill { height:100%; border-radius:3px; }
+    .pi2-build-card.active .pi2-build-fill { background:var(--brass); }
+    .pi2-build-card.evolving .pi2-build-fill { background:var(--teal); }
+    .pi2-build-card.foundation .pi2-build-fill { background:#5AC8E0; }
+    .pi2-build-pct { font-family:'Space Grotesk',sans-serif; font-size:12px; font-weight:700; color:var(--text-dim); margin-top:4px; text-align:right; }
+
+    .pi2-situation-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+    .pi2-sit-tile { background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
+    .pi2-sit-value { font-family:'Space Grotesk',sans-serif; font-size:19px; font-weight:700; }
+    .pi2-sit-label { font-family:'IBM Plex Mono',monospace; font-size:8.5px; color:var(--text-dim); text-transform:uppercase; margin-top:2px; }
+    .pi2-movement-item { display:flex; align-items:baseline; gap:8px; padding:5px 0; font-size:11.5px; border-bottom:1px solid var(--line); }
+    .pi2-movement-item:last-child { border-bottom:none; }
+    .pi2-movement-dot { width:5px; height:5px; border-radius:50%; background:var(--teal); flex-shrink:0; }
+    .pi2-movement-text { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-dim); }
+    .pi2-movement-time { font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--text-faint); flex-shrink:0; }
+
+    .pi2-lifecycle { display:flex; align-items:center; gap:0; overflow-x:auto; padding:4px 0; }
+    .pi2-lc-stage { flex:1; min-width:110px; text-align:center; position:relative; padding:0 6px; }
+    .pi2-lc-circle { width:46px; height:46px; border-radius:50%; border:2px solid var(--line); display:flex; align-items:center; justify-content:center; margin:0 auto 8px; background:var(--surface); }
+    .pi2-lc-stage.has-count .pi2-lc-circle { border-color:var(--brass); }
+    .pi2-lc-stage.resolved.has-count .pi2-lc-circle { border-color:var(--teal); }
+    .pi2-lc-count { font-family:'Space Grotesk',sans-serif; font-size:19px; font-weight:700; }
+    .pi2-lc-label { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; }
+    .pi2-lc-sub { font-size:10.5px; color:var(--text-faint); margin-top:1px; }
+    .pi2-lc-arrow { color:var(--text-faint); font-size:16px; flex-shrink:0; }
+
+    .pi2-attention-clear { display:flex; align-items:center; gap:14px; padding:6px 2px; }
+    .pi2-attention-clear-icon { width:38px; height:38px; border-radius:50%; border:2px solid var(--teal); color:var(--teal); display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; }
+
+    .pi2-pulse-row { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
+    .pi2-pulse-tile { text-align:center; }
+    .pi2-pulse-value { font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; }
+    .pi2-pulse-label { font-family:'IBM Plex Mono',monospace; font-size:8.5px; color:var(--text-dim); text-transform:uppercase; margin-top:2px; }
+
+    .pi2-direction-row { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+    @media (max-width:900px) { .pi2-direction-row { grid-template-columns:1fr 1fr; } }
+    @media (max-width:560px) { .pi2-direction-row { grid-template-columns:1fr; } }
+    .pi2-lane-card { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+    .pi2-lane-card.now { border-color:rgba(201,162,75,0.4); }
+    .pi2-lane-head { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:2px; }
+    .pi2-lane-card.now .pi2-lane-head { color:var(--brass); }
+    .pi2-lane-card.next .pi2-lane-head { color:#5AC8E0; }
+    .pi2-lane-card.evolving .pi2-lane-head { color:var(--teal); }
+    .pi2-lane-card.later .pi2-lane-head { color:var(--text-faint); }
+    .pi2-lane-sub { font-size:10.5px; color:var(--text-faint); margin-bottom:10px; }
+    .pi2-lane-item-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13px; margin-bottom:3px; }
+    .pi2-lane-item-note { font-size:11px; color:var(--text-dim); line-height:1.5; margin-bottom:8px; }
+
+    .pi2-ecosystem-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; align-items:center; margin-bottom:14px; }
+    @media (max-width:760px) { .pi2-ecosystem-grid { grid-template-columns:1fr; } }
+    .pi2-eco-node { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:12px 14px; text-decoration:none; color:var(--text); display:block; }
+    .pi2-eco-node:hover { border-color:var(--brass-dim); }
+    .pi2-eco-node-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+    .pi2-eco-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; }
+    .pi2-eco-metric { font-size:11px; color:var(--text-dim); }
+    .pi2-eco-center { text-align:center; padding:20px 10px; }
+    .pi2-eco-hex { width:74px; height:74px; margin:0 auto 8px; border-radius:16px; border:2px solid var(--brass); display:flex; align-items:center; justify-content:center; background:radial-gradient(circle, rgba(201,162,75,0.12), transparent); }
+
+    .pi2-module-row { display:flex; flex-direction:column; gap:0; }
+    .pi2-module-item { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--line); }
+    .pi2-module-item:last-child { border-bottom:none; }
+    .pi2-module-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; width:140px; flex-shrink:0; }
+    .pi2-module-detail { flex:1; font-size:11.5px; color:var(--text-dim); min-width:0; }
+    .pi2-module-spark { width:90px; height:24px; flex-shrink:0; }
+</style>
+
 <div class="cc-shell">
 <div class="cc-jumpnav">
     <span class="rc-eyebrow" style="margin-bottom:4px;">Product Intelligence</span>
-    <h1 style="font-size:20px; margin-bottom:6px;">Command Center</h1>
-    <p class="sub" style="font-size:11.5px; margin-bottom:22px; line-height:1.5;">Every request, its full history, and where BuildIQ is spending its build time.</p>
+    <h1 style="font-size:20px; margin-bottom:6px;">BuildIQ Command Center</h1>
+    <p class="sub" style="font-size:11.5px; margin-bottom:22px; line-height:1.5;">What we're building, what needs attention, and where the platform is heading.</p>
     <div class="cc-jumpnav-label">Jump to</div>
-    <a href="#cc-kpis" class="jn-brass"><span class="jn-dot"></span>All Requests</a>
-    <a href="#cc-pipeline" class="jn-brass"><span class="jn-dot"></span>Pipeline</a>
-    <a href="#cc-reqhealth" class="jn-teal"><span class="jn-dot"></span>Request Health</a>
-    <a href="#cc-overview" class="jn-teal"><span class="jn-dot"></span>System Overview</a>
-    <a href="#cc-modhealth" class="jn-teal"><span class="jn-dot"></span>Module Health</a>
-    <a href="#cc-roadmap" class="jn-brass"><span class="jn-dot"></span>Roadmap</a>
-    <a href="#cc-attention"><span class="jn-dot"></span>Needs Attention</a>
-    <a href="#cc-trend" class="jn-teal"><span class="jn-dot"></span>Requests Trend</a>
+    <a href="#pi2-builds" class="jn-brass"><span class="jn-dot"></span>Priority Builds</a>
+    <a href="#pi2-lifecycle" class="jn-brass"><span class="jn-dot"></span>Request Lifecycle</a>
+    <a href="#pi2-attention"><span class="jn-dot"></span>Attention Required</a>
+    <a href="#pi2-pulse" class="jn-teal"><span class="jn-dot"></span>BuildIQ Pulse</a>
+    <a href="#pi2-resolved" class="jn-teal"><span class="jn-dot"></span>Recently Resolved</a>
+    <a href="#pi2-direction" class="jn-brass"><span class="jn-dot"></span>Build Direction</a>
+    <a href="#pi2-ecosystem" class="jn-teal"><span class="jn-dot"></span>BuildIQ Ecosystem</a>
+    <a href="#pi2-all-requests"><span class="jn-dot"></span>All Requests</a>
 </div>
 <div class="cc-main">
 
-<div style="display:flex; justify-content:flex-end; gap:10px; margin-bottom:14px;">
-    {% if has_team_admin_access %}
-    <a href="{{ url_for('team_list') }}" class="btn">Users &amp; Permissions</a>
-    {% endif %}
-    <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
+<div class="pi2-header-row">
+    <div></div>
+    <div class="pi2-header-actions">
+        {% if has_team_admin_access %}
+        <a href="{{ url_for('team_list') }}" class="btn">Users &amp; Permissions</a>
+        {% endif %}
+        <a href="{{ url_for('product_intelligence_preview') }}" class="btn">Preview Employee View</a>
+    </div>
 </div>
 
-<p class="pi-section-title" id="cc-kpis" style="margin-bottom:12px; scroll-margin-top:16px;">All Requests</p>
-<div class="kpi-grid pi-kpi-grid" style="margin-bottom:20px;">
-    <a href="{{ url_for('product_intelligence') }}" class="kpi-card {{ 'kpi-active' if not status_filter }}"><div class="kpi-value">{{ kpi.total }}</div><div class="kpi-label">Total Requests</div></a>
-    <a href="{{ url_for('product_intelligence', status='Submitted,Reviewing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Submitted,Reviewing' }}"><div class="kpi-value" style="color:var(--cyan);">{{ kpi.new_reviewing }}</div><div class="kpi-label">New / Reviewing</div></a>
-    <a href="{{ url_for('product_intelligence', status='Building') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Building' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.building }}</div><div class="kpi-label">Building</div></a>
-    <a href="{{ url_for('product_intelligence', status='Testing') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Testing' }}"><div class="kpi-value" style="color:var(--brass);">{{ kpi.testing }}</div><div class="kpi-label">Testing</div></a>
-    <a href="{{ url_for('product_intelligence', status='Released') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'Released' }}"><div class="kpi-value" style="color:var(--teal);">{{ kpi.released }}</div><div class="kpi-label">Resolved</div></a>
-    <a href="{{ url_for('product_intelligence', status='On Hold,Not Planned') }}" class="kpi-card {{ 'kpi-active' if status_filter == 'On Hold,Not Planned' }}"><div class="kpi-value" style="color:var(--text-faint);">{{ kpi.stalled }}</div><div class="kpi-label">On Hold / Not Planned</div></a>
+<!-- COMPACT STATUS STRIP -->
+<div class="pi2-strip">
+    <a href="{{ url_for('product_intelligence') }}" class="pi2-strip-item {{ 'active' if not status_filter }}">
+        <div class="pi2-strip-value">{{ kpi.total }}</div>
+        <div class="pi2-strip-label">Total Requests</div>
+    </a>
+    <a href="{{ url_for('product_intelligence', status='Building') }}" class="pi2-strip-item {{ 'active' if status_filter == 'Building' }}">
+        <div class="pi2-strip-value" style="color:var(--brass);">{{ kpi.building }}</div>
+        <div class="pi2-strip-label">Building</div>
+    </a>
+    <a href="{{ url_for('product_intelligence', status='Testing') }}" class="pi2-strip-item {{ 'active' if status_filter == 'Testing' }}">
+        <div class="pi2-strip-value" style="color:#5AC8E0;">{{ kpi.testing }}</div>
+        <div class="pi2-strip-label">Testing</div>
+    </a>
+    <a href="{{ url_for('product_intelligence', status='Released') }}" class="pi2-strip-item {{ 'active' if status_filter == 'Released' }}">
+        <div class="pi2-strip-value" style="color:var(--teal);">{{ kpi.released }}</div>
+        <div class="pi2-strip-label">Resolved</div>
+    </a>
+    <a href="#pi2-attention" class="pi2-strip-item">
+        <div class="pi2-strip-value" style="color:{{ 'var(--red)' if situation.blockers else 'var(--text-dim)' }};">{{ attention_items|length }}</div>
+        <div class="pi2-strip-label">Need Attention</div>
+    </a>
 </div>
 {% if status_filter %}
-<p class="sub" style="margin-top:-8px; margin-bottom:20px; font-size:12px;">Filtered by KPI &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
+<p class="sub" style="margin-top:-14px; margin-bottom:20px; font-size:12px;">Filtered &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
 {% endif %}
 
-<!-- REQUEST PIPELINE: moved up near the top, right after the KPI strip -->
-{% if pipeline %}
-<p class="pi-section-title" id="cc-pipeline" style="margin-bottom:12px; scroll-margin-top:16px;">Request Pipeline <span class="dim">where everything sits right now</span></p>
-<div class="card" style="margin-bottom:20px; padding:16px 18px;">
-    <div class="pi-pipeline">
-        {% for seg in pipeline %}
-        <div class="pi-pipeline-seg" style="width:{{ seg.pct }}%; background:{{ seg.color }};" title="{{ seg.status|replace('Released','Resolved') }}: {{ seg.count }}">{{ seg.count if seg.pct >= 6 }}</div>
-        {% endfor %}
-    </div>
-    <div class="pi-pipeline-legend" style="margin-top:10px;">
-        {% for seg in pipeline %}
-        <div class="pi-pipeline-legend-item"><span class="pi-pipeline-legend-swatch" style="background:{{ seg.color }};"></span>{{ seg.status|replace('Released','Resolved') }} ({{ seg.count }})</div>
-        {% endfor %}
-    </div>
-</div>
-{% endif %}
-
-<!-- BY DEPARTMENT / BY MODULE: moved up, compact side-by-side -->
-{% if dept_breakdown or module_breakdown %}
-<div class="pi-two-col" style="margin-bottom:20px;">
-    {% if dept_breakdown %}
-    <div class="card" style="margin-bottom:0; padding:16px 18px;">
-        <p class="pi-section-title" style="margin-bottom:10px;">By Department</p>
-        {% for d in dept_breakdown %}
-        <div class="pi-bar-row">
-            <div class="pi-bar-label">{{ d.label }}</div>
-            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ d.pct }}%;"></div></div>
-            <div class="pi-bar-count">{{ d.count }}</div>
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
-
-    {% if module_breakdown %}
-    <div class="card" style="margin-bottom:0; padding:16px 18px;">
-        <p class="pi-section-title" style="margin-bottom:10px;">By BuildIQ Module <span class="dim">from released/tagged</span></p>
-        {% for m in module_breakdown %}
-        <div class="pi-bar-row">
-            <div class="pi-bar-label">{{ m.label }}</div>
-            <div class="pi-bar-track"><div class="pi-bar-fill" style="width:{{ m.pct }}%;"></div></div>
-            <div class="pi-bar-count">{{ m.count }}</div>
-        </div>
-        {% endfor %}
-    </div>
-    {% endif %}
-</div>
-{% endif %}
-
-<!-- REQUEST HEALTH: metrics about the requests pipeline specifically -->
-<p class="pi-section-title" id="cc-reqhealth" style="margin-bottom:12px; scroll-margin-top:16px;">Request Health</p>
-<div class="cc-req-health-row" style="margin-bottom:20px;">
-    <div class="card" style="margin-bottom:0; padding:16px 18px;">
-        <h3 style="margin-bottom:4px; font-size:13px;">Avg Time to Resolve</h3>
-        <p class="sub" style="margin-bottom:10px; font-size:11px;">Submitted &rarr; Released, last 20 resolved.</p>
-        {% if avg_resolve_days is not none %}
-        <div class="cc-stat-value" style="color:var(--teal); font-size:22px;">{{ avg_resolve_days }}<span style="font-size:13px; color:var(--text-dim);"> days</span></div>
-        {% else %}
-        <div class="cc-stat-value" style="color:var(--text-faint); font-size:15px;">Not enough data yet</div>
-        {% endif %}
-    </div>
-    <div class="card" style="margin-bottom:0; padding:16px 18px;">
-        <h3 style="margin-bottom:4px; font-size:13px;">Open Backlog</h3>
-        <p class="sub" style="margin-bottom:8px; font-size:11px;">Not yet Released, tracked daily, 14 days.</p>
-        <svg width="100%" height="36" viewBox="0 0 260 56" style="overflow:visible;">
-            <defs><filter id="ccBk" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-            <path d="{{ backlog_line }}" fill="none" stroke="{{ '#F87171' if backlog_trend_up else '#5EEAD4' }}" stroke-width="2.2" filter="url(#ccBk)"/>
-        </svg>
-        <div class="cc-stat-value" style="color:{{ 'var(--red)' if backlog_trend_up else 'var(--teal)' }}; font-size:17px; margin-top:4px;">{{ open_backlog_now }} open</div>
-        <div class="cc-stat-delta" style="color:{{ 'var(--red)' if backlog_trend_up else 'var(--teal)' }};">{{ '&#8593; trending up'|safe if backlog_trend_up else '&#8595; trending down'|safe }}</div>
-    </div>
-    <div class="card" style="margin-bottom:0; padding:16px 18px;">
-        <h3 style="margin-bottom:4px; font-size:13px;">Resolution Rate</h3>
-        <p class="sub" style="margin-bottom:10px; font-size:11px;">Share of all-time requests shipped.</p>
-        <div style="display:flex; align-items:center; gap:12px;">
-            <svg width="52" height="52" viewBox="0 0 66 66"><defs><filter id="ccRr" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-            <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
-            <circle cx="33" cy="33" r="26" fill="none" stroke="#5EEAD4" stroke-width="6" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="{{ (163.4 * (1 - resolution_rate_pct/100))|round(1) }}" transform="rotate(-90 33 33)" filter="url(#ccRr)"/>
-            <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="12" font-family="Space Grotesk" font-weight="700">{{ resolution_rate_pct }}%</text></svg>
-            <div class="cc-stat-delta" style="color:var(--teal); margin-top:0;">{{ kpi.released }} of {{ kpi.total }} shipped</div>
-        </div>
-    </div>
-</div>
-
-<!-- SYSTEM OVERVIEW: network diagram + gauges -->
-<p class="pi-section-title" id="cc-overview" style="margin-bottom:12px; scroll-margin-top:16px;">System Overview</p>
-<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
-    <div class="card" style="margin-bottom:0;">
-        <h3 style="margin-bottom:8px;">Module Network</h3>
-        <svg width="100%" height="190" viewBox="0 0 640 230">
-            <defs><filter id="ccGlow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-            <line x1="320" y1="115" x2="140" y2="45"  stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
-            <line x1="320" y1="115" x2="140" y2="115" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
-            <line x1="320" y1="115" x2="140" y2="185" stroke="#5EEAD4" stroke-width="1.5" opacity="0.5"/>
-            <line x1="320" y1="115" x2="500" y2="55"  stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
-            <line x1="320" y1="115" x2="500" y2="175" stroke="#C9A24B" stroke-width="1.5" opacity="0.5" stroke-dasharray="4 4"/>
-            <a href="{{ url_for('product_intelligence') }}"><circle cx="320" cy="115" r="30" fill="var(--surface)" stroke="#C9A24B" stroke-width="2.5" filter="url(#ccGlow)"/>
-            <text x="320" y="120" text-anchor="middle" fill="#C9A24B" font-size="9.5" font-family="IBM Plex Mono" font-weight="700">CC</text></a>
-            <text x="320" y="160" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="700">Command Center</text>
-
-            <a href="{{ url_for('tracker_dashboard') }}"><circle cx="140" cy="45" r="22" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccGlow)"/>
-            <text x="140" y="50" text-anchor="middle" fill="#5EEAD4" font-size="10" font-family="Space Grotesk" font-weight="700">PH</text></a>
-            <text x="140" y="80" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">Project Hunt</text>
-
-            <a href="{{ url_for('sitepulse_dashboard') }}"><circle cx="140" cy="115" r="22" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccGlow)"/>
-            <text x="140" y="120" text-anchor="middle" fill="#5EEAD4" font-size="10" font-family="Space Grotesk" font-weight="700">EC</text></a>
-            <text x="140" y="150" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">Equipment Center</text>
-
-            <a href="{{ url_for('inventory_home') }}"><circle cx="140" cy="185" r="22" fill="var(--surface)" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccGlow)"/>
-            <text x="140" y="190" text-anchor="middle" fill="#5EEAD4" font-size="10" font-family="Space Grotesk" font-weight="700">SP</text></a>
-            <text x="140" y="220" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">SitePulse</text>
-
-            <circle cx="500" cy="55" r="19" fill="var(--surface)" stroke="#C9A24B" stroke-width="2" filter="url(#ccGlow)"/>
-            <text x="500" y="59" text-anchor="middle" fill="#C9A24B" font-size="9" font-family="Space Grotesk" font-weight="700">BF</text>
-            <text x="500" y="85" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">BidFlow</text>
-
-            <circle cx="500" cy="175" r="19" fill="var(--surface)" stroke="#C9A24B" stroke-width="2" filter="url(#ccGlow)"/>
-            <text x="500" y="179" text-anchor="middle" fill="#C9A24B" font-size="9" font-family="Space Grotesk" font-weight="700">AT</text>
-            <text x="500" y="205" text-anchor="middle" fill="var(--text)" font-size="11" font-family="Space Grotesk" font-weight="600">Atlas</text>
-        </svg>
-        <div style="display:flex; gap:16px; margin-top:6px;">
-            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Live now</div>
-            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Next up</div>
-        </div>
-    </div>
-    <div class="card" style="margin-bottom:0; display:flex; flex-direction:column; align-items:center; justify-content:center;">
-        <h3 style="align-self:flex-start; margin-bottom:6px;">System Health</h3>
-        <svg width="150" height="150" viewBox="0 0 180 180">
-            <defs><filter id="ccRing" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-            <circle cx="90" cy="90" r="78" fill="none" stroke="var(--line)" stroke-width="10"/>
-            {% if fleet_uptime_pct is not none %}
-            <circle cx="90" cy="90" r="78" fill="none" stroke="#5EEAD4" stroke-width="10" stroke-linecap="round" stroke-dasharray="490" stroke-dashoffset="{{ (490 * (1 - fleet_uptime_pct/100))|round(1) }}" transform="rotate(-90 90 90)" filter="url(#ccRing)"/>
-            {% endif %}
-            <circle cx="90" cy="90" r="60" fill="none" stroke="var(--line)" stroke-width="8"/>
-            <circle cx="90" cy="90" r="60" fill="none" stroke="#C9A24B" stroke-width="8" stroke-linecap="round" stroke-dasharray="377" stroke-dashoffset="{{ (377 * (1 - resolution_rate_pct/100))|round(1) }}" transform="rotate(-90 90 90)" filter="url(#ccRing)"/>
-            {% set sys_health_pct = ((fleet_uptime_pct or 0) + resolution_rate_pct) // 2 if fleet_uptime_pct is not none else resolution_rate_pct %}
-            <text x="90" y="84" text-anchor="middle" fill="var(--text)" font-size="24" font-family="Space Grotesk" font-weight="700">{{ sys_health_pct }}%</text>
-            <text x="90" y="102" text-anchor="middle" fill="var(--text-dim)" font-size="9" font-family="IBM Plex Mono">SYSTEM HEALTH</text>
-        </svg>
-        <div style="display:flex; gap:16px; margin-top:8px;">
-            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Fleet uptime {% if fleet_uptime_pct is not none %}({{ fleet_uptime_pct }}%){% endif %}</div>
-            <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Resolution ({{ resolution_rate_pct }}%)</div>
-        </div>
-    </div>
-</div>
-
-<!-- MODULE HEALTH: roadmap completion per module -->
-{% if module_health %}
-<p class="pi-section-title" id="cc-modhealth" style="margin-bottom:12px; scroll-margin-top:16px;">Module Health Scores <span class="dim">roadmap task completion</span></p>
-<div class="card" style="margin-bottom:20px;">
-    <div class="cc-mh-row">
-        {% for m in module_health %}
-        {% set mh_color = '#5EEAD4' if m['lane'] == 'now' else '#C9A24B' %}
-        {% set mh_off = (163.4 * (1 - m['progress_pct']/100))|round(1) %}
-        <div style="text-align:center; {{ 'opacity:0.5;' if m['lane'] == 'later' }}">
-            <svg width="72" height="72" viewBox="0 0 66 66"><defs><filter id="ccMh{{ loop.index }}" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-            <circle cx="33" cy="33" r="26" fill="none" stroke="var(--line)" stroke-width="6"/>
-            <circle cx="33" cy="33" r="26" fill="none" stroke="{{ mh_color }}" stroke-width="6" stroke-linecap="round" stroke-dasharray="163.4" stroke-dashoffset="{{ mh_off }}" transform="rotate(-90 33 33)" filter="url(#ccMh{{ loop.index }})"/>
-            <text x="33" y="38" text-anchor="middle" fill="var(--text)" font-size="14" font-family="Space Grotesk" font-weight="700">{{ m['progress_pct'] }}%</text></svg>
-            <div style="font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--text-dim); text-transform:uppercase; margin-top:4px;">{{ m['name'] }}</div>
-        </div>
-        {% endfor %}
-    </div>
-</div>
-{% endif %}
-
-<!-- ROADMAP -->
-{% if roadmap_lanes.now or roadmap_lanes.next or roadmap_lanes.later %}
-<p class="pi-section-title" id="cc-roadmap" style="margin-bottom:12px; scroll-margin-top:16px;">Roadmap <span class="dim">click a card to edit it</span></p>
-<div style="margin-bottom:20px;">
-    {% for lane_key, lane_title in [('now','Now \u00b7 Polishing'), ('next','Next up'), ('later','Later \u00b7 Not started')] %}
-    {% if roadmap_lanes[lane_key] %}
-    <div class="cc-roadmap-lane {{ lane_key }}">
-        <div class="cc-roadmap-head {{ lane_key }}">{{ lane_title }}</div>
-        <div class="cc-roadmap-row">
-            {% for item in roadmap_lanes[lane_key] %}
-            <details class="cc-roadmap-card" style="cursor:pointer;">
-                <summary style="list-style:none; cursor:pointer;">
-                    <div class="cc-roadmap-title" style="display:inline;">{{ item['name'] }}</div>
-                    {% if item['note'] %}<div class="cc-roadmap-note">{{ item['note'] }}</div>{% endif %}
-                    {% if item['progress_pct'] %}
-                    <div class="cc-roadmap-track"><div class="cc-roadmap-fill" style="width:{{ item['progress_pct'] }}%; background:{{ 'var(--teal)' if lane_key == 'now' else 'var(--brass)' }};"></div></div>
-                    {% endif %}
-                </summary>
-                <form method="POST" action="{{ url_for('roadmap_item_update', item_id=item['id']) }}" style="margin-top:12px; padding-top:12px; border-top:1px solid var(--line);">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <label style="font-size:10px;">Note</label>
-                    <textarea name="note" style="width:100%; min-height:60px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:8px; color:var(--text); font-family:'Inter',sans-serif; font-size:12.5px; margin-bottom:8px;">{{ item['note'] or '' }}</textarea>
-                    <div style="display:flex; gap:8px; margin-bottom:8px;">
-                        <div style="flex:1;">
-                            <label style="font-size:10px;">Lane</label>
-                            <select name="lane" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px;">
-                                <option value="now" {{ 'selected' if item['lane'] == 'now' }}>Now</option>
-                                <option value="next" {{ 'selected' if item['lane'] == 'next' }}>Next up</option>
-                                <option value="later" {{ 'selected' if item['lane'] == 'later' }}>Later</option>
-                            </select>
-                        </div>
-                        <div style="flex:1;">
-                            <label style="font-size:10px;">Progress %</label>
-                            <input type="number" name="progress_pct" min="0" max="100" value="{{ item['progress_pct'] }}" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px;">
-                        </div>
-                    </div>
-                    <button type="submit" class="btn btn-sm">Save</button>
-                </form>
-            </details>
+<!-- PRIORITY BUILDS + SITUATION -->
+<p class="pi-section-title" id="pi2-builds" style="margin-bottom:4px; scroll-margin-top:16px;">Priority Builds</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Our top development priorities and current focus.</p>
+<div class="pi2-hero-grid">
+    <div>
+        {% if priority_builds %}
+        <div class="pi2-spine">
+            {% for b in priority_builds %}
+            {% set card_class = 'active' if b.lane == 'now' else ('evolving' if b.lane == 'evolving' else 'foundation') %}
+            <div class="pi2-build-card {{ card_class }}">
+                <div class="pi2-build-dot"></div>
+                <div class="pi2-build-top">
+                    <div class="pi2-build-name">{{ b.name }}</div>
+                    <span class="pi2-build-pill">{{ b.status_label }}</span>
+                </div>
+                {% if b.note %}<div class="pi2-build-note">{{ b.note }}</div>{% endif %}
+                <div class="pi2-build-track"><div class="pi2-build-fill" style="width:{{ b.progress_pct }}%;"></div></div>
+                <div class="pi2-build-pct">{{ b.progress_pct }}%</div>
+            </div>
             {% endfor %}
         </div>
+        {% else %}
+        <div class="card"><p class="cc-empty">No priority build items are configured yet.</p></div>
+        {% endif %}
     </div>
-    {% endif %}
-    {% endfor %}
-</div>
-{% endif %}
 
-<!-- REQUESTS TREND -->
-
-<p class="pi-section-title" id="cc-trend" style="margin-bottom:12px; scroll-margin-top:16px;">Requests Trend <span class="dim">14 days</span></p>
-<div class="card" style="margin-bottom:20px;">
-    <svg width="100%" height="140" viewBox="0 0 900 140" style="overflow:visible;">
-        <defs>
-            <filter id="ccFg" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-            <linearGradient id="ccFillTeal" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5EEAD4" stop-opacity="0.22"/><stop offset="100%" stop-color="#5EEAD4" stop-opacity="0"/></linearGradient>
-        </defs>
-        <line x1="0" y1="15" x2="900" y2="15" stroke="var(--line)"/>
-        <line x1="0" y1="65" x2="900" y2="65" stroke="var(--line)"/>
-        <line x1="0" y1="110" x2="900" y2="110" stroke="var(--line)"/>
-        <path d="{{ submitted_line }}" fill="none" stroke="#C9A24B" stroke-width="2.5" filter="url(#ccFg)"/>
-        <path d="{{ resolved_fill }}" fill="url(#ccFillTeal)" stroke="none"/>
-        <path d="{{ resolved_line }}" fill="none" stroke="#5EEAD4" stroke-width="2.5" filter="url(#ccFg)"/>
-    </svg>
-    <div style="display:flex; gap:18px; margin-top:8px;">
-        <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim);"><span style="width:9px; height:9px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Submitted</div>
-        <div style="display:flex; align-items:center; gap:6px; font-size:11px; color:var(--text-dim);"><span style="width:9px; height:9px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Resolved</div>
-    </div>
-</div>
-
-<!-- MODULE STATUS TILES -->
-<p class="pi-section-title" style="margin-bottom:12px;">Module Status <span class="dim">7-day activity</span></p>
-<div class="cc-tile-row" style="margin-bottom:20px;">
-    {% for t in module_tiles %}
-    <a href="{{ t.url }}" class="cc-tile">
-        <div class="cc-tile-top">
-            <span class="cc-tile-name">{{ t.name }}</span>
-            <span class="cc-status-pill {{ 'cc-status-healthy' if t.healthy else 'cc-status-attention' }}">{{ 'Healthy' if t.healthy else 'Attention' }}</span>
+    <div class="card" style="margin-bottom:0;">
+        <h3 style="margin-bottom:2px;">Situation</h3>
+        <p class="sub" style="font-size:11px; margin-bottom:12px;">What's happening right now.</p>
+        <div class="pi2-situation-grid">
+            <div class="pi2-sit-tile">
+                <div class="pi2-sit-value" style="color:var(--brass);">{{ situation.active_builds }}</div>
+                <div class="pi2-sit-label">Active builds</div>
+            </div>
+            <div class="pi2-sit-tile">
+                <div class="pi2-sit-value" style="color:{{ 'var(--red)' if situation.blockers else 'var(--teal)' }};">{{ situation.blockers }}</div>
+                <div class="pi2-sit-label">Blockers</div>
+            </div>
+            <div class="pi2-sit-tile">
+                <div class="pi2-sit-value" style="color:#5AC8E0;">{{ situation.in_testing }}</div>
+                <div class="pi2-sit-label">In testing</div>
+            </div>
+            <div class="pi2-sit-tile">
+                <div class="pi2-sit-value">{{ situation.changes_this_week }}</div>
+                <div class="pi2-sit-label">Changes this week</div>
+            </div>
         </div>
-        <div class="cc-tile-value" style="color:{{ t.color }};">{{ t.value }}</div>
-        <div class="cc-tile-label">{{ t.label }}</div>
-        <svg width="100%" height="30" viewBox="0 0 220 30"><polyline points="{{ t.spark }}" fill="none" stroke="{{ t.spark_color }}" stroke-width="2"/></svg>
-    </a>
-    {% endfor %}
+        <p class="pi-section-title" style="font-size:10.5px; margin-bottom:6px;">Latest Movement</p>
+        {% if recent_activity %}
+        {% for a in recent_activity[:4] %}
+        <div class="pi2-movement-item">
+            <span class="pi2-movement-dot"></span>
+            <span class="pi2-movement-text">{{ a['original_request'][:42] }}{% if a['original_request']|length > 42 %}&hellip;{% endif %} &mdash; {{ a['status']|replace('Released','Resolved') }}</span>
+            <span class="pi2-movement-time">{{ a['changed_at']|friendly_short_dt }}</span>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="cc-empty">No recent movement yet.</p>
+        {% endif %}
+    </div>
 </div>
 
-<!-- NEEDS YOUR ATTENTION: after all the graphs, compact -->
-<p class="pi-section-title" id="cc-attention" style="margin-bottom:12px; scroll-margin-top:16px;">Needs Your Attention</p>
-<div class="card" style="margin-bottom:20px; padding:14px 18px;">
+<!-- REQUEST LIFECYCLE -->
+<p class="pi-section-title" id="pi2-lifecycle" style="margin-bottom:4px; scroll-margin-top:16px;">Request Lifecycle</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Where requests are in the development pipeline.</p>
+<div class="card" style="padding:20px 18px;">
+    <div class="pi2-lifecycle">
+        {% for stage in lifecycle %}
+        <div class="pi2-lc-stage {{ stage.key }} {{ 'has-count' if stage.count > 0 }}">
+            <div class="pi2-lc-circle"><span class="pi2-lc-count">{{ stage.count }}</span></div>
+            <div class="pi2-lc-label">{{ stage.label }}</div>
+        </div>
+        {% if not loop.last %}<div class="pi2-lc-arrow">&rarr;</div>{% endif %}
+        {% endfor %}
+    </div>
+</div>
+
+<!-- ATTENTION REQUIRED -->
+<p class="pi-section-title" id="pi2-attention" style="margin-bottom:4px; scroll-margin-top:16px;">Attention Required</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Items that need your immediate action.</p>
+<div class="card">
     {% if attention_items %}
     <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0 20px;">
         {% for item in attention_items %}
@@ -319,71 +268,180 @@
         {% endfor %}
     </div>
     {% else %}
-        <p class="cc-empty" style="padding:0;">Nothing urgent right now.</p>
+    <div class="pi2-attention-clear">
+        <div class="pi2-attention-clear-icon">&#10003;</div>
+        <div>
+            <div style="font-family:'Space Grotesk',sans-serif; font-weight:700; color:var(--teal); font-size:14px;">Clear</div>
+            <p class="sub" style="font-size:12px; margin:2px 0 0;">No product-development blockers currently require attention.</p>
+        </div>
+    </div>
     {% endif %}
 </div>
 
-<div class="cc-tabs">
-    <input type="radio" name="cc-activity-tab" id="cc-tab-resolved" class="cc-tab-radio" checked>
-    <input type="radio" name="cc-activity-tab" id="cc-tab-activity" class="cc-tab-radio">
-    <div class="cc-tab-labels">
-        <label for="cc-tab-resolved" class="cc-tab-label">Recently Resolved{% if recently_released %} ({{ recently_released|length }}){% endif %}</label>
-        <label for="cc-tab-activity" class="cc-tab-label">Recent Activity</label>
-    </div>
-
-    <div class="cc-tab-panel cc-panel-resolved">
-        {% if recently_released %}
-        {% for r in recently_released %}
-        <div class="pi-resolved-item">
-            <div class="pi-resolved-icon">&#10003;</div>
-            <div class="pi-resolved-body">
-                <span class="pi-resolved-eyebrow">Resolved</span>
-                <div class="pi-resolved-top">
-                    <div class="pi-resolved-title">{{ r['original_request'] }}</div>
-                    {% if r['buildiq_module'] %}<span class="pi-resolved-module">{{ r['buildiq_module'] }}</span>{% endif %}
-                </div>
-                {% if r['release_note'] %}<div class="pi-resolved-note">{{ r['release_note'] }}</div>{% endif %}
-                <div class="pi-resolved-meta">
-                    <div class="pi-avatar">{{ (r['requester_name'] or r['requester_email'] or '?')[0]|upper }}</div>
-                    <span class="pi-resolved-meta-text">{{ r['requester_name'] or r['requester_email'] }} &middot; {{ r['changed_at']|friendly_short_dt }}</span>
-                </div>
+<!-- BUILDIQ PULSE + RECENTLY RESOLVED -->
+<div class="pi-two-col" style="margin-top:20px;">
+    <div>
+        <p class="pi-section-title" id="pi2-pulse" style="margin-bottom:4px; scroll-margin-top:16px;">BuildIQ Pulse <span class="dim">last 14 days</span></p>
+        <div class="card" style="margin-top:14px;">
+            <div class="pi2-pulse-row">
+                <div class="pi2-pulse-tile"><div class="pi2-pulse-value" style="color:#5AC8E0;">{{ pulse.requests_received }}</div><div class="pi2-pulse-label">Received</div></div>
+                <div class="pi2-pulse-tile"><div class="pi2-pulse-value" style="color:var(--teal);">{{ pulse.resolved }}</div><div class="pi2-pulse-label">Resolved</div></div>
+                <div class="pi2-pulse-tile"><div class="pi2-pulse-value">{{ pulse.modules_active }}</div><div class="pi2-pulse-label">Modules active</div></div>
+                <div class="pi2-pulse-tile"><div class="pi2-pulse-value">{{ pulse.platform_events }}</div><div class="pi2-pulse-label">Platform events</div></div>
             </div>
+            {% if pulse.has_trend_data %}
+            <svg width="100%" height="70" viewBox="0 0 900 90" style="overflow:visible;">
+                <defs>
+                    <filter id="ccFg2" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+                    <linearGradient id="ccFillTeal2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5EEAD4" stop-opacity="0.2"/><stop offset="100%" stop-color="#5EEAD4" stop-opacity="0"/></linearGradient>
+                </defs>
+                <path d="{{ resolved_fill }}" fill="url(#ccFillTeal2)" stroke="none"/>
+                <path d="{{ submitted_line }}" fill="none" stroke="#C9A24B" stroke-width="2" filter="url(#ccFg2)"/>
+                <path d="{{ resolved_line }}" fill="none" stroke="#5EEAD4" stroke-width="2" filter="url(#ccFg2)"/>
+            </svg>
+            <div style="display:flex; gap:16px; margin-top:2px;">
+                <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Received</div>
+                <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Resolved</div>
+            </div>
+            {% else %}
+            <p class="cc-empty">Not enough activity yet for a 14-day trend.</p>
+            {% endif %}
         </div>
-        {% endfor %}
-        {% else %}
-        <p class="sub">Nothing resolved yet.</p>
-        {% endif %}
     </div>
 
-    <div class="cc-tab-panel cc-panel-activity">
-        {% if recent_activity %}
-        <div class="card" style="padding:2px 18px; margin-bottom:0;">
-            {% for a in recent_activity %}
-            {% set meta = status_meta(a['status'])|trim %}
-            {% set badge_class = meta.split('|')[0] %}
-            {% set icon = meta.split('|')[1] %}
-            <div class="pi-activity-item">
-                <div class="pi-activity-icon rc-badge {{ badge_class }}" style="border-radius:50%;">{{ icon|safe }}</div>
-                <div class="pi-activity-body">
-                    <div>
-                        <div class="pi-activity-status rc-badge {{ badge_class }}" style="border:none; padding:0; background:none;">{{ a['status']|replace('Released','Resolved') }}</div>
-                        <div class="pi-activity-title">{{ a['original_request'][:60] }}{% if a['original_request']|length > 60 %}&hellip;{% endif %}</div>
+    <div>
+        <p class="pi-section-title" id="pi2-resolved" style="margin-bottom:4px; scroll-margin-top:16px;">Recently Resolved</p>
+        <div class="card" style="margin-top:14px; max-height:280px; overflow-y:auto;">
+            {% if recently_released %}
+            {% for r in recently_released %}
+            <div class="pi-resolved-item">
+                <div class="pi-resolved-icon">&#10003;</div>
+                <div class="pi-resolved-body">
+                    <div class="pi-resolved-top">
+                        <a href="{{ url_for('product_intelligence_detail', request_id=r['id']) }}" class="pi-resolved-title" style="text-decoration:none; color:inherit;">{{ r['original_request'] }}</a>
+                        {% if r['buildiq_module'] %}<span class="pi-resolved-module">{{ r['buildiq_module'] }}</span>{% endif %}
                     </div>
-                    <div class="pi-activity-right">
-                        <div class="pi-activity-time">{{ a['changed_at']|friendly_short_dt }}</div>
-                        {% if a['changed_by'] %}<div class="pi-activity-user">{{ a['changed_by'] }}</div>{% endif %}
-                    </div>
+                    <div class="pi2-eco-metric">{{ r['department'] or '' }}{% if r['department'] %} &middot; {% endif %}{{ r['changed_at']|friendly_short_dt }}</div>
                 </div>
             </div>
             {% endfor %}
+            {% else %}
+            <p class="cc-empty">Nothing resolved yet.</p>
+            {% endif %}
         </div>
-        {% else %}
-        <p class="sub">No activity yet.</p>
-        {% endif %}
     </div>
 </div>
 
-<div class="pi-section">
+<!-- BUILD DIRECTION -->
+<p class="pi-section-title" id="pi2-direction" style="margin-bottom:4px; margin-top:24px; scroll-margin-top:16px;">Build Direction</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Our roadmap and development focus.</p>
+<div class="pi2-direction-row">
+    {% for lane_key, lane_title, lane_sub in [
+        ('now', 'Now', "What we're working on now."),
+        ('next', 'Next', "What's approved to follow."),
+        ('evolving', 'Evolving', 'Continuously improving.'),
+        ('later', 'Later', 'Planned for the future.')
+    ] %}
+    <div class="pi2-lane-card {{ lane_key }}">
+        <div class="pi2-lane-head">{{ lane_title }}</div>
+        <div class="pi2-lane-sub">{{ lane_sub }}</div>
+        {% if roadmap_lanes[lane_key] %}
+        {% for item in roadmap_lanes[lane_key] %}
+        <details style="margin-bottom:8px;">
+            <summary style="list-style:none; cursor:pointer;">
+                <div class="pi2-lane-item-name">{{ item['name'] }}</div>
+                {% if item['note'] %}<div class="pi2-lane-item-note">{{ item['note'] }}</div>{% endif %}
+                {% if lane_key != 'later' %}
+                <div class="pi2-build-track"><div class="pi2-build-fill" style="width:{{ item['progress_pct'] }}%; background:{{ 'var(--brass)' if lane_key == 'now' else ('var(--teal)' if lane_key == 'evolving' else '#5AC8E0') }};"></div></div>
+                {% endif %}
+            </summary>
+            <form method="POST" action="{{ url_for('roadmap_item_update', item_id=item['id']) }}" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--line);">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <label style="font-size:10px;">Note</label>
+                <textarea name="note" style="width:100%; min-height:56px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:8px; color:var(--text); font-family:'Inter',sans-serif; font-size:12px; margin-bottom:8px;">{{ item['note'] or '' }}</textarea>
+                <div style="display:flex; gap:8px; margin-bottom:8px;">
+                    <div style="flex:1;">
+                        <label style="font-size:10px;">Lane</label>
+                        <select name="lane" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px;">
+                            <option value="now" {{ 'selected' if item['lane'] == 'now' }}>Now</option>
+                            <option value="next" {{ 'selected' if item['lane'] == 'next' }}>Next</option>
+                            <option value="evolving" {{ 'selected' if item['lane'] == 'evolving' }}>Evolving</option>
+                            <option value="later" {{ 'selected' if item['lane'] == 'later' }}>Later</option>
+                        </select>
+                    </div>
+                    <div style="flex:1;">
+                        <label style="font-size:10px;">Progress %</label>
+                        <input type="number" name="progress_pct" min="0" max="100" value="{{ item['progress_pct'] }}" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px;">
+                    </div>
+                </div>
+                <button type="submit" class="btn btn-sm">Save</button>
+            </form>
+        </details>
+        {% endfor %}
+        {% else %}
+        <p class="cc-empty">Nothing in this lane yet.</p>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+
+<!-- BUILDIQ ECOSYSTEM -->
+<p class="pi-section-title" id="pi2-ecosystem" style="margin-bottom:4px; margin-top:24px; scroll-margin-top:16px;">BuildIQ Ecosystem</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Connected modules and system intelligence.</p>
+<div class="card">
+    <div class="pi2-ecosystem-grid">
+        {% for t in module_tiles %}
+        <a href="{{ t.url }}" class="pi2-eco-node">
+            <div class="pi2-eco-node-top">
+                <span class="pi2-eco-name">{{ t.name }}</span>
+                <span class="cc-status-pill {{ 'cc-status-healthy' if t.healthy else 'cc-status-attention' }}">{{ 'Healthy' if t.healthy else 'Attention' }}</span>
+            </div>
+            <div class="pi2-eco-metric">{{ t.value }} {{ t.label }}</div>
+        </a>
+        {% if loop.index == 1 %}
+        <div class="pi2-eco-center">
+            <div class="pi2-eco-hex"><span style="font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:11px; color:var(--brass);">BuildIQ</span></div>
+            <div class="sub" style="font-size:10.5px;">Construction Intelligence OS</div>
+        </div>
+        {% endif %}
+        {% endfor %}
+        <a href="{{ ecosystem_atlas.url or '#' }}" class="pi2-eco-node" style="{{ 'pointer-events:none;' if not ecosystem_atlas.url }}">
+            <div class="pi2-eco-node-top">
+                <span class="pi2-eco-name">Atlas</span>
+                <span class="cc-status-pill {{ 'cc-status-healthy' if ecosystem_atlas.configured else 'cc-status-attention' }}">{{ 'Configured' if ecosystem_atlas.configured else 'Not Configured' }}</span>
+            </div>
+            <div class="pi2-eco-metric">Intelligence &amp; action layer</div>
+        </a>
+    </div>
+
+    <p class="pi-section-title" style="font-size:11px; margin-bottom:10px;">Module Activity <span class="dim">7-day activity</span></p>
+    <div class="pi2-module-row">
+        {% for t in module_tiles %}
+        <div class="pi2-module-item">
+            <div class="pi2-module-name">{{ t.name }} <span class="cc-status-pill {{ 'cc-status-healthy' if t.healthy else 'cc-status-attention' }}" style="margin-left:4px;">{{ 'Healthy' if t.healthy else 'Attention' }}</span></div>
+            <div class="pi2-module-detail">{{ t.value }} {{ t.label }}</div>
+            <svg class="pi2-module-spark" viewBox="0 0 220 30"><polyline points="{{ t.spark }}" fill="none" stroke="{{ t.spark_color }}" stroke-width="2"/></svg>
+        </div>
+        {% endfor %}
+        <div class="pi2-module-item">
+            <div class="pi2-module-name">Atlas <span class="cc-status-pill {{ 'cc-status-healthy' if ecosystem_atlas.configured else 'cc-status-attention' }}" style="margin-left:4px;">{{ 'Configured' if ecosystem_atlas.configured else 'Not Configured' }}</span></div>
+            <div class="pi2-module-detail">Intelligence layer{% if not ecosystem_atlas.configured %} &mdash; no LLM key set{% endif %}</div>
+        </div>
+    </div>
+</div>
+
+<!-- PLATFORM STATE (truthful System Health replacement) -->
+<div class="card" style="margin-top:20px; padding:14px 18px;">
+    <p class="pi-section-title" style="font-size:11px; margin-bottom:10px;">Platform State</p>
+    <div style="display:flex; gap:22px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:6px; font-size:11.5px;"><span style="width:8px; height:8px; border-radius:50%; background:var(--teal); display:inline-block;"></span>Application <strong>Operational</strong></div>
+        <div style="display:flex; align-items:center; gap:6px; font-size:11.5px;"><span style="width:8px; height:8px; border-radius:50%; background:{{ 'var(--teal)' if platform_state.atlas_configured else 'var(--text-faint)' }}; display:inline-block;"></span>Atlas <strong>{{ 'Configured' if platform_state.atlas_configured else 'Not Configured' }}</strong></div>
+        <div style="display:flex; align-items:center; gap:6px; font-size:11.5px;"><span style="width:8px; height:8px; border-radius:50%; background:{{ 'var(--teal)' if platform_state.whatsapp_configured else 'var(--text-faint)' }}; display:inline-block;"></span>WhatsApp <strong>{{ 'Configured' if platform_state.whatsapp_configured else 'Not Configured' }}</strong></div>
+    </div>
+</div>
+
+<!-- ALL REQUESTS -->
+<div class="pi-section" id="pi2-all-requests" style="margin-top:24px; scroll-margin-top:16px;">
     <p class="pi-section-title">All Requests</p>
     <form method="GET" class="pi-table-toolbar">
         <input type="text" id="pi-req-search" placeholder="Search requests..." oninput="ccFilterRequests()" style="max-width:220px;">
@@ -434,7 +492,7 @@
         {% endfor %}
     </table>
     {% else %}
-    <p class="sub">No requests match this filter.</p>
+    <p class="sub">{{ 'No requests match this filter.' if (status_filter or department_filter) else 'No requests exist yet.' }}</p>
     {% endif %}
 </div>
 
