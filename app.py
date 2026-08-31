@@ -1392,10 +1392,16 @@ def init_db():
     if existing_roadmap_count == 0:
         now = datetime.utcnow().isoformat()
         roadmap_seed = [
-            ("Product Core", "now", "Canonical Project Identity is live -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 90, 1),
-            ("Product Intelligence", "now", "Command Center experience refinement -- visual hierarchy, real-data intelligence, and honest empty states.", 60, 2),
-            ("Project Connectivity", "next", "Turning canonical Project Identity into useful connected project intelligence across modules.", 10, 3),
-            ("Atlas", "evolving", "BuildIQ's intelligence and action layer -- read tools shipped; continuously gaining capability rather than reaching a fixed 100%.", 40, 4),
+            # progress_pct is 0 for every freshly-seeded item deliberately --
+            # there is no defensible measurable source for a completion
+            # percentage on any of these, so none is invented. progress_pct
+            # remains a real, admin-editable field (see roadmap_item_update)
+            # for backward compatibility; it simply starts truthful (0)
+            # instead of claiming unearned completion.
+            ("Product Core", "now", "Canonical Project Identity is live -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 0, 1),
+            ("Product Intelligence", "now", "Command Center experience refinement -- visual hierarchy, real-data intelligence, and honest empty states.", 0, 2),
+            ("Project Connectivity", "next", "Turning canonical Project Identity into useful connected project intelligence across modules.", 0, 3),
+            ("Atlas", "evolving", "BuildIQ's intelligence and action layer -- read tools shipped; continuously gaining capability rather than reaching a fixed 100%.", 0, 4),
             ("BidFlow", "later", "Takeoff + bid system. Parked until the real estimating workflow/Excel sheets are available.", 0, 5),
             ("Redline", "later", "Parked intentionally.", 0, 6),
             ("Finance", "later", "Parked intentionally.", 0, 7),
@@ -1405,57 +1411,19 @@ def init_db():
                 "INSERT INTO roadmap_items (name, lane, note, progress_pct, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (name, lane, note, pct, order, now)
             )
-    else:
-        _correct_stale_roadmap_seed(db)
+    # NOTE: a non-empty roadmap_items table is NEVER auto-rewritten during
+    # normal application startup. An earlier version of this function
+    # called _correct_stale_roadmap_seed() here unconditionally -- that
+    # ran against ANY existing database (including, eventually, a real
+    # production one), silently deleting and replacing roadmap rows on
+    # every boot. Removed entirely per CTO audit. If a legacy-seed
+    # database genuinely needs upgrading to the new roadmap story, run
+    # scripts/upgrade_roadmap_seed.py explicitly and deliberately --
+    # never as a side effect of `import app`. Administrator-edited
+    # roadmap data is never touched by ordinary startup.
 
     db.commit()
     db.close()
-
-
-def _correct_stale_roadmap_seed(db):
-    """One-time, idempotent correction for a TEST database that already
-    has the OLD roadmap seed (SitePulse/Project Hunt/Equipment Center/
-    BidFlow/Atlas/Engineering/Finance, from before Product Intelligence
-    2.0's Build Direction story). Only fires if every one of those 7
-    original rows is still present with its EXACT original note text --
-    i.e. nothing an admin ever hand-edited via the roadmap UI. If even
-    one has been edited, this does nothing, so a real admin's changes
-    are never silently overwritten. Replaces them with the real current
-    strategic direction as stated by the product owner, matching the
-    NOW/NEXT/EVOLVING/LATER story (see Build Direction on the Product
-    Intelligence page)."""
-    original_seed = {
-        "SitePulse": "Filters and delivery dates shipped. Polishing purchase request flow next.",
-        "Project Hunt": "Bid tracker filters and KPI theme done. Vendor follow-up automation left.",
-        "Equipment Center": "Matching Product Intelligence's KPI colors and filters.",
-        "BidFlow": "Takeoff + bid system. Waiting on final Excel sheets from estimating.",
-        "Atlas": "Voice assistant -- scoping starts after BidFlow's data model is settled.",
-        "Engineering": "Parked intentionally.",
-        "Finance": "Parked intentionally.",
-    }
-    rows = {name: note for name, note in db.execute(
-        "SELECT name, note FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(original_seed)),
-        list(original_seed.keys())
-    ).fetchall()}
-    if rows != original_seed:
-        return  # something was hand-edited (or rows are missing) -- leave it alone
-
-    now = datetime.utcnow().isoformat()
-    db.execute("DELETE FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(original_seed)), list(original_seed.keys()))
-    new_seed = [
-        ("Product Core", "now", "Canonical Project Identity is live -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 90, 1),
-        ("Product Intelligence", "now", "Command Center experience refinement -- visual hierarchy, real-data intelligence, and honest empty states.", 60, 2),
-        ("Project Connectivity", "next", "Turning canonical Project Identity into useful connected project intelligence across modules.", 10, 3),
-        ("Atlas", "evolving", "BuildIQ's intelligence and action layer -- read tools shipped; continuously gaining capability rather than reaching a fixed 100%.", 40, 4),
-        ("BidFlow", "later", "Takeoff + bid system. Parked until the real estimating workflow/Excel sheets are available.", 0, 5),
-        ("Redline", "later", "Parked intentionally.", 0, 6),
-        ("Finance", "later", "Parked intentionally.", 0, 7),
-    ]
-    for name, lane, note, pct, order in new_seed:
-        db.execute(
-            "INSERT INTO roadmap_items (name, lane, note, progress_pct, sort_order, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, lane, note, pct, order, now)
-        )
 
 
 init_db()
@@ -4157,15 +4125,32 @@ def product_intelligence():
     in_maintenance_count = db.execute("SELECT COUNT(*) FROM sitepulse_assets WHERE status = 'In Maintenance'").fetchone()[0]
     open_po_count = db.execute("SELECT COUNT(*) FROM inventory_purchase_requests WHERE status != 'Completed'").fetchone()[0]
 
+    # Per-module status text: replaces the old healthy=True/False ->
+    # "Healthy"/"Attention" pill, which asserted a certification about
+    # the WHOLE module that BuildIQ doesn't actually have data to back
+    # (SitePulse's was hardcoded True with no real check at all -- CTO
+    # audit finding). Each label below is scoped to exactly what's
+    # tracked, using the same real attention_items/overdue_rentals data
+    # already computed above -- never a claim about overall module health.
+    ph_attention_count = sum(1 for a in attention_items if a["meta"] == "PROJECT HUNT")
+    ec_attention_count = len(overdue_rentals)
+    sp_attention_count = sum(1 for a in attention_items if a["meta"].startswith("SITEPULSE"))
+
+    def _module_status_text(count, singular_noun="Attention Item"):
+        if count == 0:
+            return "No Attention Items"
+        noun = singular_noun if count == 1 else singular_noun + "s"
+        return f"{count} {noun}"
+
     module_tiles = [
         {"name": "Project Hunt", "value": active_bids_count, "label": "Active bids", "color": "var(--teal)",
-         "healthy": not any(a["meta"] == "PROJECT HUNT" for a in attention_items),
+         "attention": ph_attention_count > 0, "status_text": _module_status_text(ph_attention_count),
          "spark": _section_spark("tracker"), "spark_color": "#5EEAD4", "url": url_for("tracker_dashboard")},
         {"name": "Equipment Center", "value": in_maintenance_count, "label": "In maintenance", "color": "var(--brass)",
-         "healthy": len(overdue_rentals) == 0,
+         "attention": ec_attention_count > 0, "status_text": _module_status_text(ec_attention_count, "Overdue Rental"),
          "spark": _section_spark("sitepulse"), "spark_color": "#C9A24B", "url": url_for("sitepulse_dashboard")},
         {"name": "SitePulse", "value": open_po_count, "label": "Open POs", "color": "var(--cyan)",
-         "healthy": True,
+         "attention": sp_attention_count > 0, "status_text": _module_status_text(sp_attention_count),
          "spark": _section_spark("inventory"), "spark_color": "#5AC8E0", "url": url_for("inventory_home")},
     ]
 
@@ -4292,13 +4277,13 @@ def product_intelligence():
 
     # Platform State: replaces the old "System Health" percentage, which
     # mixed fleet uptime and request-resolution rate into one misleading
-    # number that could show 0% and look like BuildIQ was broken. These
-    # are genuinely determinable facts, not estimates: whether the Atlas
-    # LLM key and WhatsApp integration are configured (env vars either
-    # are or are not set), and that the application is running (trivially
-    # true if this code executed at all).
+    # number that could show 0% and look like BuildIQ was broken. Only
+    # facts BuildIQ genuinely knows are shown -- whether the Atlas LLM
+    # key and WhatsApp integration are configured. "Application
+    # Operational" was removed after CTO audit: the fact that this route
+    # executed is not meaningful uptime/health monitoring, and asserting
+    # it as a status fact would be its own small fabrication.
     platform_state = {
-        "app_operational": True,
         "atlas_configured": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "whatsapp_configured": bool(ULTRAMSG_TOKEN),
     }

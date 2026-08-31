@@ -99,6 +99,12 @@ def main():
     check("Platform State section is present with truthful Configured/Not Configured wording", "Platform State" in body0 and ("Configured" in body0))
     check("Atlas/WhatsApp state never uses Healthy/Unhealthy wording (that's for build modules, not config state)",
           "Atlas <strong>Healthy" not in body0 and "WhatsApp <strong>Healthy" not in body0)
+    check("Application Operational indicator has been removed (not meaningful uptime monitoring)", "Operational" not in body0)
+    check("no module tile literally renders the word 'Healthy' (no module gets a blanket health certification)", ">Healthy<" not in body0)
+    check("SitePulse shows a truthful attention-scoped status, not a hardcoded claim", "No Attention Items" in body0)
+    fresh_pcts = [r[0] for r in db.execute("SELECT progress_pct FROM roadmap_items").fetchall()]
+    check("freshly-seeded roadmap items have progress_pct=0, not an invented completion percentage", all(p == 0 for p in fresh_pcts))
+    check("Priority Builds hero renders with no progress-percentage markup at all", "pi2-build-pct" not in body0)
 
     print()
     print("=== 2. Populated-data render: every new section shows real values ===")
@@ -140,6 +146,33 @@ def main():
     row = db.execute("SELECT lane, progress_pct FROM roadmap_items WHERE id=?", (atlas_roadmap_id,)).fetchone()
     check("roadmap_item_update accepted lane='evolving'", row["lane"] == "evolving")
     check("progress_pct was saved correctly", row["progress_pct"] == 45)
+
+    print()
+    print("=== 3b. Startup never auto-rewrites an existing roadmap (CTO audit fix) ===")
+    legacy_rows = {
+        "SitePulse": "Filters and delivery dates shipped. Polishing purchase request flow next.",
+        "Project Hunt": "Bid tracker filters and KPI theme done. Vendor follow-up automation left.",
+        "Equipment Center": "Matching Product Intelligence's KPI colors and filters.",
+        "BidFlow": "Takeoff + bid system. Waiting on final Excel sheets from estimating.",
+    }
+    db.execute("DELETE FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(legacy_rows)), list(legacy_rows.keys()))
+    for name, note in legacy_rows.items():
+        db.execute("INSERT INTO roadmap_items (name, lane, note, progress_pct, sort_order, updated_at) VALUES (?,?,?,?,?,?)",
+                   (name, "now", note, 50, 99, now))
+    db.commit()
+    before_rewrite = {name: note for name, note in db.execute(
+        "SELECT name, note FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(legacy_rows)), list(legacy_rows.keys())
+    ).fetchall()}
+    appmod.init_db()  # exactly what every real application startup calls
+    after_rewrite = {name: note for name, note in db.execute(
+        "SELECT name, note FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(legacy_rows)), list(legacy_rows.keys())
+    ).fetchall()}
+    check("normal application startup (init_db()) does NOT rewrite an existing, non-empty roadmap_items table",
+          before_rewrite == after_rewrite)
+    check("_correct_stale_roadmap_seed no longer exists on the app module (moved to an explicit, manually-run script)",
+          not hasattr(appmod, "_correct_stale_roadmap_seed"))
+    db.execute("DELETE FROM roadmap_items WHERE name IN (%s)" % ",".join("?" * len(legacy_rows)), list(legacy_rows.keys()))
+    db.commit()
 
     print()
     print("=== 4. Filters and click-through still work ===")

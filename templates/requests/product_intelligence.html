@@ -57,7 +57,6 @@
     .pi2-build-card.active .pi2-build-fill { background:var(--brass); }
     .pi2-build-card.evolving .pi2-build-fill { background:var(--teal); }
     .pi2-build-card.foundation .pi2-build-fill { background:#5AC8E0; }
-    .pi2-build-pct { font-family:'Space Grotesk',sans-serif; font-size:12px; font-weight:700; color:var(--text-dim); margin-top:4px; text-align:right; }
 
     .pi2-situation-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
     .pi2-sit-tile { background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
@@ -189,8 +188,6 @@
                     <span class="pi2-build-pill">{{ b.status_label }}</span>
                 </div>
                 {% if b.note %}<div class="pi2-build-note">{{ b.note }}</div>{% endif %}
-                <div class="pi2-build-track"><div class="pi2-build-fill" style="width:{{ b.progress_pct }}%;"></div></div>
-                <div class="pi2-build-pct">{{ b.progress_pct }}%</div>
             </div>
             {% endfor %}
         </div>
@@ -394,7 +391,7 @@
         <a href="{{ t.url }}" class="pi2-eco-node">
             <div class="pi2-eco-node-top">
                 <span class="pi2-eco-name">{{ t.name }}</span>
-                <span class="cc-status-pill {{ 'cc-status-healthy' if t.healthy else 'cc-status-attention' }}">{{ 'Healthy' if t.healthy else 'Attention' }}</span>
+                <span class="cc-status-pill {{ 'cc-status-healthy' if not t.attention else 'cc-status-attention' }}">{{ t.status_text }}</span>
             </div>
             <div class="pi2-eco-metric">{{ t.value }} {{ t.label }}</div>
         </a>
@@ -418,7 +415,7 @@
     <div class="pi2-module-row">
         {% for t in module_tiles %}
         <div class="pi2-module-item">
-            <div class="pi2-module-name">{{ t.name }} <span class="cc-status-pill {{ 'cc-status-healthy' if t.healthy else 'cc-status-attention' }}" style="margin-left:4px;">{{ 'Healthy' if t.healthy else 'Attention' }}</span></div>
+            <div class="pi2-module-name">{{ t.name }} <span class="cc-status-pill {{ 'cc-status-healthy' if not t.attention else 'cc-status-attention' }}" style="margin-left:4px;">{{ t.status_text }}</span></div>
             <div class="pi2-module-detail">{{ t.value }} {{ t.label }}</div>
             <svg class="pi2-module-spark" viewBox="0 0 220 30"><polyline points="{{ t.spark }}" fill="none" stroke="{{ t.spark_color }}" stroke-width="2"/></svg>
         </div>
@@ -434,7 +431,6 @@
 <div class="card" style="margin-top:20px; padding:14px 18px;">
     <p class="pi-section-title" style="font-size:11px; margin-bottom:10px;">Platform State</p>
     <div style="display:flex; gap:22px; flex-wrap:wrap;">
-        <div style="display:flex; align-items:center; gap:6px; font-size:11.5px;"><span style="width:8px; height:8px; border-radius:50%; background:var(--teal); display:inline-block;"></span>Application <strong>Operational</strong></div>
         <div style="display:flex; align-items:center; gap:6px; font-size:11.5px;"><span style="width:8px; height:8px; border-radius:50%; background:{{ 'var(--teal)' if platform_state.atlas_configured else 'var(--text-faint)' }}; display:inline-block;"></span>Atlas <strong>{{ 'Configured' if platform_state.atlas_configured else 'Not Configured' }}</strong></div>
         <div style="display:flex; align-items:center; gap:6px; font-size:11.5px;"><span style="width:8px; height:8px; border-radius:50%; background:{{ 'var(--teal)' if platform_state.whatsapp_configured else 'var(--text-faint)' }}; display:inline-block;"></span>WhatsApp <strong>{{ 'Configured' if platform_state.whatsapp_configured else 'Not Configured' }}</strong></div>
     </div>
