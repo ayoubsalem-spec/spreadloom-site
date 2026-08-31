@@ -4296,6 +4296,13 @@ def product_intelligence():
     ecosystem_atlas = {"name": "Atlas", "configured": platform_state["atlas_configured"],
                         "url": url_for("assistant_page") if is_atlas_allowed() else None}
 
+    # Build Direction defaults to its clean read-only presentation for
+    # everyone; the Edit Roadmap toggle (and the note/lane editing
+    # controls it reveals) only ever render for someone who already has
+    # the real permission the roadmap_item_update route itself enforces
+    # -- this is a display decision, not a new authorization boundary.
+    can_manage_roadmap = _authorized("action:product_intelligence:manage")
+
     return render_template(
         "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
         departments=departments, status_filter=status_filter, department_filter=department_filter,
@@ -4305,7 +4312,7 @@ def product_intelligence():
         submitted_line=submitted_line, resolved_line=resolved_line, resolved_fill=resolved_fill,
         module_tiles=module_tiles, avg_resolve_days=avg_resolve_days, backlog_line=backlog_line,
         open_backlog_now=open_backlog_now, backlog_trend_up=backlog_trend_up,
-        roadmap_lanes=roadmap_lanes, module_health=module_health,
+        roadmap_lanes=roadmap_lanes, module_health=module_health, can_manage_roadmap=can_manage_roadmap,
         lifecycle=lifecycle, priority_builds=priority_builds, situation=situation,
         pulse=pulse, platform_state=platform_state, ecosystem_atlas=ecosystem_atlas,
     )
@@ -4321,10 +4328,19 @@ def roadmap_item_update(item_id):
     lane = request.form.get("lane", "later")
     if lane not in ("now", "next", "evolving", "later"):
         lane = "later"
+    # Progress % is no longer exposed in the Build Direction UI (NOW/NEXT/
+    # EVOLVING/LATER is the visible roadmap state model) -- but the field
+    # and column remain for backward compatibility, per instruction, with
+    # no migration. Since the form no longer submits progress_pct at all,
+    # defaulting a missing value to 0 would silently zero out whatever was
+    # already stored on every single note/lane edit -- preserve the
+    # existing value instead when the field isn't present in the request.
+    existing_row = db.execute("SELECT progress_pct FROM roadmap_items WHERE id = ?", (item_id,)).fetchone()
+    existing_pct = existing_row[0] if existing_row else 0
     try:
-        progress_pct = max(0, min(100, int(request.form.get("progress_pct", 0))))
-    except ValueError:
-        progress_pct = 0
+        progress_pct = max(0, min(100, int(request.form.get("progress_pct", existing_pct))))
+    except (ValueError, TypeError):
+        progress_pct = existing_pct
     note = request.form.get("note", "").strip()
     db.execute(
         "UPDATE roadmap_items SET lane = ?, progress_pct = ?, note = ?, updated_at = ? WHERE id = ?",

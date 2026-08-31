@@ -56,6 +56,41 @@ def get_csrf(client, path):
     return m.group(1) if m else None
 
 
+def _is_descendant_of_div_class(html, ancestor_class, needle):
+    """A minimal, real HTML-nesting check -- not a substring search.
+    Finds the <div> carrying `ancestor_class`, walks forward tracking
+    <div>/</div> depth to locate that div's true matching closing tag
+    (handling nested divs correctly), and returns True only if `needle`
+    (e.g. an id="..." or class="..." attribute string) appears strictly
+    between that opening and its matching closing tag -- i.e. genuinely
+    inside it in the DOM tree, which is what CSS :has() actually
+    requires. A needle that merely appears later in the raw HTML text
+    (e.g. as a sibling, or after the ancestor's closing tag) correctly
+    returns False, which is exactly the bug class this exists to catch."""
+    class_pattern = re.compile(r'<div\b[^>]*class="[^"]*\b' + re.escape(ancestor_class) + r'\b[^"]*"[^>]*>')
+    m = class_pattern.search(html)
+    if not m:
+        return False
+    start = m.end()
+    depth = 1
+    pos = start
+    tag_re = re.compile(r'<div\b[^>]*>|</div>')
+    while depth > 0:
+        tm = tag_re.search(html, pos)
+        if not tm:
+            return False  # malformed HTML -- no matching close found
+        if tm.group(0) == "</div>":
+            depth -= 1
+        else:
+            depth += 1
+        pos = tm.end()
+        if depth == 0:
+            end = tm.start()  # position of the matching closing </div>
+            break
+    inner_html = html[start:end]
+    return needle in inner_html
+
+
 def login(client, email, password):
     token = get_csrf(client, "/login")
     resp = client.post("/login", data={"email": email, "password": password, "csrf_token": token}, follow_redirects=True)
@@ -108,6 +143,67 @@ def main():
     check("Build Direction lane items render with no progress-percentage bar markup", "pi2-build-track" not in body0 and "pi2-build-fill" not in body0)
     check("roadmap wording no longer implies live-production deployment", "Canonical Project Identity is live" not in body0)
     check("BuildIQ Ecosystem uses the merged single-list layout (no duplicate Module Activity section)", "Module Activity" not in body0)
+    check("'Progress %' label text does not appear anywhere, including in edit mode for an admin", "Progress %" not in body0)
+    real_edit_forms_admin = re.findall(r'<form method="POST" action="/admin/roadmap/\d+/update"', body0)
+    real_checkbox_admin = re.findall(r'<input type="checkbox" id="pi2-edit-roadmap-cb">', body0)
+    check("Edit Roadmap checkbox toggle is present for an admin (has action:product_intelligence:manage)", len(real_checkbox_admin) == 1)
+    check("real note/lane edit forms are present in the DOM for an admin (CSS-gated behind the toggle, not absent)", len(real_edit_forms_admin) > 0)
+
+    print()
+    print("=== 1c. DOM structure: #pi2-edit-roadmap-cb is a genuine descendant of .pi2-direction-wrap ===")
+    # This is the actual bug the CTO caught: the CSS is
+    #   .pi2-direction-wrap:has(#pi2-edit-roadmap-cb:checked) .pi2-lane-item-edit
+    # which requires the checkbox to be a DESCENDANT of .pi2-direction-wrap
+    # -- :has() only searches inside the element it's attached to. A test
+    # that merely checks the checkbox and the wrap class both exist
+    # somewhere in the page (as the previous version of this suite did)
+    # cannot catch a sibling-instead-of-descendant structural bug like
+    # this one. This test parses real HTML nesting depth instead.
+    check("#pi2-edit-roadmap-cb is nested inside .pi2-direction-wrap (required for the :has() selector to ever match)",
+          _is_descendant_of_div_class(body0, "pi2-direction-wrap", 'id="pi2-edit-roadmap-cb"'))
+    check(".pi2-lane-item-edit blocks are ALSO nested inside .pi2-direction-wrap (both sides of the :has() relationship)",
+          _is_descendant_of_div_class(body0, "pi2-direction-wrap", 'class="pi2-lane-item-edit"'))
+
+    print()
+    print("=== 1b. Build Direction: a view-only user (no manage permission) sees zero edit UI ===")
+    view_only_email = "__pit_view_only@test.local"
+    db.execute("DELETE FROM users WHERE email=?", (view_only_email,))
+    db.commit()
+    db.execute("INSERT INTO users (name,email,password_hash,created_at) VALUES (?,?,?,?)", ("__pit_view_only", view_only_email, pw_hash, now))
+    db.commit()
+    view_only_uid = db.execute("SELECT id FROM users WHERE email=?", (view_only_email,)).fetchone()[0]
+    pi_view_pid = db.execute("SELECT id FROM permissions WHERE key='module:product_intelligence:view'").fetchone()[0]
+    db.execute("INSERT INTO user_permission_overrides (user_id, permission_id, state, granted_by, updated_at) VALUES (?,?,?,?,?)",
+               (view_only_uid, pi_view_pid, "grant", "test_setup", now))
+    db.commit()
+    client_vo = appmod.app.test_client()
+    csrf_vo = login(client_vo, view_only_email, pw)
+    r_vo = client_vo.get("/admin/product-intelligence", follow_redirects=False)
+    body_vo = r_vo.get_data(as_text=True)
+    check("view-only user can load the page (200)", r_vo.status_code == 200)
+    real_edit_forms_vo = re.findall(r'<form method="POST" action="/admin/roadmap/\d+/update"', body_vo)
+    real_checkbox_vo = re.findall(r'<input type="checkbox" id="pi2-edit-roadmap-cb">', body_vo)
+    real_toggle_label_vo = re.findall(r'<label class="pi2-edit-toggle">', body_vo)
+    check("no Edit Roadmap checkbox toggle rendered for a view-only user", len(real_checkbox_vo) == 0)
+    check("no Edit Roadmap toggle label rendered for a view-only user", len(real_toggle_label_vo) == 0)
+    check("zero real note/lane edit forms rendered for a view-only user (not just CSS-hidden -- absent from the DOM)", len(real_edit_forms_vo) == 0)
+    check("read-only roadmap item names/notes still render for a view-only user", "Product Core" in body_vo or "Product Intelligence" in body_vo)
+
+    # server-side: a direct POST attempt against roadmap_item_update must
+    # still be rejected for this user, proving the display change didn't
+    # touch the actual authorization boundary.
+    any_roadmap_id = db.execute("SELECT id FROM roadmap_items LIMIT 1").fetchone()[0]
+    before_item = dict(db.execute("SELECT lane, note FROM roadmap_items WHERE id=?", (any_roadmap_id,)).fetchone())
+    r_hack = client_vo.post(f"/admin/roadmap/{any_roadmap_id}/update",
+                             data={"csrf_token": csrf_vo, "lane": "now", "note": "HACKED_BY_VIEW_ONLY"},
+                             follow_redirects=False)
+    after_item = dict(db.execute("SELECT lane, note FROM roadmap_items WHERE id=?", (any_roadmap_id,)).fetchone())
+    check("direct POST to roadmap_item_update is still denied for a view-only user (302)", r_hack.status_code == 302)
+    check("roadmap item is completely unchanged after the denied direct-POST attempt", before_item == after_item)
+    client_vo.get("/logout")
+    db.execute("DELETE FROM user_permission_overrides WHERE user_id=?", (view_only_uid,))
+    db.execute("DELETE FROM users WHERE id=?", (view_only_uid,))
+    db.commit()
 
     print()
     print("=== 2. Populated-data render: every new section shows real values ===")
@@ -149,6 +245,19 @@ def main():
     row = db.execute("SELECT lane, progress_pct FROM roadmap_items WHERE id=?", (atlas_roadmap_id,)).fetchone()
     check("roadmap_item_update accepted lane='evolving'", row["lane"] == "evolving")
     check("progress_pct was saved correctly", row["progress_pct"] == 45)
+
+    print()
+    print("=== 3c. progress_pct is preserved when the form no longer submits it (no silent data loss) ===")
+    # The form deliberately no longer includes a Progress % field, but
+    # roadmap_item_update() must not treat that as "set it to 0" -- it
+    # should preserve whatever was already stored (backward compatible,
+    # no migration, per instruction).
+    r_no_pct = client.post(f"/admin/roadmap/{atlas_roadmap_id}/update",
+                            data={"csrf_token": csrf, "lane": "evolving", "note": "still evolving"},
+                            follow_redirects=False)
+    row_after = db.execute("SELECT progress_pct, note FROM roadmap_items WHERE id=?", (atlas_roadmap_id,)).fetchone()
+    check("progress_pct (45, set moments ago) survives a save where the form omits it entirely", row_after["progress_pct"] == 45)
+    check("note was still updated normally by the same save", row_after["note"] == "still evolving")
 
     print()
     print("=== 3b. Startup never auto-rewrites an existing roadmap (CTO audit fix) ===")

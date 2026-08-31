@@ -95,6 +95,19 @@
     .pi2-lane-sub { font-size:10.5px; color:var(--text-faint); margin-bottom:8px; }
     .pi2-lane-item-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; margin-bottom:2px; }
     .pi2-lane-item-note { font-size:10.5px; color:var(--text-dim); line-height:1.45; margin-bottom:6px; }
+    .pi2-lane-item { margin-bottom:10px; }
+    .pi2-lane-item:last-child { margin-bottom:0; }
+
+    /* Build Direction defaults to read-only; the edit form for each item
+       only appears once an authorized user checks the "Edit Roadmap"
+       toggle. Pure CSS -- no JS -- and the edit markup only exists in
+       the DOM at all for someone can_manage_roadmap already gates
+       server-side (see product_intelligence()/roadmap_item_update()). */
+    .pi2-edit-toggle { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--text-dim); cursor:pointer; user-select:none; }
+    .pi2-edit-toggle input { accent-color:var(--brass); width:13px; height:13px; cursor:pointer; }
+    .pi2-edit-toggle:hover { color:var(--text); }
+    .pi2-lane-item-edit { display:none; }
+    .pi2-direction-wrap:has(#pi2-edit-roadmap-cb:checked) .pi2-lane-item-edit { display:block; }
 
     .pi2-eco-hub { display:flex; align-items:center; gap:10px; padding-bottom:10px; margin-bottom:6px; border-bottom:1px solid var(--line); }
     .pi2-eco-hub-mark { width:36px; height:36px; border-radius:9px; border:2px solid var(--brass); display:flex; align-items:center; justify-content:center; background:radial-gradient(circle, rgba(201,162,75,0.12), transparent); flex-shrink:0; }
@@ -328,7 +341,16 @@
 
 <!-- BUILD DIRECTION -->
 <p class="pi-section-title" id="pi2-direction" style="margin-bottom:4px; margin-top:20px; scroll-margin-top:16px;">Build Direction</p>
-<p class="sub" style="font-size:12px; margin-bottom:14px;">Our roadmap and development focus.</p>
+<div class="pi2-direction-wrap">
+<div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:14px; gap:12px; flex-wrap:wrap;">
+    <p class="sub" style="font-size:12px; margin:0;">Our roadmap and development focus.</p>
+    {% if can_manage_roadmap %}
+    <label class="pi2-edit-toggle">
+        <input type="checkbox" id="pi2-edit-roadmap-cb">
+        <span>Edit Roadmap</span>
+    </label>
+    {% endif %}
+</div>
 <div class="pi2-direction-row">
     {% for lane_key, lane_title, lane_sub in [
         ('now', 'Now', "What we're working on now."),
@@ -341,39 +363,34 @@
         <div class="pi2-lane-sub">{{ lane_sub }}</div>
         {% if roadmap_lanes[lane_key] %}
         {% for item in roadmap_lanes[lane_key] %}
-        <details style="margin-bottom:6px;">
-            <summary style="list-style:none; cursor:pointer;">
-                <div class="pi2-lane-item-name">{{ item['name'] }}</div>
-                {% if item['note'] %}<div class="pi2-lane-item-note">{{ item['note'] }}</div>{% endif %}
-            </summary>
-            <form method="POST" action="{{ url_for('roadmap_item_update', item_id=item['id']) }}" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--line);">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <label style="font-size:10px;">Note</label>
-                <textarea name="note" style="width:100%; min-height:56px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:8px; color:var(--text); font-family:'Inter',sans-serif; font-size:12px; margin-bottom:8px;">{{ item['note'] or '' }}</textarea>
-                <div style="display:flex; gap:8px; margin-bottom:8px;">
-                    <div style="flex:1;">
-                        <label style="font-size:10px;">Lane</label>
-                        <select name="lane" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px;">
-                            <option value="now" {{ 'selected' if item['lane'] == 'now' }}>Now</option>
-                            <option value="next" {{ 'selected' if item['lane'] == 'next' }}>Next</option>
-                            <option value="evolving" {{ 'selected' if item['lane'] == 'evolving' }}>Evolving</option>
-                            <option value="later" {{ 'selected' if item['lane'] == 'later' }}>Later</option>
-                        </select>
-                    </div>
-                    <div style="flex:1;">
-                        <label style="font-size:10px;">Progress %</label>
-                        <input type="number" name="progress_pct" min="0" max="100" value="{{ item['progress_pct'] }}" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px;">
-                    </div>
-                </div>
-                <button type="submit" class="btn btn-sm">Save</button>
-            </form>
-        </details>
+        <div class="pi2-lane-item">
+            <div class="pi2-lane-item-name">{{ item['name'] }}</div>
+            {% if item['note'] %}<div class="pi2-lane-item-note">{{ item['note'] }}</div>{% endif %}
+            {% if can_manage_roadmap %}
+            <div class="pi2-lane-item-edit">
+                <form method="POST" action="{{ url_for('roadmap_item_update', item_id=item['id']) }}" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--line);">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <label style="font-size:10px;">Note</label>
+                    <textarea name="note" style="width:100%; min-height:56px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; padding:8px; color:var(--text); font-family:'Inter',sans-serif; font-size:12px; margin-bottom:8px;">{{ item['note'] or '' }}</textarea>
+                    <label style="font-size:10px;">Lane</label>
+                    <select name="lane" style="width:100%; padding:6px 8px; background:var(--surface-2); border:1px solid var(--line); border-radius:4px; color:var(--text); font-size:12px; margin-bottom:8px;">
+                        <option value="now" {{ 'selected' if item['lane'] == 'now' }}>Now</option>
+                        <option value="next" {{ 'selected' if item['lane'] == 'next' }}>Next</option>
+                        <option value="evolving" {{ 'selected' if item['lane'] == 'evolving' }}>Evolving</option>
+                        <option value="later" {{ 'selected' if item['lane'] == 'later' }}>Later</option>
+                    </select>
+                    <button type="submit" class="btn btn-sm">Save</button>
+                </form>
+            </div>
+            {% endif %}
+        </div>
         {% endfor %}
         {% else %}
         <p class="cc-empty">Nothing in this lane yet.</p>
         {% endif %}
     </div>
     {% endfor %}
+</div>
 </div>
 
 <!-- BUILDIQ ECOSYSTEM -->
@@ -384,7 +401,7 @@
         <div class="pi2-eco-hub-mark"><span style="font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:9px; color:var(--brass);">BIQ</span></div>
         <div>
             <div class="pi2-eco-hub-name">BuildIQ &middot; Construction Intelligence OS</div>
-            <div class="pi2-eco-hub-sub">Every module below shares the same Project Core identity layer.</div>
+            <div class="pi2-eco-hub-sub">BuildIQ modules connect through the shared Project Core as project connectivity expands.</div>
         </div>
     </div>
     <div class="pi2-eco-rail">
