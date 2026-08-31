@@ -105,6 +105,9 @@ def main():
     fresh_pcts = [r[0] for r in db.execute("SELECT progress_pct FROM roadmap_items").fetchall()]
     check("freshly-seeded roadmap items have progress_pct=0, not an invented completion percentage", all(p == 0 for p in fresh_pcts))
     check("Priority Builds hero renders with no progress-percentage markup at all", "pi2-build-pct" not in body0)
+    check("Build Direction lane items render with no progress-percentage bar markup", "pi2-build-track" not in body0 and "pi2-build-fill" not in body0)
+    check("roadmap wording no longer implies live-production deployment", "Canonical Project Identity is live" not in body0)
+    check("BuildIQ Ecosystem uses the merged single-list layout (no duplicate Module Activity section)", "Module Activity" not in body0)
 
     print()
     print("=== 2. Populated-data render: every new section shows real values ===")

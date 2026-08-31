@@ -31,38 +31,33 @@
     .pi2-strip-value { font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; line-height:1; }
     .pi2-strip-label { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.6px; margin-top:6px; }
 
-    .pi2-hero-grid { display:grid; grid-template-columns:1.6fr 1fr; gap:16px; margin-bottom:24px; align-items:stretch; }
+    .pi2-hero-grid { display:grid; grid-template-columns:1.6fr 1fr; gap:14px; margin-bottom:20px; align-items:stretch; }
     @media (max-width:980px) { .pi2-hero-grid { grid-template-columns:1fr; } }
 
-    .pi2-spine { position:relative; padding-left:26px; }
-    .pi2-spine::before { content:""; position:absolute; left:8px; top:10px; bottom:10px; width:2px; background:linear-gradient(180deg, var(--brass) 0%, var(--teal) 50%, var(--cyan) 100%); opacity:0.4; }
-    .pi2-build-card { position:relative; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; margin-bottom:12px; }
+    .pi2-spine { position:relative; padding-left:22px; }
+    .pi2-spine::before { content:""; position:absolute; left:7px; top:8px; bottom:8px; width:2px; background:linear-gradient(180deg, var(--brass) 0%, var(--teal) 50%, var(--cyan) 100%); opacity:0.4; }
+    .pi2-build-card { position:relative; background:var(--surface); border:1px solid var(--line); border-radius:7px; padding:10px 13px; margin-bottom:8px; }
     .pi2-build-card:last-child { margin-bottom:0; }
     .pi2-build-card.active { border-color:rgba(201,162,75,0.5); background:linear-gradient(180deg, rgba(201,162,75,0.06), transparent); }
     .pi2-build-card.evolving { border-color:rgba(94,234,212,0.4); }
     .pi2-build-card.foundation { border-color:rgba(90,200,224,0.35); }
-    .pi2-build-dot { position:absolute; left:-22px; top:20px; width:11px; height:11px; border-radius:50%; border:2px solid var(--surface); }
+    .pi2-build-dot { position:absolute; left:-19px; top:16px; width:10px; height:10px; border-radius:50%; border:2px solid var(--surface); }
     .pi2-build-card.active .pi2-build-dot { background:var(--brass); }
     .pi2-build-card.evolving .pi2-build-dot { background:var(--teal); }
     .pi2-build-card.foundation .pi2-build-dot { background:#5AC8E0; }
     .pi2-build-top { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
-    .pi2-build-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; }
+    .pi2-build-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:14px; }
     .pi2-build-pill { font-family:'IBM Plex Mono',monospace; font-size:8.5px; font-weight:700; padding:2px 7px; border-radius:3px; border:1.5px solid; letter-spacing:0.4px; white-space:nowrap; }
     .pi2-build-card.active .pi2-build-pill { color:var(--brass); border-color:var(--brass); }
     .pi2-build-card.evolving .pi2-build-pill { color:var(--teal); border-color:var(--teal); }
     .pi2-build-card.foundation .pi2-build-pill { color:#5AC8E0; border-color:#5AC8E0; }
-    .pi2-build-note { font-size:12px; color:var(--text-dim); margin:6px 0 10px; line-height:1.5; }
-    .pi2-build-track { height:5px; background:var(--line); border-radius:3px; overflow:hidden; }
-    .pi2-build-fill { height:100%; border-radius:3px; }
-    .pi2-build-card.active .pi2-build-fill { background:var(--brass); }
-    .pi2-build-card.evolving .pi2-build-fill { background:var(--teal); }
-    .pi2-build-card.foundation .pi2-build-fill { background:#5AC8E0; }
+    .pi2-build-note { font-size:11.5px; color:var(--text-dim); margin-top:4px; line-height:1.45; }
 
-    .pi2-situation-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
-    .pi2-sit-tile { background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:10px 12px; }
-    .pi2-sit-value { font-family:'Space Grotesk',sans-serif; font-size:19px; font-weight:700; }
+    .pi2-situation-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:10px; }
+    .pi2-sit-tile { background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+    .pi2-sit-value { font-family:'Space Grotesk',sans-serif; font-size:18px; font-weight:700; }
     .pi2-sit-label { font-family:'IBM Plex Mono',monospace; font-size:8.5px; color:var(--text-dim); text-transform:uppercase; margin-top:2px; }
-    .pi2-movement-item { display:flex; align-items:baseline; gap:8px; padding:5px 0; font-size:11.5px; border-bottom:1px solid var(--line); }
+    .pi2-movement-item { display:flex; align-items:baseline; gap:8px; padding:4px 0; font-size:11.5px; border-bottom:1px solid var(--line); }
     .pi2-movement-item:last-child { border-bottom:none; }
     .pi2-movement-dot { width:5px; height:5px; border-radius:50%; background:var(--teal); flex-shrink:0; }
     .pi2-movement-text { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-dim); }
@@ -81,41 +76,43 @@
     .pi2-attention-clear { display:flex; align-items:center; gap:14px; padding:6px 2px; }
     .pi2-attention-clear-icon { width:38px; height:38px; border-radius:50%; border:2px solid var(--teal); color:var(--teal); display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; }
 
-    .pi2-pulse-row { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:12px; }
+    .pi2-pulse-row { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--line); }
     .pi2-pulse-tile { text-align:center; }
-    .pi2-pulse-value { font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; }
-    .pi2-pulse-label { font-family:'IBM Plex Mono',monospace; font-size:8.5px; color:var(--text-dim); text-transform:uppercase; margin-top:2px; }
+    .pi2-pulse-value { font-family:'Space Grotesk',sans-serif; font-size:26px; font-weight:700; line-height:1; }
+    .pi2-pulse-label { font-family:'IBM Plex Mono',monospace; font-size:8.5px; color:var(--text-dim); text-transform:uppercase; margin-top:4px; }
+    .pi2-pulse-trend-label { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px; }
 
-    .pi2-direction-row { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+    .pi2-direction-row { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
     @media (max-width:900px) { .pi2-direction-row { grid-template-columns:1fr 1fr; } }
     @media (max-width:560px) { .pi2-direction-row { grid-template-columns:1fr; } }
-    .pi2-lane-card { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+    .pi2-lane-card { background:var(--surface); border:1px solid var(--line); border-radius:7px; padding:11px 13px; }
     .pi2-lane-card.now { border-color:rgba(201,162,75,0.4); }
-    .pi2-lane-head { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:2px; }
+    .pi2-lane-head { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.6px; margin-bottom:1px; }
     .pi2-lane-card.now .pi2-lane-head { color:var(--brass); }
     .pi2-lane-card.next .pi2-lane-head { color:#5AC8E0; }
     .pi2-lane-card.evolving .pi2-lane-head { color:var(--teal); }
     .pi2-lane-card.later .pi2-lane-head { color:var(--text-faint); }
-    .pi2-lane-sub { font-size:10.5px; color:var(--text-faint); margin-bottom:10px; }
-    .pi2-lane-item-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13px; margin-bottom:3px; }
-    .pi2-lane-item-note { font-size:11px; color:var(--text-dim); line-height:1.5; margin-bottom:8px; }
+    .pi2-lane-sub { font-size:10.5px; color:var(--text-faint); margin-bottom:8px; }
+    .pi2-lane-item-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; margin-bottom:2px; }
+    .pi2-lane-item-note { font-size:10.5px; color:var(--text-dim); line-height:1.45; margin-bottom:6px; }
 
-    .pi2-ecosystem-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; align-items:center; margin-bottom:14px; }
-    @media (max-width:760px) { .pi2-ecosystem-grid { grid-template-columns:1fr; } }
-    .pi2-eco-node { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:12px 14px; text-decoration:none; color:var(--text); display:block; }
-    .pi2-eco-node:hover { border-color:var(--brass-dim); }
-    .pi2-eco-node-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
-    .pi2-eco-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; }
-    .pi2-eco-metric { font-size:11px; color:var(--text-dim); }
-    .pi2-eco-center { text-align:center; padding:20px 10px; }
-    .pi2-eco-hex { width:74px; height:74px; margin:0 auto 8px; border-radius:16px; border:2px solid var(--brass); display:flex; align-items:center; justify-content:center; background:radial-gradient(circle, rgba(201,162,75,0.12), transparent); }
+    .pi2-eco-hub { display:flex; align-items:center; gap:10px; padding-bottom:10px; margin-bottom:6px; border-bottom:1px solid var(--line); }
+    .pi2-eco-hub-mark { width:36px; height:36px; border-radius:9px; border:2px solid var(--brass); display:flex; align-items:center; justify-content:center; background:radial-gradient(circle, rgba(201,162,75,0.12), transparent); flex-shrink:0; }
+    .pi2-eco-hub-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13px; }
+    .pi2-eco-hub-sub { font-size:10.5px; color:var(--text-faint); }
 
-    .pi2-module-row { display:flex; flex-direction:column; gap:0; }
-    .pi2-module-item { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--line); }
-    .pi2-module-item:last-child { border-bottom:none; }
-    .pi2-module-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; width:140px; flex-shrink:0; }
-    .pi2-module-detail { flex:1; font-size:11.5px; color:var(--text-dim); min-width:0; }
-    .pi2-module-spark { width:90px; height:24px; flex-shrink:0; }
+    .pi2-eco-rail { position:relative; padding-left:18px; }
+    .pi2-eco-rail::before { content:""; position:absolute; left:6px; top:2px; bottom:2px; width:2px; background:linear-gradient(180deg, var(--brass), var(--teal) 40%, #5AC8E0 70%, var(--teal)); opacity:0.35; }
+    .pi2-eco-row { position:relative; display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--line); text-decoration:none; color:var(--text); }
+    .pi2-eco-row:last-child { border-bottom:none; }
+    .pi2-eco-row:hover .pi2-eco-name { color:var(--brass); }
+    .pi2-eco-dot { position:absolute; left:-15px; width:7px; height:7px; border-radius:50%; background:var(--teal); }
+    .pi2-eco-row.attn .pi2-eco-dot { background:var(--brass); }
+    .pi2-eco-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px; width:132px; flex-shrink:0; }
+    .pi2-eco-status { font-size:10px; flex-shrink:0; width:118px; color:var(--text-dim); font-family:'IBM Plex Mono',monospace; }
+    .pi2-eco-metric { flex:1; font-size:11px; color:var(--text-dim); min-width:0; }
+    .pi2-eco-spark { width:78px; height:22px; flex-shrink:0; }
+    @media (max-width:640px) { .pi2-eco-status { display:none; } .pi2-eco-spark { display:none; } }
 </style>
 
 <div class="cc-shell">
@@ -287,18 +284,18 @@
                 <div class="pi2-pulse-tile"><div class="pi2-pulse-value">{{ pulse.platform_events }}</div><div class="pi2-pulse-label">Platform events</div></div>
             </div>
             {% if pulse.has_trend_data %}
-            <svg width="100%" height="70" viewBox="0 0 900 90" style="overflow:visible;">
+            <div class="pi2-pulse-trend-label">14-day trend</div>
+            <svg width="100%" height="34" viewBox="0 0 900 90" preserveAspectRatio="none" style="display:block;">
                 <defs>
-                    <filter id="ccFg2" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-                    <linearGradient id="ccFillTeal2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5EEAD4" stop-opacity="0.2"/><stop offset="100%" stop-color="#5EEAD4" stop-opacity="0"/></linearGradient>
+                    <linearGradient id="ccFillTeal2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#5EEAD4" stop-opacity="0.18"/><stop offset="100%" stop-color="#5EEAD4" stop-opacity="0"/></linearGradient>
                 </defs>
                 <path d="{{ resolved_fill }}" fill="url(#ccFillTeal2)" stroke="none"/>
-                <path d="{{ submitted_line }}" fill="none" stroke="#C9A24B" stroke-width="2" filter="url(#ccFg2)"/>
-                <path d="{{ resolved_line }}" fill="none" stroke="#5EEAD4" stroke-width="2" filter="url(#ccFg2)"/>
+                <path d="{{ submitted_line }}" fill="none" stroke="#C9A24B" stroke-width="2.5"/>
+                <path d="{{ resolved_line }}" fill="none" stroke="#5EEAD4" stroke-width="2.5"/>
             </svg>
-            <div style="display:flex; gap:16px; margin-top:2px;">
-                <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Received</div>
-                <div style="display:flex; align-items:center; gap:6px; font-size:10.5px; color:var(--text-dim);"><span style="width:8px; height:8px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Resolved</div>
+            <div style="display:flex; gap:14px; margin-top:4px;">
+                <div style="display:flex; align-items:center; gap:5px; font-size:10px; color:var(--text-faint);"><span style="width:7px; height:7px; border-radius:2px; background:#C9A24B; display:inline-block;"></span>Received</div>
+                <div style="display:flex; align-items:center; gap:5px; font-size:10px; color:var(--text-faint);"><span style="width:7px; height:7px; border-radius:2px; background:#5EEAD4; display:inline-block;"></span>Resolved</div>
             </div>
             {% else %}
             <p class="cc-empty">Not enough activity yet for a 14-day trend.</p>
@@ -330,7 +327,7 @@
 </div>
 
 <!-- BUILD DIRECTION -->
-<p class="pi-section-title" id="pi2-direction" style="margin-bottom:4px; margin-top:24px; scroll-margin-top:16px;">Build Direction</p>
+<p class="pi-section-title" id="pi2-direction" style="margin-bottom:4px; margin-top:20px; scroll-margin-top:16px;">Build Direction</p>
 <p class="sub" style="font-size:12px; margin-bottom:14px;">Our roadmap and development focus.</p>
 <div class="pi2-direction-row">
     {% for lane_key, lane_title, lane_sub in [
@@ -344,13 +341,10 @@
         <div class="pi2-lane-sub">{{ lane_sub }}</div>
         {% if roadmap_lanes[lane_key] %}
         {% for item in roadmap_lanes[lane_key] %}
-        <details style="margin-bottom:8px;">
+        <details style="margin-bottom:6px;">
             <summary style="list-style:none; cursor:pointer;">
                 <div class="pi2-lane-item-name">{{ item['name'] }}</div>
                 {% if item['note'] %}<div class="pi2-lane-item-note">{{ item['note'] }}</div>{% endif %}
-                {% if lane_key != 'later' %}
-                <div class="pi2-build-track"><div class="pi2-build-fill" style="width:{{ item['progress_pct'] }}%; background:{{ 'var(--brass)' if lane_key == 'now' else ('var(--teal)' if lane_key == 'evolving' else '#5AC8E0') }};"></div></div>
-                {% endif %}
             </summary>
             <form method="POST" action="{{ url_for('roadmap_item_update', item_id=item['id']) }}" style="margin-top:10px; padding-top:10px; border-top:1px solid var(--line);">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -383,47 +377,32 @@
 </div>
 
 <!-- BUILDIQ ECOSYSTEM -->
-<p class="pi-section-title" id="pi2-ecosystem" style="margin-bottom:4px; margin-top:24px; scroll-margin-top:16px;">BuildIQ Ecosystem</p>
-<p class="sub" style="font-size:12px; margin-bottom:14px;">Connected modules and system intelligence.</p>
-<div class="card">
-    <div class="pi2-ecosystem-grid">
-        {% for t in module_tiles %}
-        <a href="{{ t.url }}" class="pi2-eco-node">
-            <div class="pi2-eco-node-top">
-                <span class="pi2-eco-name">{{ t.name }}</span>
-                <span class="cc-status-pill {{ 'cc-status-healthy' if not t.attention else 'cc-status-attention' }}">{{ t.status_text }}</span>
-            </div>
-            <div class="pi2-eco-metric">{{ t.value }} {{ t.label }}</div>
-        </a>
-        {% if loop.index == 1 %}
-        <div class="pi2-eco-center">
-            <div class="pi2-eco-hex"><span style="font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:11px; color:var(--brass);">BuildIQ</span></div>
-            <div class="sub" style="font-size:10.5px;">Construction Intelligence OS</div>
+<p class="pi-section-title" id="pi2-ecosystem" style="margin-bottom:4px; margin-top:20px; scroll-margin-top:16px;">BuildIQ Ecosystem</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Connected modules, centered on the shared Project Core identity layer.</p>
+<div class="card" style="padding:16px 18px;">
+    <div class="pi2-eco-hub">
+        <div class="pi2-eco-hub-mark"><span style="font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:9px; color:var(--brass);">BIQ</span></div>
+        <div>
+            <div class="pi2-eco-hub-name">BuildIQ &middot; Construction Intelligence OS</div>
+            <div class="pi2-eco-hub-sub">Every module below shares the same Project Core identity layer.</div>
         </div>
-        {% endif %}
-        {% endfor %}
-        <a href="{{ ecosystem_atlas.url or '#' }}" class="pi2-eco-node" style="{{ 'pointer-events:none;' if not ecosystem_atlas.url }}">
-            <div class="pi2-eco-node-top">
-                <span class="pi2-eco-name">Atlas</span>
-                <span class="cc-status-pill {{ 'cc-status-healthy' if ecosystem_atlas.configured else 'cc-status-attention' }}">{{ 'Configured' if ecosystem_atlas.configured else 'Not Configured' }}</span>
-            </div>
-            <div class="pi2-eco-metric">Intelligence &amp; action layer</div>
-        </a>
     </div>
-
-    <p class="pi-section-title" style="font-size:11px; margin-bottom:10px;">Module Activity <span class="dim">7-day activity</span></p>
-    <div class="pi2-module-row">
+    <div class="pi2-eco-rail">
         {% for t in module_tiles %}
-        <div class="pi2-module-item">
-            <div class="pi2-module-name">{{ t.name }} <span class="cc-status-pill {{ 'cc-status-healthy' if not t.attention else 'cc-status-attention' }}" style="margin-left:4px;">{{ t.status_text }}</span></div>
-            <div class="pi2-module-detail">{{ t.value }} {{ t.label }}</div>
-            <svg class="pi2-module-spark" viewBox="0 0 220 30"><polyline points="{{ t.spark }}" fill="none" stroke="{{ t.spark_color }}" stroke-width="2"/></svg>
-        </div>
+        <a href="{{ t.url }}" class="pi2-eco-row {{ 'attn' if t.attention }}">
+            <span class="pi2-eco-dot"></span>
+            <span class="pi2-eco-name">{{ t.name }}</span>
+            <span class="pi2-eco-status">{{ t.status_text }}</span>
+            <span class="pi2-eco-metric">{{ t.value }} {{ t.label }}</span>
+            <svg class="pi2-eco-spark" viewBox="0 0 220 30"><polyline points="{{ t.spark }}" fill="none" stroke="{{ t.spark_color }}" stroke-width="2"/></svg>
+        </a>
         {% endfor %}
-        <div class="pi2-module-item">
-            <div class="pi2-module-name">Atlas <span class="cc-status-pill {{ 'cc-status-healthy' if ecosystem_atlas.configured else 'cc-status-attention' }}" style="margin-left:4px;">{{ 'Configured' if ecosystem_atlas.configured else 'Not Configured' }}</span></div>
-            <div class="pi2-module-detail">Intelligence layer{% if not ecosystem_atlas.configured %} &mdash; no LLM key set{% endif %}</div>
-        </div>
+        <a href="{{ ecosystem_atlas.url or '#' }}" class="pi2-eco-row {{ 'attn' if not ecosystem_atlas.configured }}" style="{{ 'pointer-events:none;' if not ecosystem_atlas.url }}">
+            <span class="pi2-eco-dot"></span>
+            <span class="pi2-eco-name">Atlas</span>
+            <span class="pi2-eco-status">{{ 'Configured' if ecosystem_atlas.configured else 'Not Configured' }}</span>
+            <span class="pi2-eco-metric">Intelligence &amp; action layer{% if not ecosystem_atlas.configured %} &mdash; no LLM key set{% endif %}</span>
+        </a>
     </div>
 </div>
 

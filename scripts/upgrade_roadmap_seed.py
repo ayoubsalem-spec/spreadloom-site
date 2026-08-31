@@ -45,7 +45,7 @@ ORIGINAL_SEED = {
 }
 
 NEW_SEED = [
-    ("Product Core", "now", "Canonical Project Identity is live -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 0, 1),
+    ("Product Core", "now", "Canonical Project Identity foundation is complete -- concrete, purchase, and rental records link to real projects. Currently extending that connectivity into more of Project Hunt/SitePulse.", 0, 1),
     ("Product Intelligence", "now", "Command Center experience refinement -- visual hierarchy, real-data intelligence, and honest empty states.", 0, 2),
     ("Project Connectivity", "next", "Turning canonical Project Identity into useful connected project intelligence across modules.", 0, 3),
     ("Atlas", "evolving", "BuildIQ's intelligence and action layer -- read tools shipped; continuously gaining capability rather than reaching a fixed 100%.", 0, 4),
