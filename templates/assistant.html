@@ -97,6 +97,7 @@
                 <div><span>Atlas state:</span> <b id="vd-vstate">n/a</b></div>
                 <div><span>Polling:</span> <b id="vd-polling">n/a</b></div>
                 <div><span>Level:</span> <b id="vd-level">n/a</b></div>
+                <div><span>RMS (test only):</span> <b id="vd-rms">n/a</b></div>
                 <div><span>Noise floor:</span> <b id="vd-floor">n/a</b></div>
                 <div><span>Threshold:</span> <b id="vd-threshold">n/a</b></div>
                 <div><span>Speech ticks:</span> <b id="vd-ticks">n/a</b></div>
@@ -188,6 +189,7 @@
         vstate: document.getElementById('vd-vstate'),
         polling: document.getElementById('vd-polling'),
         level: document.getElementById('vd-level'),
+        rms: document.getElementById('vd-rms'),
         floor: document.getElementById('vd-floor'),
         threshold: document.getElementById('vd-threshold'),
         ticks: document.getElementById('vd-ticks'),
@@ -199,7 +201,7 @@
     } : null;
     var voiceDiagState = {
         audioContextState: 'n/a', mediaRecorderState: 'n/a', atlasVoiceState: 'n/a',
-        pollingActive: false, level: null, noiseFloor: null, speechThreshold: null,
+        pollingActive: false, level: null, rmsLevel: null, noiseFloor: null, speechThreshold: null,
         speechTicks: 0, hasSpokenYet: false, silenceDurationMs: null, lastStopReason: 'n/a'
     };
     var voiceDiagLog = [];
@@ -247,6 +249,7 @@
         vdEls.vstate.textContent = s.atlasVoiceState;
         vdEls.polling.textContent = s.pollingActive ? 'active' : 'idle';
         vdEls.level.textContent = fmtNum(s.level);
+        vdEls.rms.textContent = fmtNum(s.rmsLevel, 3);
         vdEls.floor.textContent = fmtNum(s.noiseFloor);
         vdEls.threshold.textContent = fmtNum(s.speechThreshold);
         vdEls.ticks.textContent = String(s.speechTicks);
@@ -440,11 +443,14 @@
     // atlasAudioEl for playback.
     var sharedAnalyserAudioCtx = null;
 
-    // Learned ambient noise floor, persisted across TURNS within one
-    // voice session (not reset per-turn) -- see the redesigned
-    // watchForSilence() below for why. Reset to null on a genuinely
-    // fresh voice session (endVoiceSession) so a new session doesn't
-    // inherit a stale estimate from a different room/environment.
+    // Learned ambient noise floor (a single scalar EMA estimate),
+    // persisted across TURNS within one voice session (not reset
+    // per-turn). ROUND 4 (this fix): a fast, confirmation-gated EMA --
+    // see the long comment inside watchForSilence() below for why this
+    // both breaks round 2's deadlock AND avoids round 3's multi-second
+    // recovery latency. Reset to null on a genuinely fresh voice
+    // session (endVoiceSession) so a new session doesn't inherit a
+    // stale estimate from a different room/environment.
     var sessionNoiseFloor = null;
 
     function ensureSharedAnalyserAudioCtx() {
@@ -847,55 +853,142 @@
         currentSilenceSource = source;
         currentSilenceAnalyser = analyser;
 
+        // ---- TEST-ONLY: parallel RMS instrumentation (NOT used for any
+        // detection decision below) ----
+        // Release review of round 4 against the ACTUAL real-iPhone
+        // event log (candidate at level=15.3, confirmed at level=16.7)
+        // found the reported post-speech ambient on that device (15-26)
+        // can EXCEED the device's own real speech level (15.3-16.7).
+        // A grid search over FLOOR_ADAPT_STEP/SPEECH_MARGIN/
+        // SPEECH_CONFIRM_TICKS against a realistic ~60s randomized
+        // ambient fixture built from the real reported range (see
+        // scripts/atlas_voice_silence_detector_test.js, section "0e")
+        // found NO combination of those constants that reliably
+        // confirms real speech at that level without also eventually
+        // false-positiving on ambient -- because when ambient's own
+        // peak is louder than the target speech, no amplitude-only
+        // threshold on this getByteFrequencyData() average-magnitude
+        // signal can separate them. That is a signal problem, not a
+        // constant-tuning problem, so per instruction this pass does
+        // NOT keep tuning the detector.
+        //
+        // Instead, this block computes -- and ONLY logs, in TEST via
+        // the existing diagnostics panel/event log -- a second
+        // candidate signal in parallel: RMS of the raw time-domain
+        // waveform (getByteTimeDomainData()), which reflects the
+        // waveform's actual variance/energy rather than an average
+        // frequency-bin magnitude. Speech is a dynamically modulated
+        // waveform (its RMS swings with each syllable); many common
+        // ambient sources (HVAC hum, road noise through a phone mic)
+        // are comparatively steady-state, so RMS-over-time may separate
+        // them even when the two signals' simple magnitude ranges
+        // overlap. This is a hypothesis, not yet a conclusion --
+        // real-device data is needed before trusting it, which is
+        // exactly what this instrumentation is for.
+        //
+        // This does NOT change detection behavior in any way: the
+        // isCandidateSpeech / hasSpokenYet / silence-hold / auto-stop
+        // logic below is completely unchanged and still runs on the
+        // existing frequency-average `level` only. rmsLevel is
+        // computed, logged to the diagnostics panel/event log (TEST
+        // only, gated the same way as every other diagLog()/
+        // updateVoiceDiag() call in this file), and otherwise unused.
+        // Once a real-iPhone session has been captured with both
+        // numbers visible side by side, that data -- not another guess
+        // -- should decide whether to actually switch the detector to
+        // an RMS-based (or otherwise redesigned) signal.
+        var timeDomainData = new Uint8Array(analyser.fftSize);
+        function computeRms() {
+            analyser.getByteTimeDomainData(timeDomainData);
+            var sumSquares = 0;
+            for (var i = 0; i < timeDomainData.length; i++) {
+                // getByteTimeDomainData returns unsigned bytes centered
+                // at 128 representing the -1..1 waveform range.
+                var centered = (timeDomainData[i] - 128) / 128;
+                sumSquares += centered * centered;
+            }
+            return Math.sqrt(sumSquares / timeDomainData.length);
+        }
+
         // ---- ADAPTIVE noise-floor detector ----
         // Rather than assuming a single fixed volume number means
         // "speech" on every device/room/mic, this tracks a running
-        // estimate of the ambient noise floor and requires a level to
-        // exceed that floor by a real margin before counting as speech.
+        // estimate of the ambient level and requires a level to exceed
+        // that estimate by a real margin before counting as speech.
         //
-        // FIX (release review, round 2): the previous version spent the
-        // first CALIBRATION_MS unconditionally averaging every sample
-        // -- speech or not -- into the floor. If the user started
-        // talking immediately (exactly the target UX: "as soon as
-        // Atlas shows LISTENING, I should be able to speak
-        // immediately"), those early speech samples got baked into
-        // noiseFloor, pushing speechThreshold up past the user's own
-        // voice level -- hasSpokenYet then never became true, and
-        // recording never auto-stopped. Reproducing the same real-
-        // device symptom for a different reason than round 1's fix.
+        // ROUND 4 FIX (this pass) -- release review reproduced round
+        // 3's rolling-percentile-window detector against the real
+        // iPhone fixture and found it technically recovers, but far too
+        // slowly for conversational voice (~6.7s of post-speech latency,
+        // bounded by the whole AMBIENT_WINDOW_MS=8000 window needing to
+        // evict its pre-seeded default values). It also flagged that a
+        // noisy startup could still let persistent ambient alone
+        // eventually cross SPEECH_CONFIRM_TICKS while that window was
+        // still catching up, incorrectly setting hasSpokenYet=true from
+        // ambient alone.
         //
-        // Redesigned: there is no more blind time-gated calibration
-        // window at all. sessionNoiseFloor (declared at the outer
-        // session scope, not per-turn) starts at a conservative fixed
-        // default and is updated ONLY from samples already classified
-        // as non-speech -- speech samples NEVER feed the floor, from
-        // the very first tick of the very first turn onward. This is
-        // "separating candidate speech detection from long-term noise-
-        // floor adaptation": classification and adaptation both run
-        // every tick, but adaptation only ever pulls from the
-        // non-speech side of that same classification. Because the
-        // floor is session-level (not reset each turn), it also keeps
-        // improving turn over turn, so by turn 2+ it already reflects
-        // real learned silence from turn 1 -- no silent lead-in needed
-        // on any turn, first or subsequent.
+        // Round 3's real insight -- ambient estimation must be able to
+        // recover from a wrong starting guess without depending on its
+        // own (possibly wrong) classification decision -- is preserved.
+        // What changes is WHEN and HOW MUCH adaptation is allowed to
+        // move per tick, not how widely it looks back. This separates
+        // three concerns explicitly, as requested:
         //
-        // A brief opening transient (a mic-open pop/click) is handled
-        // separately: SPEECH_CONFIRM_TICKS requires a level to stay
-        // above threshold for a couple of consecutive polls before
-        // it's trusted as real speech, so a single-tick pop can't (a)
-        // poison the floor -- it never could, pops are classified as
-        // candidate-speech and floor adaptation only happens on the
-        // non-speech side regardless -- or (b) prematurely flip
-        // hasSpokenYet and start a silence countdown before the user
-        // has actually said anything.
-        var DEFAULT_INITIAL_NOISE_FLOOR = 5; // conservative "assume quiet" starting point, used only until real silence is observed
-        var SPEECH_MARGIN = 10;      // speech must exceed the floor by this much
-        var MIN_SPEECH_THRESHOLD = 6; // absolute floor, in case the estimated noise floor is implausibly low
-        var FLOOR_EMA_DOWN = 0.25;   // floor tracks a quieter room quickly
-        var FLOOR_EMA_UP = 0.02;     // floor rises slowly, so speech spikes don't drag it up
-        var SPEECH_CONFIRM_TICKS = 2; // ~200ms of sustained above-threshold level before trusting it as real speech, not a transient pop
-        var SILENCE_HOLD_MS = 1300;  // unchanged -- not what was broken
-        var MAX_DURATION_MS = 30000; // unchanged -- safety fallback either way
+        //   1. SPEECH ONSET DETECTION (isCandidateSpeech / consecutive-
+        //      tick debounce below) -- unchanged in spirit from every
+        //      prior round: a level must clear the current threshold
+        //      for SPEECH_CONFIRM_TICKS consecutive polls to even be
+        //      provisionally trusted.
+        //   2. AMBIENT ADAPTATION (sessionNoiseFloor's update) -- gated
+        //      on CONFIRMATION state (hasSpokenYet), not on each tick's
+        //      own candidate classification: the floor keeps adapting,
+        //      every tick, for as long as speech has NOT yet been
+        //      confirmed in this turn, so a wrong starting guess (or
+        //      genuinely elevated ambient) gets to correct itself WHILE
+        //      a candidate streak is still being evaluated. Critically,
+        //      each tick's move is a BOUNDED ABSOLUTE STEP
+        //      (FLOOR_ADAPT_STEP) toward the observed level, not a
+        //      percentage of the gap (a proportional EMA). A fixed step
+        //      closes a SMALL gap (a wrong default vs. real ambient,
+        //      typically ~10-20) within just 2-3 ticks -- fast enough to
+        //      break round 2's deadlock -- while the SAME fixed step
+        //      closes a LARGE gap (real ambient/floor vs. a genuine
+        //      speech level, typically ~35-45) far more slowly, so a
+        //      constant or lightly-varying loud utterance can't get
+        //      "caught" by its own onset within a couple of ticks the
+        //      way a proportional rate would. This is what makes a fast
+        //      recovery rate simultaneously safe for sustained speech:
+        //      the step size, not a percentage, is what's tuned to be
+        //      small relative to a real voice's dynamic range.
+        //      Once confirmed, adaptation freezes for the rest of that
+        //      active utterance -- protecting sustained real speech
+        //      from ever being absorbed into the floor.
+        //   3. CONFIRMED-USER-SPEECH STATE (hasSpokenYet) -- only ever
+        //      entered after SPEECH_CONFIRM_TICKS consecutive candidate
+        //      ticks against a CONTINUOUSLY-UPDATING threshold (not a
+        //      frozen one) -- persistent ambient that never actually
+        //      rises above the floor's own adapting estimate of itself
+        //      cannot satisfy that within the available ticks, because
+        //      the bounded step closes that (small) gap before
+        //      SPEECH_CONFIRM_TICKS is reached.
+        //
+        // Once speech ends (a non-candidate tick occurs), adaptation
+        // resumes immediately regardless of hasSpokenYet's history --
+        // this is what makes end-of-turn recognition fast: the floor
+        // that was learned/frozen DURING speech (typically already
+        // nudged toward whatever ambient was actually present just
+        // before onset) is usually already well above the true
+        // post-speech ambient level, so the very first post-speech tick
+        // is often already correctly classified as non-candidate, and
+        // the normal SILENCE_HOLD_MS countdown (unchanged) starts right
+        // away -- no separate multi-second recovery wait.
+        var DEFAULT_INITIAL_NOISE_FLOOR = 5; // conservative "assume quiet" starting point, used only until real ambient/silence has been observed
+        var SPEECH_MARGIN = 10;        // unchanged across every round -- the fix has always been the estimator/gating feeding this margin, never the margin itself
+        var MIN_SPEECH_THRESHOLD = 6;  // absolute floor, in case the estimated ambient level is implausibly low
+        var FLOOR_ADAPT_STEP = 7;      // bounded ABSOLUTE step per tick (not a percentage of the gap) -- see comment above for why this is what makes fast ambient recovery and sustained-speech protection compatible at the same time
+        var SPEECH_CONFIRM_TICKS = 2;  // ~200ms of sustained above-threshold level before trusting it as real speech, not a transient pop -- unchanged; the floor's own bounded-step adaptation (not a longer debounce) is what protects against false-positive ambient confirmation
+        var SILENCE_HOLD_MS = 1300;    // unchanged -- not what was broken
+        var MAX_DURATION_MS = 30000;   // unchanged -- safety fallback either way
 
         if (typeof sessionNoiseFloor !== 'number') sessionNoiseFloor = DEFAULT_INITIAL_NOISE_FLOOR;
         var hasSpokenYet = false;
@@ -903,6 +996,13 @@
         var consecutiveSpeechTicks = 0;
         var recordingStartedAt = Date.now();
         var lastLoggedSecond = -1;
+
+        function stepFloorToward(level) {
+            // Moves sessionNoiseFloor toward `level` by at most
+            // FLOOR_ADAPT_STEP, never overshooting it.
+            if (level > sessionNoiseFloor) sessionNoiseFloor = Math.min(sessionNoiseFloor + FLOOR_ADAPT_STEP, level);
+            else sessionNoiseFloor = Math.max(sessionNoiseFloor - FLOOR_ADAPT_STEP, level);
+        }
 
         vlog('watchForSilence started -- AudioContext state=' + audioCtx.state, 'sampleRate=' + audioCtx.sampleRate, 'startingNoiseFloor=' + sessionNoiseFloor.toFixed(1));
 
@@ -918,6 +1018,7 @@
             var sum = 0;
             for (var i = 0; i < data.length; i++) sum += data[i];
             var level = sum / data.length;
+            var rmsLevel = computeRms(); // TEST-only, logged below -- not used in any decision in this function
             var now = Date.now();
             var elapsed = now - recordingStartedAt;
 
@@ -927,16 +1028,19 @@
 
             if (isCandidateSpeech) {
                 consecutiveSpeechTicks++;
-                if (consecutiveSpeechTicks === 1) diagLog('speech candidate (level=' + level.toFixed(1) + ', threshold=' + speechThreshold.toFixed(1) + ')');
-                // Deliberately do NOT touch sessionNoiseFloor here, on
-                // ANY tick classified as candidate speech -- confirmed
-                // or not. This is what makes immediate speech at t=0
-                // safe: even a not-yet-confirmed candidate-speech
-                // sample never contaminates the floor.
+                if (consecutiveSpeechTicks === 1) diagLog('speech candidate (level=' + level.toFixed(1) + ', threshold=' + speechThreshold.toFixed(1) + ', rms=' + rmsLevel.toFixed(3) + ')');
+                if (!hasSpokenYet) {
+                    // Not yet confirmed -- keep adapting (bounded step,
+                    // see stepFloorToward above). This is the actual
+                    // fix: a candidate tick (confirmed or not) is still
+                    // allowed to nudge the floor as long as we haven't
+                    // committed to "this is speech" yet.
+                    stepFloorToward(level);
+                }
                 if (consecutiveSpeechTicks >= SPEECH_CONFIRM_TICKS) {
                     if (!hasSpokenYet) {
                         vlog('speech detected -- level=' + level.toFixed(1), 'noiseFloor=' + sessionNoiseFloor.toFixed(1), 'threshold=' + speechThreshold.toFixed(1));
-                        diagLog('speech confirmed (level=' + level.toFixed(1) + ')');
+                        diagLog('speech confirmed (level=' + level.toFixed(1) + ', rms=' + rmsLevel.toFixed(3) + ')');
                     }
                     if (wasSilenceInProgress) diagLog('silence reset');
                     hasSpokenYet = true;
@@ -944,16 +1048,21 @@
                 }
             } else {
                 consecutiveSpeechTicks = 0;
-                sessionNoiseFloor = sessionNoiseFloor + (level - sessionNoiseFloor) * (level < sessionNoiseFloor ? FLOOR_EMA_DOWN : FLOOR_EMA_UP);
+                // Always adapt on a non-candidate tick, whether or not
+                // speech was already confirmed earlier in this turn --
+                // this is what lets ambient be re-learned the instant
+                // speech ends (fast end-of-turn recognition) and during
+                // genuine mid-sentence pauses.
+                stepFloorToward(level);
                 if (hasSpokenYet) {
                     if (silenceStartedAt === null) {
                         silenceStartedAt = now;
                         vlog('silence started -- level=' + level.toFixed(1), 'noiseFloor=' + sessionNoiseFloor.toFixed(1));
-                        diagLog('silence started (level=' + level.toFixed(1) + ')');
+                        diagLog('silence started (level=' + level.toFixed(1) + ', rms=' + rmsLevel.toFixed(3) + ')');
                     }
                     var silenceDuration = now - silenceStartedAt;
                     updateVoiceDiag({
-                        level: level, noiseFloor: sessionNoiseFloor, speechThreshold: speechThreshold,
+                        level: level, rmsLevel: rmsLevel, noiseFloor: sessionNoiseFloor, speechThreshold: speechThreshold,
                         speechTicks: consecutiveSpeechTicks, hasSpokenYet: hasSpokenYet, silenceDurationMs: silenceDuration,
                         mediaRecorderState: mediaRecorder.state
                     });
@@ -968,7 +1077,7 @@
             }
 
             updateVoiceDiag({
-                level: level, noiseFloor: sessionNoiseFloor, speechThreshold: speechThreshold,
+                level: level, rmsLevel: rmsLevel, noiseFloor: sessionNoiseFloor, speechThreshold: speechThreshold,
                 speechTicks: consecutiveSpeechTicks, hasSpokenYet: hasSpokenYet,
                 silenceDurationMs: silenceStartedAt ? (now - silenceStartedAt) : null,
                 mediaRecorderState: mediaRecorder.state
@@ -977,10 +1086,13 @@
             // Once-per-second periodic level log so the actual
             // real-device curve is visible even during normal
             // (non-transition) polling, per the diagnostic request.
+            // Includes rmsLevel (TEST-only, unused in any decision)
+            // alongside the existing frequency-average level so a real
+            // session captures both signals side by side.
             var currentSecond = Math.floor(elapsed / 1000);
             if (currentSecond !== lastLoggedSecond) {
                 lastLoggedSecond = currentSecond;
-                vlog('voice level=' + level.toFixed(1), 'noiseFloor=' + sessionNoiseFloor.toFixed(1), 'threshold=' + speechThreshold.toFixed(1),
+                vlog('voice level=' + level.toFixed(1), 'rms=' + rmsLevel.toFixed(3), 'noiseFloor=' + sessionNoiseFloor.toFixed(1), 'threshold=' + speechThreshold.toFixed(1),
                      'speechDetected=' + hasSpokenYet, 'silenceDurationMs=' + (silenceStartedAt ? (now - silenceStartedAt) : 0),
                      'MediaRecorder.state=' + mediaRecorder.state);
             }
