@@ -163,7 +163,7 @@
     //
     // Server-gated: the panel markup only exists in the DOM at all
     // when atlas_voice_diagnostics_enabled is true (see app.py's inject_permissions() and
-    // the {% if atlas_voice_diagnostics_enabled %} block above) -- not merely CSS-hidden.
+    // the "if atlas_voice_diagnostics_enabled" markup block above) -- not merely CSS-hidden.
     // voiceDiagEnabled below is a second, redundant client-side check
     // for the same condition, so this entire module is a no-op
     // (including the diagLog()/updateVoiceDiag() call sites sprinkled
@@ -176,7 +176,7 @@
     // fixed event labels.
     //
     // To remove entirely before LIVE: delete this block, the matching
-    // {% if atlas_voice_diagnostics_enabled %} markup block above, the diagLog()/
+    // "if atlas_voice_diagnostics_enabled" markup block above, the diagLog()/
     // updateVoiceDiag() call sites (search "VOICE DIAGNOSTICS" in this
     // file), and the atlas_voice_diagnostics_enabled context-processor entry in app.py.
     // ============================================================
