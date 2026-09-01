@@ -19,8 +19,11 @@ to be added in a follow-up pass.
 import os
 import sqlite3
 import uuid
+import hashlib
 import json
 import secrets
+import threading
+import time
 import base64
 import io
 import requests
@@ -82,6 +85,30 @@ csrf = CSRFProtect(app)
 # only ever holds the lookup token. In-memory, so it resets on redeploy;
 # that's fine for a conversational scratchpad.
 ATLAS_SESSIONS = {}
+
+# Guards the "claim" step of a pending concrete-request write confirmation
+# (see assistant_confirm_write) -- ATLAS_SESSIONS is a plain in-memory
+# dict with no other concurrency protection, so without this, two
+# simultaneous or retried requests carrying the same valid token could
+# both read pending_write as still-present before either one clears it,
+# and both go on to call execute_tool -- a real double-write. The lock
+# only needs to protect the short check-token-and-clear step; the
+# potentially slow execute_tool() call itself deliberately runs outside
+# it (see assistant_confirm_write's docstring for the full reasoning).
+# A single process-wide lock is appropriate here, not a per-token lock:
+# ATLAS_SESSIONS is already documented as in-memory/single-process only
+# (won't survive a restart, not safe for multi-process deployment) --
+# this lock matches that same architectural scope, not a new constraint.
+ATLAS_WRITE_CONFIRM_LOCK = threading.Lock()
+
+# How long a pending_write token remains valid after being issued. Keeps
+# an abandoned write authorization (client never called confirm_write --
+# barge-in, tab closed, network dropped) from sitting valid in
+# ATLAS_SESSIONS indefinitely. Long enough for the client to finish
+# receiving the tail of one SSE response and immediately call
+# confirm_write; short enough that a genuinely abandoned token doesn't
+# linger as a live authorization.
+PENDING_WRITE_TTL_SECONDS = 120
 
 
 HOUSTON_TZ = ZoneInfo("America/Chicago")
@@ -3228,24 +3255,22 @@ def _parse_assistant_reply(raw_text):
 ATLAS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")  # No hardcoded fallback -- unset means "use the free browser voice," not "use some baked-in voice."
 
 
-def generate_atlas_speech(text):
-    """Generate speech audio for the assistant's reply via ElevenLabs,
-    using the "Atlas" voice. Returns (base64_audio_or_None, error_or_None).
-    Callers fall back to the browser's free built-in voice when audio is
-    None, but the error string is still surfaced to the page so failures
-    are visible instead of silently swallowed.
-
-    If no ELEVENLABS_VOICE_ID is configured, this skips calling ElevenLabs
-    entirely (not just falls back after a failed call) -- so leaving the
-    voice ID unset costs zero ElevenLabs credits for the talking side,
-    not just zero dollars.
+def _elevenlabs_tts_call(text):
+    """The actual HTTP call to ElevenLabs' (non-streaming) text-to-speech
+    endpoint for one piece of text -- a full reply, or one sentence when
+    called from _synthesize_sentence_chunks below. Returns
+    (base64_audio_or_None, error_or_None). Split out from
+    generate_atlas_speech so both the old single-shot path and the new
+    sentence-buffered streaming path share exactly one place that knows
+    how to talk to ElevenLabs -- no duplicated request-building logic to
+    drift out of sync.
     """
     if not ATLAS_VOICE_ID:
         return None, None
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     if not api_key:
         return None, "ELEVENLABS_VOICE_ID is set but ELEVENLABS_API_KEY is not."
-    if not text:
+    if not text or not text.strip():
         return None, None
     import urllib.request
     import urllib.error
@@ -3270,6 +3295,60 @@ def generate_atlas_speech(text):
         return None, f"ElevenLabs error {e.code}: {detail}"
     except (urllib.error.URLError, TimeoutError) as e:
         return None, f"ElevenLabs connection error: {str(e)}"
+
+
+def generate_atlas_speech(text):
+    """Generate speech audio for a complete piece of text in one call.
+    Kept as the single-shot entry point for backward compatibility (used
+    by the final-leftover-text case in stream_atlas_turn) -- the new
+    sentence-by-sentence streaming path is _synthesize_sentence_chunks
+    below, which calls the same underlying _elevenlabs_tts_call per
+    sentence instead of once for the whole reply.
+    """
+    return _elevenlabs_tts_call(text)
+
+
+_SENTENCE_BOUNDARY_RE = None  # compiled lazily, see _split_ready_sentences
+
+
+def _split_ready_sentences(buffered_text):
+    """Splits buffered_text into (ready_sentences, remainder) at real
+    sentence boundaries (., !, ?, or a newline, followed by whitespace or
+    end of string) -- NOT at arbitrary token/character counts. This is
+    the "sensible sentence/phrase buffering" the spec asks for instead of
+    either (a) one giant TTS call for the whole reply (current/old
+    behavior -- all the latency lands up front) or (b) a TTS call per
+    token/every-few-characters (naturalness suffers, and ElevenLabs
+    credit usage would balloon -- short fragments still cost close to a
+    full request's overhead). A sentence is a natural, cheap-enough, and
+    prosody-safe unit to synthesize independently.
+
+    Deliberately conservative: a boundary is only "ready" if there's
+    already something after it in the buffer (or it's clearly terminal
+    punctuation followed by whitespace) -- so we don't cut mid-sentence
+    on a period that's actually a decimal point or abbreviation followed
+    by more of the same sentence still streaming in. The very last
+    (possibly incomplete) fragment is always returned as `remainder` and
+    is only flushed by the caller once the stream is known to be done.
+    """
+    global _SENTENCE_BOUNDARY_RE
+    if _SENTENCE_BOUNDARY_RE is None:
+        import re
+        _SENTENCE_BOUNDARY_RE = re.compile(r'([.!?]+["\')]?|\n)(\s+)')
+
+    ready = []
+    last_end = 0
+    for m in _SENTENCE_BOUNDARY_RE.finditer(buffered_text):
+        # Only treat this as a real boundary if there's more text after
+        # it already buffered -- otherwise we can't yet tell whether
+        # it's a genuine sentence end or Claude just hasn't continued
+        # the sentence past the period yet.
+        if m.end() < len(buffered_text):
+            ready.append(buffered_text[last_end:m.end()].strip())
+            last_end = m.end()
+    remainder = buffered_text[last_end:]
+    ready = [s for s in ready if s]
+    return ready, remainder
 
 
 def _build_atlas_system_prompt(snapshot, fields):
@@ -3501,21 +3580,72 @@ def stream_atlas_turn(user_text, draft):
     'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
     for actually returning a streaming Response built from this generator.
 
-    Unlike the old implementation, prior turns travel as a real messages
-    array (draft["history"] is now a list of {"role","content"} dicts fed
-    straight to the API), not flattened into a text blob in the system
-    prompt -- this is what gives it real multi-turn memory instead of a
-    blurry paraphrase of the conversation so far.
+    Prior turns travel as a real messages array (draft["history"] is a
+    list of {"role","content"} dicts fed straight to the API), not
+    flattened into a text blob in the system prompt -- this is what gives
+    it real multi-turn memory instead of a blurry paraphrase of the
+    conversation so far.
 
     The trailing <state>...</state> block the model emits is never shown
     to the person -- it's buffered out of the visible stream and parsed
     once the response finishes.
+
+    VOICE UPGRADE (progressive sentence-buffered TTS): as visible text
+    arrives, completed sentences are dispatched to ElevenLabs on a
+    background thread and sent to the client as `audio_chunk` events
+    *while the rest of Claude's reply is still streaming in* -- audio
+    for the first sentence can start playing well before the model has
+    finished the whole response. This is progressive/sentence-buffered,
+    NOT true low-level ElevenLabs streaming TTS (which would relay
+    ElevenLabs' own chunked response incrementally) -- see the release
+    review's TTS analysis for exact request-count/latency implications.
+    Deliberately does NOT call ElevenLabs per token/every-few-characters
+    (unnatural prosody, and would multiply API request count); see
+    _split_ready_sentences for the real sentence-boundary logic. If
+    ATLAS_VOICE_ID isn't configured, _elevenlabs_tts_call short-circuits
+    to (None, None) per sentence at effectively zero cost. Each ready
+    sentence's synthesis call is submitted to a small per-turn
+    ThreadPoolExecutor immediately (non-blocking) so that Claude-stream
+    consumption is NOT paused for the duration of each ElevenLabs HTTP
+    call the way a fully inline/synchronous call would pause it --
+    audio_chunk events are still emitted in strict sentence order
+    (never a later sentence's audio ahead of an earlier one still in
+    flight), just not necessarily blocking the read loop while waiting.
+
+    WRITE-CONFIRMATION SECURITY -- IMPORTANT, READ BEFORE CHANGING:
+    BuildIQ's own code requires the SAME complete field set to be
+    proposed via action="submit" on TWO CONSECUTIVE model turns (via a
+    fields-hash held in the per-session draft) before a write is even
+    eligible to run. This hardens the boundary against a single stray
+    model output triggering a write -- but the model is still the one
+    interpreting whether the user's utterance means "yes, submit," and
+    this mechanism does not give BuildIQ independent, out-of-band proof
+    that the user explicitly confirmed. It only proves the model
+    proposed the same complete action twice in a row.
+
+    Separately, and just as important: this generator's Python code
+    executes synchronously start-to-finish regardless of whether the
+    client is still connected. Flask/WSGI only notice a client
+    disconnect at the next attempted write to the socket -- a frontend
+    AbortController.abort() does NOT stop this function from continuing
+    to run past that point, including past an execute_tool() call, if
+    one were made inline here. That is exactly why the actual write is
+    NOT performed in this function even after the two-turn confirmation
+    passes: see the `pending_write` handling below, which defers the
+    real execute_tool() call to a separate /assistant/confirm_write
+    request that the client only ever sends after it has verifiably
+    finished receiving this entire SSE response. If the client aborts,
+    the tab closes, or a barge-in interrupts before that happens, that
+    follow-up request is simply never sent and the write never occurs
+    -- deterministic by construction, not by hoping a disconnect gets
+    detected mid-generator.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         msg = "This assistant isn't set up yet -- ask Ayoub to add an Anthropic API key."
         yield f"data: {json.dumps({'type': 'delta', 'text': msg})}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+        yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': msg, 'audio': None, 'audio_error': None})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
         return
 
     snapshot = gather_business_snapshot()
@@ -3528,6 +3658,47 @@ def stream_atlas_turn(user_text, draft):
     raw_text = ""
     visible_sent = ""
     STATE_TAG = "<state>"
+
+    # Sentence-buffered TTS state for this turn. Each ready sentence's
+    # ElevenLabs call is dispatched to this small per-turn executor as
+    # soon as the sentence is ready, so Claude-stream consumption below
+    # isn't paused for the duration of each HTTP call the way a fully
+    # inline synchronous call would pause it. Shut down (without waiting
+    # on stragglers -- they're joined explicitly at final flush instead)
+    # at the very end of the turn.
+    import concurrent.futures
+    tts_buffer = ""
+    chunk_seq = 0
+    pending_futures = []  # ordered list of (seq, text, future) -- strict sentence order preserved on drain
+    tts_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+    def _submit_ready_sentences():
+        """Splits whatever's newly available in tts_buffer and dispatches
+        each ready sentence to the executor immediately (non-blocking) --
+        does not yield anything itself."""
+        nonlocal tts_buffer, chunk_seq
+        ready, remainder = _split_ready_sentences(tts_buffer)
+        tts_buffer = remainder
+        for sentence in ready:
+            future = tts_executor.submit(_elevenlabs_tts_call, sentence)
+            pending_futures.append((chunk_seq, sentence, future))
+            chunk_seq += 1
+
+    def _drain_completed_chunks(block=False):
+        """Yields audio_chunk SSE lines for whatever's ready at the FRONT
+        of pending_futures, in strict order -- never pops a later
+        sentence's future ahead of an earlier one still in flight, so
+        playback order on the client is always correct even though
+        synthesis itself may finish out of order in the background.
+        block=True (used only at final flush) waits for every remaining
+        future to complete rather than skipping ones still in flight."""
+        while pending_futures:
+            seq, sentence, future = pending_futures[0]
+            if not block and not future.done():
+                break
+            audio_b64, audio_err = future.result()
+            pending_futures.pop(0)
+            yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': seq, 'final': False, 'text': sentence, 'audio': audio_b64, 'audio_error': audio_err})}\n\n"
 
     try:
         resp = requests.post(
@@ -3580,9 +3751,30 @@ def stream_atlas_turn(user_text, draft):
                 if new_chunk:
                     yield f"data: {json.dumps({'type': 'delta', 'text': new_chunk})}\n\n"
                     visible_sent = raw_text[:safe_upto]
+                    tts_buffer += new_chunk
+                    _submit_ready_sentences()
+                    yield from _drain_completed_chunks(block=False)
     except requests.exceptions.RequestException as e:
-        yield f"data: {json.dumps({'type': 'delta', 'text': f'I hit an error talking to Claude: {str(e)}.'})}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+        # requests' default str(e) for an HTTPError is just the generic
+        # status line ("400 Client Error: Bad Request for url: ...") --
+        # it throws away the actual JSON error body Anthropic sends back,
+        # which is where the real, actionable reason lives (e.g. "model:
+        # not_found_error", an account/key access issue, or a malformed
+        # request). Surface that body when we have it instead of just
+        # the generic status line, so a 400 is actually diagnosable from
+        # the chat transcript rather than needing server log access.
+        detail = str(e)
+        resp_obj = getattr(e, "response", None)
+        if resp_obj is not None:
+            try:
+                detail = resp_obj.text[:500]
+            except Exception:
+                pass
+        err_msg = f"I hit an error talking to Claude: {detail}"
+        yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
+        yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+        tts_executor.shutdown(wait=False, cancel_futures=True)
         return
 
     spoken, state = _parse_assistant_reply(raw_text)
@@ -3591,6 +3783,7 @@ def stream_atlas_turn(user_text, draft):
         # it, or it arrived in one big chunk) -- send the whole spoken
         # reply now rather than showing nothing.
         yield f"data: {json.dumps({'type': 'delta', 'text': spoken})}\n\n"
+        tts_buffer += spoken
 
     mode = state.get("mode", "chat")
     fields = state.get("fields", {}) if mode == "concrete_request" else {}
@@ -3600,9 +3793,10 @@ def stream_atlas_turn(user_text, draft):
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": spoken},
     ]
-    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:]}
+    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:], "pending_submit": None}
 
     submitted_id = None
+    pending_write_token = None
     if action == "submit":
         needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
         needs_lab = fields.get("lab_required") == "Yes"
@@ -3615,26 +3809,56 @@ def stream_atlas_turn(user_text, draft):
         ]
         missing = [f for f in required_now if not str(fields.get(f, "")).strip()]
         if not missing:
-            fields["requested_date"] = date.today().isoformat()
-            result = execute_tool("create_concrete_request", fields, current_user, confirmed=True)
-            if result.success:
-                submitted_id = result.data.get("submitted_id")
-                new_draft = {"mode": "chat", "fields": {}, "history": []}
+            fields_hash = hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
+            prior_pending = draft.get("pending_submit")
+            if prior_pending and prior_pending.get("fields_hash") == fields_hash:
+                # Same complete field set proposed on two consecutive
+                # model turns -- eligible to write. The actual write is
+                # deliberately NOT performed here (see the big docstring
+                # at the top of this function for exactly why): it's
+                # deferred to a separate /assistant/confirm_write request
+                # the client only sends after fully receiving this SSE
+                # response. draft["pending_write"] is what that route
+                # looks up.
+                fields["requested_date"] = date.today().isoformat()
+                pending_write_token = secrets.token_hex(16)
+                new_draft["pending_write"] = {"token": pending_write_token, "fields": dict(fields), "issued_at": time.time()}
             else:
-                extra = f" Actually, I couldn't submit that -- {result.error}."
+                # First time this exact, complete field set has been
+                # proposed for submission -- hold it. Do not write
+                # anything yet. A second matching confirmation on the
+                # very next turn is required.
+                extra = " Just to be safe, say that one more time (like 'yes, submit it') and I'll send it."
                 yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
                 spoken += extra
+                tts_buffer += extra
+                new_draft["pending_submit"] = {"fields_hash": fields_hash}
         else:
             extra = " Actually, I'm still missing something required -- let's finish that first."
             yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
             spoken += extra
+            tts_buffer += extra
+            new_draft["pending_submit"] = None
 
-    audio_b64, audio_error = generate_atlas_speech(spoken)
+    _submit_ready_sentences()
+    if tts_buffer.strip():
+        # Whatever's left over (even a fragment with no terminal
+        # punctuation) is the tail of the reply -- there's no more text
+        # coming to complete it, so submit it for synthesis as-is.
+        future = tts_executor.submit(_elevenlabs_tts_call, tts_buffer.strip())
+        pending_futures.append((chunk_seq, tts_buffer.strip(), future))
+        chunk_seq += 1
+        tts_buffer = ""
+    yield from _drain_completed_chunks(block=True)
+    tts_executor.shutdown(wait=False)
 
     draft.clear()
     draft.update(new_draft)
 
-    yield f"data: {json.dumps({'type': 'done', 'mode': new_draft.get('mode'), 'submitted_id': submitted_id, 'audio': audio_b64, 'audio_error': audio_error})}\n\n"
+    # `audio`/`audio_error` on `done` are kept (always null on this path)
+    # purely for older-client backward compatibility -- all real audio
+    # for this turn was already delivered via audio_chunk events above.
+    yield f"data: {json.dumps({'type': 'done', 'mode': new_draft.get('mode'), 'submitted_id': submitted_id, 'audio': None, 'audio_error': None, 'pending_write_token': pending_write_token})}\n\n"
 
 
 @app.route("/assistant")
@@ -3758,17 +3982,19 @@ def assistant_ask():
     if not token:
         token = secrets.token_hex(16)
         session["atlas_token"] = token
-    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": []})
+    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None})
 
     def generate():
         yield f"data: {json.dumps({'type': 'question', 'text': question, 'transcribe_error': transcribe_error})}\n\n"
         if transcribe_error:
-            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return
         if not question:
             no_question_msg = "I didn't catch a question."
             yield f"data: {json.dumps({'type': 'delta', 'text': no_question_msg})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None})}\n\n"
+            audio_b64, audio_err = _elevenlabs_tts_call(no_question_msg)
+            yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': no_question_msg, 'audio': audio_b64, 'audio_error': audio_err})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return
         for chunk in stream_atlas_turn(question, draft):
             yield chunk
@@ -3783,6 +4009,86 @@ def assistant_reset():
     if token:
         ATLAS_SESSIONS.pop(token, None)
     return {"ok": True}
+
+
+@app.route("/assistant/confirm_write", methods=["POST"])
+@login_required
+def assistant_confirm_write():
+    """The ONLY place create_concrete_request's execute_tool call
+    actually happens for the voice/Atlas path. Deliberately separate
+    from stream_atlas_turn's SSE response -- see that function's
+    docstring for the full reasoning. In short: stream_atlas_turn's
+    Python code runs to completion synchronously regardless of whether
+    the client is still connected, so performing the write inline there
+    would mean a client-side abort (barge-in, tab close, network drop)
+    could NOT reliably prevent an already-in-flight write. By requiring
+    this separate request -- which the client only ever sends after it
+    has verifiably finished receiving the whole prior SSE response --
+    the write is deterministically contingent on that later request
+    actually arriving. No request here, no write. Ever.
+
+    ATOMIC CLAIM (fixes a real concurrent-request race found in release
+    review): checking that a token is still pending and then clearing it
+    were originally two separate steps, with no protection between them
+    -- two simultaneous or retried requests carrying the same valid
+    token could both pass the check before either cleared it, and both
+    go on to call execute_tool, double-writing the concrete request.
+    Fixed by making "verify the token is still pending, check it hasn't
+    expired, and clear it" one atomic operation under
+    ATLAS_WRITE_CONFIRM_LOCK -- whichever request acquires the lock
+    first is the only one that can ever see pending_write still present
+    for that token; every other concurrent or replayed request
+    (including one that arrives after this one already cleared it) sees
+    it gone and is rejected. The lock is released before execute_tool()
+    runs, so a slow write doesn't hold up unrelated confirm_write calls
+    for other sessions/tokens.
+
+    IF execute_tool FAILS AFTER THE TOKEN WAS CLAIMED: the token is NOT
+    restored or re-armed. Once claimed, it's spent -- whether or not the
+    underlying write actually succeeded. A failed submission requires a
+    fresh two-turn confirmation from Atlas (a new token), not a retry of
+    the same one. This is deliberate: reopening the same token for retry
+    would reintroduce exactly the double-execution window this fix
+    closes, for the sake of a failure path that's already surfaced to
+    the user as an explicit error they can just ask Atlas to try again.
+    """
+    if not is_atlas_allowed():
+        return {"success": False, "error": "not authorized"}, 403
+
+    token = session.get("atlas_token")
+    submitted_token = (request.get_json(silent=True) or {}).get("token", "")
+    if not token or not submitted_token:
+        return {"success": False, "error": "no matching pending confirmation"}, 400
+
+    with ATLAS_WRITE_CONFIRM_LOCK:
+        draft = ATLAS_SESSIONS.get(token)
+        pending = (draft or {}).get("pending_write")
+        if not pending or pending.get("token") != submitted_token:
+            # Either nothing pending, already claimed by a concurrent/
+            # earlier request, or the token just doesn't match -- do
+            # not write anything.
+            return {"success": False, "error": "no matching pending confirmation"}, 400
+
+        issued_at = pending.get("issued_at")
+        if issued_at is None or (time.time() - issued_at) > PENDING_WRITE_TTL_SECONDS:
+            draft["pending_write"] = None  # clear the stale token too, not just reject this call
+            return {"success": False, "error": "that confirmation has expired -- please ask again"}, 400
+
+        # Claimed. Cleared HERE, still inside the lock, before
+        # execute_tool ever runs -- this is what actually makes it
+        # atomic. Any other request for this same token, concurrent or
+        # not, will now find pending_write already gone.
+        fields = dict(pending.get("fields", {}))
+        draft["pending_write"] = None
+        draft["pending_submit"] = None
+
+    result = execute_tool("create_concrete_request", fields, current_user, confirmed=True)
+    if result.success:
+        draft["mode"] = "chat"
+        draft["fields"] = {}
+        draft["history"] = []
+        return {"success": True, "submitted_id": result.data.get("submitted_id"), "error": None}
+    return {"success": False, "submitted_id": None, "error": result.error}
 
 
 

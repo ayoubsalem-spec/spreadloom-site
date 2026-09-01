@@ -35,6 +35,17 @@
     .atlas-status { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); margin-top: 8px; min-height: 14px; }
     .atlas-reset-link { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); cursor: pointer; }
     .atlas-reset-link:hover { color: var(--text-dim); }
+
+    /* Voice session controls (new) */
+    .atlas-voice-bar { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px 0 14px; flex-shrink: 0; }
+    .atlas-voice-btn { font-family: 'IBM Plex Mono', monospace; font-size: 12px; font-weight: 700; letter-spacing: 0.4px; padding: 10px 20px; border-radius: 24px; cursor: pointer; border: 1.5px solid var(--brass); background: transparent; color: var(--brass); display: flex; align-items: center; gap: 8px; }
+    .atlas-voice-btn.active { background: linear-gradient(135deg, rgba(201,162,75,0.18), rgba(201,162,75,0.08)); box-shadow: 0 0 0 4px rgba(201,162,75,0.12); }
+    .atlas-voice-btn.end { border-color: var(--red); color: #FCA5A5; }
+    .atlas-voice-state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); flex-shrink: 0; }
+    .atlas-voice-state-dot.listening { background: var(--teal); animation: atlas-pulse 1.4s infinite; }
+    .atlas-voice-state-dot.processing { background: var(--brass); animation: atlas-typing 1s infinite; }
+    .atlas-voice-state-dot.speaking { background: #5AC8E0; animation: atlas-pulse 1.1s infinite; }
+    .atlas-voice-label { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; }
 </style>
 
 <div class="atlas-shell">
@@ -42,9 +53,18 @@
         <div>
             <span class="rc-eyebrow">BuildIQ Assistant</span>
             <h1><span class="atlas-live-dot"></span>Atlas</h1>
-            <p class="sub" style="margin-top:2px;">Ask about the business, or submit a concrete request &mdash; type or talk.</p>
+            <p class="sub" style="margin-top:2px;">Ask about the business, or submit a concrete request &mdash; type, tap the mic, or start a hands-free voice session.</p>
         </div>
         <span id="reset-btn" class="atlas-reset-link" style="display:none;">Start Over</span>
+    </div>
+
+    <div class="atlas-voice-bar">
+        <button id="voice-start-btn" class="atlas-voice-btn">&#127908; Start Voice</button>
+        <button id="voice-end-btn" class="atlas-voice-btn end" style="display:none;">&#9632; End Voice</button>
+        <span id="voice-state-indicator" style="display:none; align-items:center; gap:6px;">
+            <span id="voice-state-dot" class="atlas-voice-state-dot"></span>
+            <span id="voice-state-label" class="atlas-voice-label">Idle</span>
+        </span>
     </div>
 
     <div id="atlas-messages" class="atlas-messages">
@@ -60,7 +80,7 @@
     <div class="atlas-inputbar">
         <div class="atlas-inputrow">
             <textarea id="text-input" class="atlas-textinput" rows="1" placeholder="Message Atlas..."></textarea>
-            <button id="mic-btn" class="atlas-mic-btn" title="Talk">&#127908;</button>
+            <button id="mic-btn" class="atlas-mic-btn" title="Talk (single turn)">&#127908;</button>
             <button id="send-btn" class="atlas-send-btn" title="Send">&#8593;</button>
         </div>
         <p id="status-line" class="atlas-status"></p>
@@ -69,6 +89,9 @@
 
 <script>
 (function () {
+    // ============================================================
+    // DOM refs
+    // ============================================================
     var messagesEl = document.getElementById('atlas-messages');
     var emptyEl = document.getElementById('atlas-empty');
     var textInput = document.getElementById('text-input');
@@ -76,6 +99,11 @@
     var micBtn = document.getElementById('mic-btn');
     var statusLine = document.getElementById('status-line');
     var resetBtn = document.getElementById('reset-btn');
+    var voiceStartBtn = document.getElementById('voice-start-btn');
+    var voiceEndBtn = document.getElementById('voice-end-btn');
+    var voiceStateIndicator = document.getElementById('voice-state-indicator');
+    var voiceStateDot = document.getElementById('voice-state-dot');
+    var voiceStateLabel = document.getElementById('voice-state-label');
     var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
     function setStatus(text) { statusLine.textContent = text; }
@@ -113,58 +141,158 @@
         if (el) el.remove();
     }
 
-    function unlockSpeechIfNeeded() {
-        if (!window.speechSynthesis) return;
-        var warm = new SpeechSynthesisUtterance('.');
-        warm.volume = 0;
-        window.speechSynthesis.speak(warm);
+    // ============================================================
+    // VOICE SESSION STATE MACHINE
+    // States: IDLE, LISTENING, PROCESSING, SPEAKING, INTERRUPTING, ERROR
+    // A single source of truth (`vState`) instead of scattered booleans
+    // that can drift out of sync -- every transition goes through
+    // setVoiceState(), which also drives the visible indicator and
+    // decides what's allowed to happen next.
+    // ============================================================
+    var VSTATE = { IDLE: 'IDLE', LISTENING: 'LISTENING', PROCESSING: 'PROCESSING', SPEAKING: 'SPEAKING', INTERRUPTING: 'INTERRUPTING', ERROR: 'ERROR' };
+    var vState = VSTATE.IDLE;
+    var voiceSessionActive = false;   // true only between Start Voice and End Voice
+    var turnInFlight = false;         // guards against duplicate/overlapping requests
+    var currentAbortController = null;
+
+    // Per-network-turn ownership token. Each call to streamFromServer()
+    // captures its OWN copy (myNetworkTurn) at the moment it starts. Every
+    // callback that mutates shared state (turnInFlight, voice state,
+    // currentAbortController, error display, auto-resume scheduling) must
+    // check `myNetworkTurn === networkTurnCounter` first -- if a NEWER
+    // turn has since started (networkTurnCounter incremented), that
+    // callback belongs to a stale, already-superseded turn and must do
+    // nothing. This is what actually prevents a late-arriving abort/
+    // catch/done from Turn A corrupting Turn B's in-progress state --
+    // an AbortController.abort() alone only stops the fetch, it doesn't
+    // stop already-scheduled .then()/.catch() callbacks from running.
+    var networkTurnCounter = 0;
+
+    function setVoiceState(next) {
+        vState = next;
+        if (!voiceSessionActive) { voiceStateIndicator.style.display = 'none'; return; }
+        voiceStateIndicator.style.display = 'inline-flex';
+        voiceStateDot.className = 'atlas-voice-state-dot';
+        var label = 'Idle';
+        if (next === VSTATE.LISTENING) { voiceStateDot.className += ' listening'; label = 'Listening'; }
+        else if (next === VSTATE.PROCESSING) { voiceStateDot.className += ' processing'; label = 'Thinking'; }
+        else if (next === VSTATE.SPEAKING) { voiceStateDot.className += ' speaking'; label = 'Speaking'; }
+        else if (next === VSTATE.INTERRUPTING) { voiceStateDot.className += ' listening'; label = 'Listening (interrupt)'; }
+        else if (next === VSTATE.ERROR) { label = 'Error'; }
+        voiceStateLabel.textContent = label;
     }
 
-    function speak(text, audioB64) {
-        if (audioB64) {
-            var audio = new Audio('data:audio/mpeg;base64,' + audioB64);
-            var playPromise = audio.play();
-            if (playPromise && playPromise.catch) {
-                playPromise.catch(function () {
-                    armAutoReplayOnNextTap(function () { audio.play().catch(function () {}); });
-                });
+    // ============================================================
+    // PERSISTENT AUDIO FOUNDATION
+    // One <audio> element for the whole voice session, created once and
+    // reused for every chunk of every turn -- NOT a fresh `new Audio()`
+    // per response (that was the old bug: a brand-new media element may
+    // not inherit the "unlocked" user-activation state from an earlier
+    // gesture on iOS, which is what caused "needs another tap" on
+    // essentially every reply). Unlocked exactly once, inside the
+    // genuine Start Voice tap.
+    // ============================================================
+    var SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+    var atlasAudioEl = new Audio();
+    atlasAudioEl.preload = 'auto';
+    var audioUnlocked = false;
+
+    function unlockAudioElement() {
+        // Must be called synchronously inside a real user-gesture handler.
+        if (!window.speechSynthesis) { /* no browser TTS fallback available; still try to unlock <audio> */ }
+        else {
+            var warm = new SpeechSynthesisUtterance('.');
+            warm.volume = 0;
+            window.speechSynthesis.speak(warm);
+        }
+        atlasAudioEl.src = SILENT_WAV;
+        var p = atlasAudioEl.play();
+        if (p && p.catch) {
+            p.then(function () { atlasAudioEl.pause(); audioUnlocked = true; })
+             .catch(function () { audioUnlocked = false; });
+        } else {
+            audioUnlocked = true;
+        }
+    }
+
+    // Sequential playback queue: a turn can deliver several audio_chunk
+    // events (one per sentence) while Claude/ElevenLabs are still
+    // producing the rest of the reply. They're queued here and played
+    // one at a time on the single persistent element, in order, via the
+    // `ended` event -- never overlapping, never racing.
+    var audioQueue = [];
+    var playbackActive = false;
+    var speakingTurnToken = 0; // bumped on interrupt/new turn to invalidate stale queued audio
+
+    function enqueueAudioChunk(base64OrNull, textFallback, myTurnToken) {
+        audioQueue.push({ audio: base64OrNull, text: textFallback, token: myTurnToken });
+        if (!playbackActive) playNextChunk();
+    }
+
+    function playNextChunk() {
+        if (audioQueue.length === 0) {
+            playbackActive = false;
+            if (voiceSessionActive && vState === VSTATE.SPEAKING) {
+                // This turn's speech is fully done -- resume listening.
+                onAtlasFinishedSpeaking();
             }
             return;
         }
-        if (!window.speechSynthesis) return;
-        window.speechSynthesis.cancel();
+        var chunk = audioQueue.shift();
+        if (chunk.token !== speakingTurnToken) { playNextChunk(); return; } // stale (interrupted) turn, drop it
+        playbackActive = true;
+        setVoiceState(VSTATE.SPEAKING);
+
+        if (chunk.audio) {
+            atlasAudioEl.src = 'data:audio/mpeg;base64,' + chunk.audio;
+            var playPromise = atlasAudioEl.play();
+            if (playPromise && playPromise.catch) {
+                playPromise.catch(function () {
+                    // Real autoplay rejection (should be rare after a
+                    // proper unlock) -- fall back to free browser voice
+                    // for just this fragment instead of silently
+                    // stalling the whole queue.
+                    speakViaBrowserTTS(chunk.text, function () { playNextChunk(); });
+                });
+            }
+        } else if (chunk.text && window.speechSynthesis) {
+            speakViaBrowserTTS(chunk.text, function () { playNextChunk(); });
+        } else {
+            playNextChunk();
+        }
+    }
+
+    atlasAudioEl.addEventListener('ended', function () { playNextChunk(); });
+    atlasAudioEl.addEventListener('error', function () { playNextChunk(); });
+
+    function speakViaBrowserTTS(text, onDone) {
+        if (!window.speechSynthesis || !text) { onDone(); return; }
         var utter = new SpeechSynthesisUtterance(text);
         utter.rate = 1.0;
-        utter.onerror = function () {
-            armAutoReplayOnNextTap(function () {
-                window.speechSynthesis.cancel();
-                window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
-            });
-        };
+        utter.onend = onDone;
+        utter.onerror = onDone;
         window.speechSynthesis.speak(utter);
     }
 
-    var autoReplayArmed = false;
-    function armAutoReplayOnNextTap(playFn) {
-        if (autoReplayArmed) return;
-        autoReplayArmed = true;
-        function onNextTap() {
-            document.removeEventListener('touchend', onNextTap, true);
-            document.removeEventListener('click', onNextTap, true);
-            autoReplayArmed = false;
-            playFn();
-        }
-        document.addEventListener('touchend', onNextTap, true);
-        document.addEventListener('click', onNextTap, true);
+    function stopAllAudioImmediately() {
+        speakingTurnToken++; // invalidates anything still queued/in-flight
+        audioQueue = [];
+        playbackActive = false;
+        try { atlasAudioEl.pause(); } catch (e) {}
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
     }
 
+    // ============================================================
+    // NETWORK / SSE
+    // ============================================================
     function askServer(question) {
         addMessage('user', question);
-        streamFromServer(function (formOrNull) {
+        streamFromServer(function (mySignal) {
             return fetch('{{ url_for("assistant_ask") }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-                body: JSON.stringify({ question: question })
+                body: JSON.stringify({ question: question }),
+                signal: mySignal
             });
         }, true);
     }
@@ -172,31 +300,81 @@
     function askServerWithAudio(blob) {
         var formData = new FormData();
         formData.append('audio', blob, 'atlas.webm');
-        streamFromServer(function () {
+        streamFromServer(function (mySignal) {
             return fetch('{{ url_for("assistant_ask") }}', {
                 method: 'POST',
                 headers: { 'X-CSRFToken': csrfToken },
-                body: formData
+                body: formData,
+                signal: mySignal
             });
         }, false);
     }
 
-    // Shared SSE consumer for both the typed and voice paths. `questionAlreadyShown`
-    // is true for typed input (we show it immediately) and false for voice
-    // (the transcript comes back from the server as the first event).
+    function confirmPendingWrite(writeToken) {
+        // The ONLY thing that actually triggers the backend write --
+        // sent automatically once (and only once) this turn's SSE
+        // response has been fully, successfully received. If the
+        // stream was aborted/interrupted before reaching this point,
+        // this is simply never called and no write happens. See
+        // stream_atlas_turn's docstring in app.py for the full
+        // reasoning on why this is a separate request rather than an
+        // inline write.
+        fetch('{{ url_for("assistant_confirm_write") }}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            body: JSON.stringify({ token: writeToken })
+        }).then(function (r) { return r.json(); }).then(function (data) {
+            if (data.success) {
+                addMessage('system', '\u2713 Concrete request #' + data.submitted_id + ' submitted');
+                resetBtn.style.display = 'none';
+            } else if (data.error) {
+                addMessage('error', "Actually, I couldn't submit that -- " + data.error);
+            }
+        }).catch(function () {
+            addMessage('error', 'Lost connection before the submission could be confirmed -- nothing was sent. Try again.');
+        });
+    }
+
+    // Shared SSE consumer for typed input, single-turn voice, and
+    // continuous voice-session turns alike. `questionAlreadyShown` is
+    // true for typed input (shown immediately) and false for voice (the
+    // transcript comes back from the server as the first event).
+    //
+    // STALE-TURN RACE FIX: myNetworkTurn captures networkTurnCounter's
+    // value at the moment THIS turn starts. Every callback below
+    // (pump/handleEvent/catch) checks `myNetworkTurn === networkTurnCounter`
+    // before touching any shared state -- turnInFlight, vState,
+    // currentAbortController, error messages, auto-resume scheduling.
+    // If a newer turn has started in the meantime (e.g. a barge-in
+    // triggered triggerBargeIn(), which bumps networkTurnCounter), this
+    // turn's own late callbacks become no-ops instead of corrupting the
+    // newer turn's state. An AbortController only stops the fetch/reader
+    // itself -- it does NOT stop already-scheduled .then()/.catch()
+    // callbacks from still running, so the abort alone is not sufficient
+    // on its own; this ownership check is what actually closes the race.
     function streamFromServer(doFetch, questionAlreadyShown) {
+        if (turnInFlight) return; // duplicate/overlapping request guard
+        turnInFlight = true;
+        var myNetworkTurn = ++networkTurnCounter;
+        var myAbortController = new AbortController();
+        currentAbortController = myAbortController;
         setStatus('Thinking...');
         sendBtn.disabled = true;
+        if (voiceSessionActive) setVoiceState(VSTATE.PROCESSING);
         var assistantBubble = null;
         var assistantText = '';
+        var myTurnToken = ++speakingTurnToken; // this turn's audio chunks are only valid while this token is current
 
-        doFetch().then(function (response) {
+        function isStillCurrent() { return myNetworkTurn === networkTurnCounter; }
+
+        doFetch(myAbortController.signal).then(function (response) {
             var reader = response.body.getReader();
             var decoder = new TextDecoder();
             var buffer = '';
 
             function pump() {
                 return reader.read().then(function (result) {
+                    if (!isStillCurrent()) return; // superseded mid-stream -- stop reading, don't process further events
                     if (result.done) return;
                     buffer += decoder.decode(result.value, { stream: true });
                     var parts = buffer.split('\n\n');
@@ -213,6 +391,7 @@
             }
 
             function handleEvent(evt) {
+                if (!isStillCurrent()) return; // belt-and-suspenders -- pump() already checks, but keep this self-contained
                 if (evt.type === 'question') {
                     if (!questionAlreadyShown) addMessage('user', evt.text);
                     if (evt.transcribe_error) addMessage('error', 'Could not transcribe: ' + evt.transcribe_error);
@@ -224,32 +403,56 @@
                     assistantText += evt.text;
                     assistantBubble.querySelector('span:last-child').textContent = assistantText;
                     scrollToBottom();
+                } else if (evt.type === 'audio_chunk') {
+                    // Progressive TTS: audio for one sentence, arriving
+                    // while the rest of the reply may still be streaming
+                    // in as text. Queue it for sequential playback.
+                    if (evt.audio || evt.text) enqueueAudioChunk(evt.audio || null, evt.text, myTurnToken);
+                    if (evt.audio_error) addMessage('error', 'Atlas voice unavailable for part of that reply, using free voice instead: ' + evt.audio_error);
                 } else if (evt.type === 'done') {
                     setStatus('');
                     sendBtn.disabled = false;
-                    if (assistantText) speak(assistantText, evt.audio);
+                    turnInFlight = false;
                     if (evt.audio_error) addMessage('error', 'Atlas voice unavailable, using free voice instead: ' + evt.audio_error);
-                    if (evt.submitted_id) addMessage('system', '\u2713 Concrete request #' + evt.submitted_id + ' submitted');
                     resetBtn.style.display = (evt.mode === 'concrete_request') ? 'inline-block' : 'none';
+                    if (evt.pending_write_token) confirmPendingWrite(evt.pending_write_token);
+                    if (!voiceSessionActive) return;
+                    if (audioQueue.length === 0 && !playbackActive) {
+                        // Nothing was queued for speech at all (e.g. a
+                        // silent/empty reply) -- go straight back to
+                        // listening rather than waiting on a queue that
+                        // will never advance.
+                        onAtlasFinishedSpeaking();
+                    }
+                    // otherwise playNextChunk()'s own end-of-queue check
+                    // (in playNextChunk) will call onAtlasFinishedSpeaking
+                    // once the last queued chunk actually finishes playing.
                 }
             }
 
             addTyping();
             return pump();
-        }).catch(function () {
+        }).catch(function (err) {
+            if (!isStillCurrent()) return; // this turn was superseded -- a newer turn owns turnInFlight/vState/etc. now, don't touch them
             removeTyping();
             setStatus('');
             sendBtn.disabled = false;
+            turnInFlight = false;
+            if (err && err.name === 'AbortError') return; // deliberate abort (End Voice / interrupt), not a real failure
             addMessage('error', 'Something went wrong reaching the assistant.');
+            if (voiceSessionActive) setVoiceState(VSTATE.ERROR);
         });
     }
 
+    // ============================================================
+    // TEXT INPUT (unchanged behavior)
+    // ============================================================
     function sendTyped() {
         var text = textInput.value.trim();
         if (!text) return;
         textInput.value = '';
         textInput.style.height = 'auto';
-        unlockSpeechIfNeeded();
+        if (!audioUnlocked) unlockAudioElement();
         askServer(text);
     }
     sendBtn.addEventListener('click', sendTyped);
@@ -260,6 +463,13 @@
         textInput.style.height = 'auto';
         textInput.style.height = Math.min(textInput.scrollHeight, 120) + 'px';
     });
+
+    // ============================================================
+    // CAPTURE: native SpeechRecognition where reliable, MediaRecorder +
+    // silence-detection elsewhere (iOS). Unchanged from before -- this
+    // part already worked; not rewritten.
+    // ============================================================
+    var MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
     var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -276,6 +486,8 @@
         micBtn.disabled = true;
         micBtn.style.opacity = 0.3;
         micBtn.title = "Voice not supported in this browser";
+        voiceStartBtn.disabled = true;
+        voiceStartBtn.style.opacity = 0.3;
     }
 
     var mediaRecorder = null;
@@ -284,21 +496,26 @@
     var silenceCheckInterval = null;
     var silenceAudioCtx = null;
 
-    function startListening() {
+    function startListening(onCapturedText) {
+        // onCapturedText(text) is called with the transcript once a turn
+        // is captured. Used both for single-tap mic use (voiceSessionActive
+        // false) and continuous voice-session turns (voiceSessionActive true).
         if (listening) return;
         listening = true;
         setStatus('Listening...');
         micBtn.classList.add('listening');
+        if (voiceSessionActive) setVoiceState(VSTATE.LISTENING);
 
         if (recognition) {
             recognition.onresult = function (event) {
                 var question = event.results[0][0].transcript;
-                askServer(question);
+                onCapturedText(question);
             };
             recognition.onerror = function (event) {
                 setStatus("Didn't catch that (" + event.error + ') -- try again.');
                 listening = false;
                 micBtn.classList.remove('listening');
+                if (voiceSessionActive) scheduleAutoResume();
             };
             recognition.onend = function () {
                 listening = false;
@@ -308,7 +525,7 @@
             return;
         }
 
-        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+        navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS).then(function (stream) {
             audioChunks = [];
             var mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
                 : MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
@@ -323,11 +540,12 @@
                 if (audioChunks.length === 0) {
                     setStatus("Didn't catch that -- try again.");
                     listening = false;
+                    if (voiceSessionActive) scheduleAutoResume();
                     return;
                 }
                 var blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
-                askServerWithAudio(blob);
                 listening = false;
+                onCapturedText(blob); // note: a Blob here, not text -- handled by caller
             });
             mediaRecorder.start();
             watchForSilence(stream);
@@ -335,6 +553,7 @@
             setStatus('Microphone access denied or unavailable (' + err.name + ').');
             listening = false;
             micBtn.classList.remove('listening');
+            if (voiceSessionActive) { setVoiceState(VSTATE.ERROR); addMessage('error', 'Microphone access is required for voice mode.'); endVoiceSession(); }
         });
     }
 
@@ -386,11 +605,191 @@
         if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
     }
 
+    // Single-tap (non-continuous) mic use -- existing behavior, still
+    // available even during a voice session as a manual fallback.
     function toggleListening() {
-        if (listening) stopListening();
-        else startListening();
+        if (listening) { stopListening(); return; }
+        startListening(function (result) {
+            if (typeof result === 'string') askServer(result);
+            else askServerWithAudio(result);
+        });
     }
-    micBtn.addEventListener('click', function () { unlockSpeechIfNeeded(); toggleListening(); });
+    micBtn.addEventListener('click', function () {
+        if (!audioUnlocked) unlockAudioElement();
+        toggleListening();
+    });
+
+    // ============================================================
+    // CONTINUOUS VOICE SESSION (Start Voice / auto-resume / barge-in)
+    // ============================================================
+    var autoResumeTimer = null;
+
+    function onAtlasFinishedSpeaking() {
+        if (!voiceSessionActive) return;
+        setStatus('');
+        scheduleAutoResume();
+    }
+
+    function scheduleAutoResume() {
+        if (!voiceSessionActive) return;
+        if (autoResumeTimer) clearTimeout(autoResumeTimer);
+        // A brief pause before re-arming the mic -- avoids capturing the
+        // tail end of Atlas's own audio output and gives a natural beat
+        // before listening resumes.
+        autoResumeTimer = setTimeout(function () {
+            if (!voiceSessionActive || listening || turnInFlight) return;
+            startListening(function (result) {
+                if (typeof result === 'string') startVoiceTurn(result);
+                else askServerWithAudioVoice(result);
+            });
+        }, 350);
+    }
+
+    function startVoiceTurn(text) {
+        setVoiceState(VSTATE.PROCESSING);
+        askServer(text);
+    }
+    function askServerWithAudioVoice(blob) {
+        setVoiceState(VSTATE.PROCESSING);
+        askServerWithAudio(blob);
+    }
+
+    // ---- Barge-in: a lightweight, separate VAD listener active only
+    // while Atlas is speaking. Deliberately NOT full SpeechRecognition
+    // running concurrently with playback (expensive, and far more prone
+    // to picking up Atlas's own voice). echoCancellation is requested on
+    // the mic stream (WebRTC-standard acoustic echo cancellation) as the
+    // primary mitigation against Atlas's own speaker output falsely
+    // triggering a barge-in; a higher volume threshold and a longer
+    // required sustained-duration than the normal end-of-turn detector
+    // are the secondary mitigation on top of that.
+    var bargeInStream = null;
+    var bargeInAudioCtx = null;
+    var bargeInInterval = null;
+
+    function startBargeInWatch() {
+        if (!voiceSessionActive || bargeInStream) return;
+        navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS).then(function (stream) {
+            if (vState !== VSTATE.SPEAKING) { stream.getTracks().forEach(function (t) { t.stop(); }); return; } // state changed while permission was pending
+            bargeInStream = stream;
+            var AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return;
+            bargeInAudioCtx = new AudioCtx();
+            var source = bargeInAudioCtx.createMediaStreamSource(stream);
+            var analyser = bargeInAudioCtx.createAnalyser();
+            analyser.fftSize = 512;
+            source.connect(analyser);
+            var data = new Uint8Array(analyser.frequencyBinCount);
+
+            var BARGE_IN_THRESHOLD = 26; // deliberately higher than the 8 used for normal end-of-turn silence detection
+            var BARGE_IN_SUSTAIN_MS = 300;
+            var aboveThresholdSince = null;
+
+            bargeInInterval = setInterval(function () {
+                if (vState !== VSTATE.SPEAKING) return;
+                analyser.getByteFrequencyData(data);
+                var sum = 0;
+                for (var i = 0; i < data.length; i++) sum += data[i];
+                var avgVolume = sum / data.length;
+                if (avgVolume > BARGE_IN_THRESHOLD) {
+                    if (aboveThresholdSince === null) aboveThresholdSince = Date.now();
+                    if (Date.now() - aboveThresholdSince > BARGE_IN_SUSTAIN_MS) {
+                        triggerBargeIn();
+                    }
+                } else {
+                    aboveThresholdSince = null;
+                }
+            }, 100);
+        }).catch(function () { /* barge-in is best-effort -- if mic access fails here, normal turn-taking still works */ });
+    }
+
+    function stopBargeInWatch() {
+        if (bargeInInterval) { clearInterval(bargeInInterval); bargeInInterval = null; }
+        if (bargeInStream) { bargeInStream.getTracks().forEach(function (t) { t.stop(); }); bargeInStream = null; }
+        if (bargeInAudioCtx) { bargeInAudioCtx.close().catch(function () {}); bargeInAudioCtx = null; }
+    }
+
+    function triggerBargeIn() {
+        if (!voiceSessionActive || vState !== VSTATE.SPEAKING) return;
+        setVoiceState(VSTATE.INTERRUPTING);
+        stopAllAudioImmediately();
+        stopBargeInWatch();
+        // Bump networkTurnCounter FIRST, before aborting -- this is what
+        // actually makes the old turn's callbacks stale (see
+        // streamFromServer's isStillCurrent() checks). Aborting alone
+        // only cancels the fetch/reader; it does not stop an
+        // already-scheduled .then()/.catch() from running and touching
+        // shared state after this point. Bumping the counter here means
+        // even if the old turn's callback fires a moment later, it's
+        // already provably superseded.
+        networkTurnCounter++;
+        if (currentAbortController) { try { currentAbortController.abort(); } catch (e) {} }
+        turnInFlight = false;
+        setStatus('Go ahead...');
+        startListening(function (result) {
+            if (typeof result === 'string') startVoiceTurn(result);
+            else askServerWithAudioVoice(result);
+        });
+    }
+
+    // Watch vState transitions specifically to start/stop the barge-in
+    // listener -- kept as a small explicit hook rather than scattering
+    // startBargeInWatch()/stopBargeInWatch() calls through every place
+    // SPEAKING is entered/exited.
+    var _setVoiceStateOriginal = setVoiceState;
+    setVoiceState = function (next) {
+        var prev = vState;
+        _setVoiceStateOriginal(next);
+        if (next === VSTATE.SPEAKING && prev !== VSTATE.SPEAKING) startBargeInWatch();
+        if (next !== VSTATE.SPEAKING && prev === VSTATE.SPEAKING) stopBargeInWatch();
+    };
+
+    // ---- Start / End Voice ----
+    function startVoiceSession() {
+        if (voiceSessionActive) return; // duplicate Start Voice guard
+        unlockAudioElement();
+        voiceSessionActive = true;
+        voiceStartBtn.style.display = 'none';
+        voiceEndBtn.style.display = 'inline-flex';
+        setVoiceState(VSTATE.IDLE);
+        scheduleAutoResume();
+    }
+
+    function endVoiceSession() {
+        voiceSessionActive = false;
+        if (autoResumeTimer) { clearTimeout(autoResumeTimer); autoResumeTimer = null; }
+        stopListening();
+        stopSilenceWatch();
+        stopBargeInWatch();
+        stopAllAudioImmediately();
+        networkTurnCounter++; // invalidate any in-flight turn's callbacks immediately, same reasoning as triggerBargeIn()
+        if (currentAbortController) { try { currentAbortController.abort(); } catch (e) {} }
+        turnInFlight = false;
+        if (recognition) { try { recognition.abort(); } catch (e) {} }
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (e) {} }
+        listening = false;
+        micBtn.classList.remove('listening');
+        voiceStartBtn.style.display = 'inline-flex';
+        voiceEndBtn.style.display = 'none';
+        voiceStateIndicator.style.display = 'none';
+        setStatus('Voice session ended.');
+    }
+
+    voiceStartBtn.addEventListener('click', startVoiceSession);
+    voiceEndBtn.addEventListener('click', endVoiceSession);
+
+    // Tab/app visibility changes: pause listening/playback rather than
+    // let a MediaRecorder or SpeechRecognition instance keep running
+    // (and potentially error out) in the background; resume cleanly on
+    // return if the session is still active.
+    document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+            if (listening) stopListening();
+            if (autoResumeTimer) { clearTimeout(autoResumeTimer); autoResumeTimer = null; }
+        } else if (voiceSessionActive && !listening && !turnInFlight && vState !== VSTATE.SPEAKING) {
+            scheduleAutoResume();
+        }
+    });
 
     resetBtn.addEventListener('click', function () {
         fetch('{{ url_for("assistant_reset") }}', {
