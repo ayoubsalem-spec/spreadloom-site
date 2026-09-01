@@ -53,6 +53,16 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 APP_ENV = os.environ.get("APP_ENV", "production").strip().lower()
 _DEV_ENVS = ("development", "dev", "test", "testing")
+
+# Dedicated, explicit flag for the temporary Atlas Voice Diagnostics panel
+# (templates/assistant.html) -- deliberately NOT derived from APP_ENV/
+# _DEV_ENVS. Railway's TEST deployment intentionally runs with
+# APP_ENV=production (to exercise production-like security behavior and
+# require a real SECRET_KEY), so APP_ENV cannot be used to gate this.
+# Defaults to false/off; must be explicitly set to enable. LIVE will not
+# set this. Does not affect SECRET_KEY handling, APP_ENV, or any other
+# security configuration.
+ATLAS_VOICE_DIAGNOSTICS = os.environ.get("ATLAS_VOICE_DIAGNOSTICS", "").strip().lower() in ("1", "true", "yes")
 _DEV_ONLY_SECRET_KEY = "dev-only-insecure-secret-do-not-use-in-production"
 
 _secret_key = os.environ.get("SECRET_KEY", "").strip()
@@ -583,6 +593,11 @@ def inject_permissions():
         "has_activity_log_access": _authorized("action:activity_log:view"),
         "has_manage_users_access": _authorized("action:team_admin:manage_users"),
         "has_manage_inventory_access": _authorized("action:sitepulse:manage_inventory"),
+        # Explicit, dedicated flag for the temporary Atlas Voice
+        # Diagnostics panel (templates/assistant.html) -- see
+        # ATLAS_VOICE_DIAGNOSTICS above. Independent of APP_ENV; defaults
+        # false; must be explicitly enabled via env var.
+        "atlas_voice_diagnostics_enabled": ATLAS_VOICE_DIAGNOSTICS,
     }
 
 

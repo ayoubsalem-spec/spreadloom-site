@@ -46,6 +46,23 @@
     .atlas-voice-state-dot.processing { background: var(--brass); animation: atlas-typing 1s infinite; }
     .atlas-voice-state-dot.speaking { background: #5AC8E0; animation: atlas-pulse 1.1s infinite; }
     .atlas-voice-label { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* ============================================================
+       TEST-ONLY Atlas Voice Diagnostics panel. Temporary, additive,
+       visually separate from the real Atlas UI on purpose (red-tinted
+       border/label) so it reads as debug scaffolding, not a shipped
+       feature. Gated server-side by atlas_voice_diagnostics_enabled -- see app.py's
+       inject_permissions(). Delete this block + the matching markup/
+       JS block below (search "VOICE DIAGNOSTICS") to remove entirely.
+       ============================================================ */
+    .voice-diag-panel { margin-top: 14px; border: 1.5px dashed #F87171; border-radius: 8px; background: rgba(248,113,113,0.05); font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--text-dim); flex-shrink: 0; }
+    .voice-diag-panel summary { cursor: pointer; padding: 8px 12px; color: #FCA5A5; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; font-size: 10px; user-select: none; }
+    .voice-diag-body { padding: 0 12px 12px; }
+    .voice-diag-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 8px; }
+    .voice-diag-grid div span { color: var(--text-faint); }
+    .voice-diag-log { max-height: 130px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+    .voice-diag-copy-btn { margin-top: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 5px 10px; border-radius: 6px; border: 1px solid #F87171; background: transparent; color: #FCA5A5; cursor: pointer; }
+    .voice-diag-copy-btn:active { opacity: 0.7; }
 </style>
 
 <div class="atlas-shell">
@@ -66,6 +83,32 @@
             <span id="voice-state-label" class="atlas-voice-label">Idle</span>
         </span>
     </div>
+
+    {% if atlas_voice_diagnostics_enabled %}
+    <!-- TEST-ONLY: Atlas Voice Diagnostics. See "VOICE DIAGNOSTICS" in the
+         script block below. Not present at all when atlas_voice_diagnostics_enabled is false
+         (server-gated, not just CSS-hidden). -->
+    <details class="voice-diag-panel" id="voiceDiagPanel">
+        <summary>&#9888; Voice Diagnostics (TEST only)</summary>
+        <div class="voice-diag-body">
+            <div class="voice-diag-grid">
+                <div><span>AudioContext:</span> <b id="vd-actx">n/a</b></div>
+                <div><span>MediaRecorder:</span> <b id="vd-mrec">n/a</b></div>
+                <div><span>Atlas state:</span> <b id="vd-vstate">n/a</b></div>
+                <div><span>Polling:</span> <b id="vd-polling">n/a</b></div>
+                <div><span>Level:</span> <b id="vd-level">n/a</b></div>
+                <div><span>Noise floor:</span> <b id="vd-floor">n/a</b></div>
+                <div><span>Threshold:</span> <b id="vd-threshold">n/a</b></div>
+                <div><span>Speech ticks:</span> <b id="vd-ticks">n/a</b></div>
+                <div><span>hasSpokenYet:</span> <b id="vd-spoken">n/a</b></div>
+                <div><span>Silence dur:</span> <b id="vd-silence">n/a</b></div>
+                <div><span>Last stop reason:</span> <b id="vd-stopreason">n/a</b></div>
+            </div>
+            <div class="voice-diag-log" id="vd-log"></div>
+            <button type="button" class="voice-diag-copy-btn" id="vd-copy-btn">Copy Diagnostics</button>
+        </div>
+    </details>
+    {% endif %}
 
     <div id="atlas-messages" class="atlas-messages">
         <div id="atlas-empty" class="atlas-empty">
@@ -105,6 +148,153 @@
     var voiceStateDot = document.getElementById('voice-state-dot');
     var voiceStateLabel = document.getElementById('voice-state-label');
     var csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+    // ============================================================
+    // VOICE DIAGNOSTICS (TEST-only, temporary, additive)
+    //
+    // Read-only instrumentation for the real-iPhone end-of-turn
+    // investigation. Does NOT read, gate, or alter any VAD threshold,
+    // timing constant, mic constraint, TTS, barge-in, or write-
+    // confirmation behavior -- it only observes existing state that
+    // watchForSilence()/startListening()/etc. already compute, and
+    // mirrors it into a small on-screen panel + rolling event log so a
+    // real-device session can be inspected without Safari remote
+    // debugging.
+    //
+    // Server-gated: the panel markup only exists in the DOM at all
+    // when atlas_voice_diagnostics_enabled is true (see app.py's inject_permissions() and
+    // the {% if atlas_voice_diagnostics_enabled %} block above) -- not merely CSS-hidden.
+    // voiceDiagEnabled below is a second, redundant client-side check
+    // for the same condition, so this entire module is a no-op
+    // (including the diagLog()/updateVoiceDiag() call sites sprinkled
+    // through the real voice code further down) whenever the panel
+    // isn't present.
+    //
+    // Deliberately excluded from every surface here: transcript text,
+    // API keys/tokens, pending-write tokens, session identifiers, or
+    // any other sensitive value -- only timing/level/state numbers and
+    // fixed event labels.
+    //
+    // To remove entirely before LIVE: delete this block, the matching
+    // {% if atlas_voice_diagnostics_enabled %} markup block above, the diagLog()/
+    // updateVoiceDiag() call sites (search "VOICE DIAGNOSTICS" in this
+    // file), and the atlas_voice_diagnostics_enabled context-processor entry in app.py.
+    // ============================================================
+    var voiceDiagEnabled = {{ 'true' if atlas_voice_diagnostics_enabled else 'false' }};
+    var vdPanelEl = voiceDiagEnabled ? document.getElementById('voiceDiagPanel') : null;
+    var vdEls = voiceDiagEnabled ? {
+        actx: document.getElementById('vd-actx'),
+        mrec: document.getElementById('vd-mrec'),
+        vstate: document.getElementById('vd-vstate'),
+        polling: document.getElementById('vd-polling'),
+        level: document.getElementById('vd-level'),
+        floor: document.getElementById('vd-floor'),
+        threshold: document.getElementById('vd-threshold'),
+        ticks: document.getElementById('vd-ticks'),
+        spoken: document.getElementById('vd-spoken'),
+        silence: document.getElementById('vd-silence'),
+        stopreason: document.getElementById('vd-stopreason'),
+        log: document.getElementById('vd-log'),
+        copyBtn: document.getElementById('vd-copy-btn')
+    } : null;
+    var voiceDiagState = {
+        audioContextState: 'n/a', mediaRecorderState: 'n/a', atlasVoiceState: 'n/a',
+        pollingActive: false, level: null, noiseFloor: null, speechThreshold: null,
+        speechTicks: 0, hasSpokenYet: false, silenceDurationMs: null, lastStopReason: 'n/a'
+    };
+    var voiceDiagLog = [];
+    var VOICE_DIAG_LOG_MAX = 80;
+    var voiceDiagRenderPending = false;
+
+    function diagLog(label) {
+        if (!voiceDiagEnabled) return;
+        var d = new Date();
+        var ts = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' +
+            ('0' + d.getSeconds()).slice(-2) + '.' + ('00' + d.getMilliseconds()).slice(-3);
+        voiceDiagLog.push(ts + '  ' + label);
+        if (voiceDiagLog.length > VOICE_DIAG_LOG_MAX) voiceDiagLog.shift();
+        scheduleVoiceDiagRender();
+    }
+
+    function updateVoiceDiag(patch) {
+        if (!voiceDiagEnabled) return;
+        for (var k in patch) { if (patch.hasOwnProperty(k)) voiceDiagState[k] = patch[k]; }
+        scheduleVoiceDiagRender();
+    }
+
+    function scheduleVoiceDiagRender() {
+        if (!voiceDiagEnabled || voiceDiagRenderPending) return;
+        voiceDiagRenderPending = true;
+        // Coalesce bursts of updates (the 100ms polling tick can fire
+        // several updateVoiceDiag() calls close together) into one DOM
+        // write via rAF, so the panel can't itself become a source of
+        // jank on a real phone during a live diagnostic session.
+        (window.requestAnimationFrame || window.setTimeout)(function () {
+            voiceDiagRenderPending = false;
+            renderVoiceDiagPanel();
+        });
+    }
+
+    function fmtNum(n, digits) {
+        return (typeof n === 'number' && isFinite(n)) ? n.toFixed(digits === undefined ? 1 : digits) : 'n/a';
+    }
+
+    function renderVoiceDiagPanel() {
+        if (!voiceDiagEnabled || !vdEls) return;
+        var s = voiceDiagState;
+        vdEls.actx.textContent = s.audioContextState;
+        vdEls.mrec.textContent = s.mediaRecorderState;
+        vdEls.vstate.textContent = s.atlasVoiceState;
+        vdEls.polling.textContent = s.pollingActive ? 'active' : 'idle';
+        vdEls.level.textContent = fmtNum(s.level);
+        vdEls.floor.textContent = fmtNum(s.noiseFloor);
+        vdEls.threshold.textContent = fmtNum(s.speechThreshold);
+        vdEls.ticks.textContent = String(s.speechTicks);
+        vdEls.spoken.textContent = s.hasSpokenYet ? 'true' : 'false';
+        vdEls.silence.textContent = (typeof s.silenceDurationMs === 'number') ? (s.silenceDurationMs + 'ms') : 'n/a';
+        vdEls.stopreason.textContent = s.lastStopReason;
+        vdEls.log.textContent = voiceDiagLog.join('\n');
+        vdEls.log.scrollTop = vdEls.log.scrollHeight;
+    }
+
+    if (voiceDiagEnabled && vdEls && vdEls.copyBtn) {
+        vdEls.copyBtn.addEventListener('click', function () {
+            var s = voiceDiagState;
+            var text = 'ATLAS VOICE DIAGNOSTICS (TEST)\n' +
+                'AudioContext: ' + s.audioContextState + '\n' +
+                'MediaRecorder: ' + s.mediaRecorderState + '\n' +
+                'Atlas state: ' + s.atlasVoiceState + '\n' +
+                'Polling: ' + (s.pollingActive ? 'active' : 'idle') + '\n' +
+                'Level: ' + fmtNum(s.level) + '\n' +
+                'Noise floor: ' + fmtNum(s.noiseFloor) + '\n' +
+                'Threshold: ' + fmtNum(s.speechThreshold) + '\n' +
+                'Speech ticks: ' + s.speechTicks + '\n' +
+                'hasSpokenYet: ' + s.hasSpokenYet + '\n' +
+                'Silence duration: ' + (typeof s.silenceDurationMs === 'number' ? s.silenceDurationMs + 'ms' : 'n/a') + '\n' +
+                'Last stop reason: ' + s.lastStopReason + '\n\n' +
+                'EVENT LOG:\n' + voiceDiagLog.join('\n');
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function () {
+                    vdEls.copyBtn.textContent = 'Copied!';
+                    setTimeout(function () { vdEls.copyBtn.textContent = 'Copy Diagnostics'; }, 1200);
+                }).catch(function () { vdEls.copyBtn.textContent = 'Copy failed -- select manually'; });
+            } else {
+                // Clipboard API unavailable (older iOS Safari outside a
+                // secure context, etc.) -- fall back to a selectable
+                // textarea the user can copy from manually.
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.width = '100%';
+                ta.style.height = '120px';
+                ta.style.marginTop = '8px';
+                ta.style.fontFamily = 'inherit';
+                ta.style.fontSize = '10px';
+                vdEls.copyBtn.insertAdjacentElement('afterend', ta);
+                ta.focus();
+                ta.select();
+            }
+        });
+    }
 
     function setStatus(text) { statusLine.textContent = text; }
     function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
@@ -170,6 +360,7 @@
 
     function setVoiceState(next) {
         vState = next;
+        if (voiceDiagEnabled) updateVoiceDiag({ atlasVoiceState: String(next) });
         if (!voiceSessionActive) { voiceStateIndicator.style.display = 'none'; return; }
         voiceStateIndicator.style.display = 'inline-flex';
         voiceStateDot.className = 'atlas-voice-state-dot';
@@ -213,6 +404,86 @@
         } else {
             audioUnlocked = true;
         }
+        ensureSharedAnalyserAudioCtx();
+    }
+
+    // ============================================================
+    // SHARED ANALYSER AudioContext (root-cause fix for iPhone
+    // auto-end-of-turn failure, see release review).
+    //
+    // The previous silence detector called `new (window.AudioContext ||
+    // window.webkitAudioContext)()` fresh inside every watchForSilence()
+    // call -- which runs asynchronously inside a getUserMedia().then()
+    // callback, NOT synchronously inside the original tap. On iOS
+    // Safari, an AudioContext created that way can start (or remain)
+    // in a "suspended" state -- WebKit's autoplay/user-activation policy
+    // applies to AudioContexts the same way it applies to <audio>
+    // playback (see the persistent <audio> element fix from the prior
+    // round). A suspended AudioContext's AnalyserNode returns all-zero
+    // (or frozen/stale) frequency data forever. Since the old detector's
+    // auto-stop branch was gated on `hasSpokenYet` first becoming true
+    // (which requires the analyser to ever read a real, non-zero
+    // level), a suspended context means hasSpokenYet NEVER becomes
+    // true, which means the silence-hold auto-stop path is NEVER even
+    // reachable -- not "using the wrong threshold," but structurally
+    // unable to fire at all. This exactly matches the reported symptom
+    // (auto-stop never fires, but a manual mic tap -> normal
+    // MediaRecorder.stop() -> correct transcription works fine, proving
+    // the actual audio capture and MediaRecorder path were never
+    // broken -- only the analyser reading no real data).
+    //
+    // Fix: one AudioContext, created (or resumed if it already exists
+    // suspended) exactly once, synchronously inside a genuine user
+    // gesture (Start Voice tap or the manual mic tap), then reused for
+    // every subsequent watchForSilence()/startBargeInWatch() call in
+    // the session -- mirrors the exact same lesson already applied to
+    // atlasAudioEl for playback.
+    var sharedAnalyserAudioCtx = null;
+
+    // Learned ambient noise floor, persisted across TURNS within one
+    // voice session (not reset per-turn) -- see the redesigned
+    // watchForSilence() below for why. Reset to null on a genuinely
+    // fresh voice session (endVoiceSession) so a new session doesn't
+    // inherit a stale estimate from a different room/environment.
+    var sessionNoiseFloor = null;
+
+    function ensureSharedAnalyserAudioCtx() {
+        var AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return null;
+        if (!sharedAnalyserAudioCtx) {
+            sharedAnalyserAudioCtx = new AudioCtx();
+            vlog('shared analyser AudioContext created, initial state=' + sharedAnalyserAudioCtx.state);
+            diagLog('AudioContext created (state=' + sharedAnalyserAudioCtx.state + ')');
+        }
+        updateVoiceDiag({ audioContextState: sharedAnalyserAudioCtx.state });
+        if (sharedAnalyserAudioCtx.state === 'suspended') {
+            diagLog('AudioContext suspended -- attempting resume()');
+            sharedAnalyserAudioCtx.resume().then(function () {
+                vlog('shared analyser AudioContext resumed, state=' + sharedAnalyserAudioCtx.state);
+                updateVoiceDiag({ audioContextState: sharedAnalyserAudioCtx.state });
+                diagLog('AudioContext running (resumed)');
+            }).catch(function (e) {
+                vlog('shared analyser AudioContext resume() failed: ' + e.message);
+                diagLog('AudioContext resume() FAILED: ' + e.message);
+            });
+        } else {
+            diagLog('AudioContext ' + sharedAnalyserAudioCtx.state);
+        }
+        return sharedAnalyserAudioCtx;
+    }
+
+    // ============================================================
+    // TEST-ONLY DIAGNOSTIC LOGGING for the end-of-turn detector, per
+    // the release review's explicit instrumentation request. Flip
+    // VOICE_DEBUG to false (or remove this block) once the real-device
+    // evidence has confirmed the fix and this is no longer needed.
+    // ============================================================
+    var VOICE_DEBUG = true;
+    function vlog() {
+        if (!VOICE_DEBUG || !window.console) return;
+        var args = Array.prototype.slice.call(arguments);
+        args.unshift('[atlas-voice]');
+        console.log.apply(console, args);
     }
 
     // Sequential playback queue: a turn can deliver several audio_chunk
@@ -494,7 +765,10 @@
     var audioChunks = [];
     var listening = false;
     var silenceCheckInterval = null;
-    var silenceAudioCtx = null;
+    // TEST-only diagnostics: which of a fixed set of reasons caused the
+    // most recent stopListening() call -- read (not decided) by the
+    // instrumentation, does not affect control flow.
+    var lastStopReason = 'n/a';
 
     function startListening(onCapturedText) {
         // onCapturedText(text) is called with the transcript once a turn
@@ -504,6 +778,7 @@
         listening = true;
         setStatus('Listening...');
         micBtn.classList.add('listening');
+        diagLog('listening started');
         if (voiceSessionActive) setVoiceState(VSTATE.LISTENING);
 
         if (recognition) {
@@ -530,6 +805,7 @@
             var mimeType = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
                 : MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '';
             mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType: mimeType }) : new MediaRecorder(stream);
+            updateVoiceDiag({ mediaRecorderState: mediaRecorder.state });
             mediaRecorder.addEventListener('dataavailable', function (e) {
                 if (e.data.size > 0) audioChunks.push(e.data);
             });
@@ -537,6 +813,8 @@
                 stream.getTracks().forEach(function (t) { t.stop(); });
                 micBtn.classList.remove('listening');
                 stopSilenceWatch();
+                updateVoiceDiag({ mediaRecorderState: mediaRecorder.state, pollingActive: false });
+                diagLog('MediaRecorder stopped (reason: ' + lastStopReason + ')');
                 if (audioChunks.length === 0) {
                     setStatus("Didn't catch that -- try again.");
                     listening = false;
@@ -548,6 +826,7 @@
                 onCapturedText(blob); // note: a Blob here, not text -- handled by caller
             });
             mediaRecorder.start();
+            updateVoiceDiag({ mediaRecorderState: mediaRecorder.state });
             watchForSilence(stream);
         }).catch(function (err) {
             setStatus('Microphone access denied or unavailable (' + err.name + ').');
@@ -558,45 +837,172 @@
     }
 
     function watchForSilence(stream) {
-        var AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return;
-        silenceAudioCtx = new AudioCtx();
-        var source = silenceAudioCtx.createMediaStreamSource(stream);
-        var analyser = silenceAudioCtx.createAnalyser();
+        var audioCtx = ensureSharedAnalyserAudioCtx();
+        if (!audioCtx) { vlog('no AudioContext available -- silence detection disabled, MAX_DURATION_MS will be the only stop condition'); return; }
+        var source = audioCtx.createMediaStreamSource(stream);
+        var analyser = audioCtx.createAnalyser();
         analyser.fftSize = 512;
         source.connect(analyser);
         var data = new Uint8Array(analyser.frequencyBinCount);
+        currentSilenceSource = source;
+        currentSilenceAnalyser = analyser;
 
-        var SILENCE_THRESHOLD = 8;
-        var SILENCE_HOLD_MS = 1300;
-        var MAX_DURATION_MS = 30000;
+        // ---- ADAPTIVE noise-floor detector ----
+        // Rather than assuming a single fixed volume number means
+        // "speech" on every device/room/mic, this tracks a running
+        // estimate of the ambient noise floor and requires a level to
+        // exceed that floor by a real margin before counting as speech.
+        //
+        // FIX (release review, round 2): the previous version spent the
+        // first CALIBRATION_MS unconditionally averaging every sample
+        // -- speech or not -- into the floor. If the user started
+        // talking immediately (exactly the target UX: "as soon as
+        // Atlas shows LISTENING, I should be able to speak
+        // immediately"), those early speech samples got baked into
+        // noiseFloor, pushing speechThreshold up past the user's own
+        // voice level -- hasSpokenYet then never became true, and
+        // recording never auto-stopped. Reproducing the same real-
+        // device symptom for a different reason than round 1's fix.
+        //
+        // Redesigned: there is no more blind time-gated calibration
+        // window at all. sessionNoiseFloor (declared at the outer
+        // session scope, not per-turn) starts at a conservative fixed
+        // default and is updated ONLY from samples already classified
+        // as non-speech -- speech samples NEVER feed the floor, from
+        // the very first tick of the very first turn onward. This is
+        // "separating candidate speech detection from long-term noise-
+        // floor adaptation": classification and adaptation both run
+        // every tick, but adaptation only ever pulls from the
+        // non-speech side of that same classification. Because the
+        // floor is session-level (not reset each turn), it also keeps
+        // improving turn over turn, so by turn 2+ it already reflects
+        // real learned silence from turn 1 -- no silent lead-in needed
+        // on any turn, first or subsequent.
+        //
+        // A brief opening transient (a mic-open pop/click) is handled
+        // separately: SPEECH_CONFIRM_TICKS requires a level to stay
+        // above threshold for a couple of consecutive polls before
+        // it's trusted as real speech, so a single-tick pop can't (a)
+        // poison the floor -- it never could, pops are classified as
+        // candidate-speech and floor adaptation only happens on the
+        // non-speech side regardless -- or (b) prematurely flip
+        // hasSpokenYet and start a silence countdown before the user
+        // has actually said anything.
+        var DEFAULT_INITIAL_NOISE_FLOOR = 5; // conservative "assume quiet" starting point, used only until real silence is observed
+        var SPEECH_MARGIN = 10;      // speech must exceed the floor by this much
+        var MIN_SPEECH_THRESHOLD = 6; // absolute floor, in case the estimated noise floor is implausibly low
+        var FLOOR_EMA_DOWN = 0.25;   // floor tracks a quieter room quickly
+        var FLOOR_EMA_UP = 0.02;     // floor rises slowly, so speech spikes don't drag it up
+        var SPEECH_CONFIRM_TICKS = 2; // ~200ms of sustained above-threshold level before trusting it as real speech, not a transient pop
+        var SILENCE_HOLD_MS = 1300;  // unchanged -- not what was broken
+        var MAX_DURATION_MS = 30000; // unchanged -- safety fallback either way
+
+        if (typeof sessionNoiseFloor !== 'number') sessionNoiseFloor = DEFAULT_INITIAL_NOISE_FLOOR;
         var hasSpokenYet = false;
         var silenceStartedAt = null;
+        var consecutiveSpeechTicks = 0;
         var recordingStartedAt = Date.now();
+        var lastLoggedSecond = -1;
+
+        vlog('watchForSilence started -- AudioContext state=' + audioCtx.state, 'sampleRate=' + audioCtx.sampleRate, 'startingNoiseFloor=' + sessionNoiseFloor.toFixed(1));
+
+        updateVoiceDiag({ pollingActive: true, speechTicks: 0, hasSpokenYet: false, silenceDurationMs: null, noiseFloor: sessionNoiseFloor });
 
         silenceCheckInterval = setInterval(function () {
-            if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+            if (!mediaRecorder || mediaRecorder.state !== 'recording') {
+                vlog('poll skipped -- MediaRecorder state=' + (mediaRecorder ? mediaRecorder.state : 'null'));
+                updateVoiceDiag({ pollingActive: false, mediaRecorderState: mediaRecorder ? mediaRecorder.state : 'null' });
+                return;
+            }
             analyser.getByteFrequencyData(data);
             var sum = 0;
             for (var i = 0; i < data.length; i++) sum += data[i];
-            var avgVolume = sum / data.length;
+            var level = sum / data.length;
+            var now = Date.now();
+            var elapsed = now - recordingStartedAt;
 
-            if (avgVolume > SILENCE_THRESHOLD) {
-                hasSpokenYet = true;
-                silenceStartedAt = null;
-            } else if (hasSpokenYet) {
-                if (silenceStartedAt === null) silenceStartedAt = Date.now();
-                if (Date.now() - silenceStartedAt > SILENCE_HOLD_MS) {
-                    stopListening();
-                    return;
+            var speechThreshold = Math.max(MIN_SPEECH_THRESHOLD, sessionNoiseFloor + SPEECH_MARGIN);
+            var isCandidateSpeech = level > speechThreshold;
+            var wasSilenceInProgress = silenceStartedAt !== null;
+
+            if (isCandidateSpeech) {
+                consecutiveSpeechTicks++;
+                if (consecutiveSpeechTicks === 1) diagLog('speech candidate (level=' + level.toFixed(1) + ', threshold=' + speechThreshold.toFixed(1) + ')');
+                // Deliberately do NOT touch sessionNoiseFloor here, on
+                // ANY tick classified as candidate speech -- confirmed
+                // or not. This is what makes immediate speech at t=0
+                // safe: even a not-yet-confirmed candidate-speech
+                // sample never contaminates the floor.
+                if (consecutiveSpeechTicks >= SPEECH_CONFIRM_TICKS) {
+                    if (!hasSpokenYet) {
+                        vlog('speech detected -- level=' + level.toFixed(1), 'noiseFloor=' + sessionNoiseFloor.toFixed(1), 'threshold=' + speechThreshold.toFixed(1));
+                        diagLog('speech confirmed (level=' + level.toFixed(1) + ')');
+                    }
+                    if (wasSilenceInProgress) diagLog('silence reset');
+                    hasSpokenYet = true;
+                    silenceStartedAt = null;
+                }
+            } else {
+                consecutiveSpeechTicks = 0;
+                sessionNoiseFloor = sessionNoiseFloor + (level - sessionNoiseFloor) * (level < sessionNoiseFloor ? FLOOR_EMA_DOWN : FLOOR_EMA_UP);
+                if (hasSpokenYet) {
+                    if (silenceStartedAt === null) {
+                        silenceStartedAt = now;
+                        vlog('silence started -- level=' + level.toFixed(1), 'noiseFloor=' + sessionNoiseFloor.toFixed(1));
+                        diagLog('silence started (level=' + level.toFixed(1) + ')');
+                    }
+                    var silenceDuration = now - silenceStartedAt;
+                    updateVoiceDiag({
+                        level: level, noiseFloor: sessionNoiseFloor, speechThreshold: speechThreshold,
+                        speechTicks: consecutiveSpeechTicks, hasSpokenYet: hasSpokenYet, silenceDurationMs: silenceDuration,
+                        mediaRecorderState: mediaRecorder.state
+                    });
+                    if (silenceDuration > SILENCE_HOLD_MS) {
+                        vlog('auto-stop triggered -- silenceDuration=' + silenceDuration + 'ms', 'MediaRecorder.state=' + mediaRecorder.state);
+                        lastStopReason = 'auto-silence';
+                        diagLog('auto-stop triggered (silenceDuration=' + silenceDuration + 'ms)');
+                        stopListening();
+                        return;
+                    }
                 }
             }
-            if (Date.now() - recordingStartedAt > MAX_DURATION_MS) stopListening();
-        }, 150);
+
+            updateVoiceDiag({
+                level: level, noiseFloor: sessionNoiseFloor, speechThreshold: speechThreshold,
+                speechTicks: consecutiveSpeechTicks, hasSpokenYet: hasSpokenYet,
+                silenceDurationMs: silenceStartedAt ? (now - silenceStartedAt) : null,
+                mediaRecorderState: mediaRecorder.state
+            });
+
+            // Once-per-second periodic level log so the actual
+            // real-device curve is visible even during normal
+            // (non-transition) polling, per the diagnostic request.
+            var currentSecond = Math.floor(elapsed / 1000);
+            if (currentSecond !== lastLoggedSecond) {
+                lastLoggedSecond = currentSecond;
+                vlog('voice level=' + level.toFixed(1), 'noiseFloor=' + sessionNoiseFloor.toFixed(1), 'threshold=' + speechThreshold.toFixed(1),
+                     'speechDetected=' + hasSpokenYet, 'silenceDurationMs=' + (silenceStartedAt ? (now - silenceStartedAt) : 0),
+                     'MediaRecorder.state=' + mediaRecorder.state);
+            }
+
+            if (elapsed > MAX_DURATION_MS) {
+                vlog('MAX_DURATION_MS safety cutoff reached');
+                lastStopReason = 'max-duration';
+                diagLog('max-duration cutoff reached (' + MAX_DURATION_MS + 'ms)');
+                stopListening();
+            }
+        }, 100);
     }
+    var currentSilenceSource = null;
+    var currentSilenceAnalyser = null;
     function stopSilenceWatch() {
-        if (silenceCheckInterval) { clearInterval(silenceCheckInterval); silenceCheckInterval = null; }
-        if (silenceAudioCtx) { silenceAudioCtx.close().catch(function () {}); silenceAudioCtx = null; }
+        if (silenceCheckInterval) { clearInterval(silenceCheckInterval); silenceCheckInterval = null; updateVoiceDiag({ pollingActive: false }); }
+        // The shared AudioContext itself is intentionally NOT closed
+        // here -- it's reused across the whole voice session (see
+        // ensureSharedAnalyserAudioCtx). Only this turn's per-stream
+        // source/analyser nodes are torn down.
+        if (currentSilenceSource) { try { currentSilenceSource.disconnect(); } catch (e) {} currentSilenceSource = null; }
+        if (currentSilenceAnalyser) { try { currentSilenceAnalyser.disconnect(); } catch (e) {} currentSilenceAnalyser = null; }
     }
 
     function stopListening() {
@@ -608,7 +1014,7 @@
     // Single-tap (non-continuous) mic use -- existing behavior, still
     // available even during a voice session as a manual fallback.
     function toggleListening() {
-        if (listening) { stopListening(); return; }
+        if (listening) { lastStopReason = 'manual'; diagLog('manual stop'); stopListening(); return; }
         startListening(function (result) {
             if (typeof result === 'string') askServer(result);
             else askServerWithAudio(result);
@@ -681,7 +1087,7 @@
             source.connect(analyser);
             var data = new Uint8Array(analyser.frequencyBinCount);
 
-            var BARGE_IN_THRESHOLD = 26; // deliberately higher than the 8 used for normal end-of-turn silence detection
+            var BARGE_IN_THRESHOLD = 26; // fixed threshold, deliberately conservative/high relative to normal speaking volume -- NOT tied to the end-of-turn detector's adaptive floor in any way; barge-in's own AudioContext/algorithm are both intentionally unchanged in this pass
             var BARGE_IN_SUSTAIN_MS = 300;
             var aboveThresholdSince = null;
 
@@ -758,6 +1164,7 @@
     function endVoiceSession() {
         voiceSessionActive = false;
         if (autoResumeTimer) { clearTimeout(autoResumeTimer); autoResumeTimer = null; }
+        if (listening) { lastStopReason = 'session-end'; diagLog('session ended while listening'); }
         stopListening();
         stopSilenceWatch();
         stopBargeInWatch();
@@ -769,6 +1176,21 @@
         if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (e) {} }
         listening = false;
         micBtn.classList.remove('listening');
+        // The shared analyser AudioContext (see ensureSharedAnalyserAudioCtx)
+        // is session-scoped, not per-turn -- actually close it here, on
+        // real session end, so no audio infrastructure lingers after
+        // "End Voice" the way the microphone itself must not either.
+        if (sharedAnalyserAudioCtx) {
+            try { sharedAnalyserAudioCtx.close(); } catch (e) {}
+            sharedAnalyserAudioCtx = null;
+        }
+        // Also reset the learned noise floor -- a brand new voice
+        // session (potentially a different room/environment/device
+        // orientation) should not inherit an estimate from whatever was
+        // true during the previous session.
+        sessionNoiseFloor = null;
+        updateVoiceDiag({ audioContextState: 'closed', pollingActive: false, mediaRecorderState: 'inactive' });
+        diagLog('voice session ended');
         voiceStartBtn.style.display = 'inline-flex';
         voiceEndBtn.style.display = 'none';
         voiceStateIndicator.style.display = 'none';
