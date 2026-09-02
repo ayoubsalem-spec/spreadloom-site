@@ -31,7 +31,7 @@
         <label>Notes</label>
         <textarea name="notes">{{ p['notes'] or '' }}</textarea>
 
-        <button type="submit" class="btn-gold">Save Changes</button>
+        <button type="submit" class="btn btn-gold">Save Changes</button>
         <a href="{{ url_for('tracker_view_project', project_id=p['id']) }}" class="btn" style="margin-left:8px;">Cancel</a>
     </form>
 

@@ -1499,6 +1499,20 @@ def init_db():
         "action:system_data:manage",
         "action:activity_log:view",
         "action:sitepulse:manage_inventory",
+        # Fix 1 (Administrator approval-permission bootstrap dead-end):
+        # Administrator's role-default permission set already includes
+        # EVERY key in PERMISSION_CATALOG (see ROLE_DEFAULT_PERMISSIONS
+        # above -- "everything"), so a brand-new database seeds this
+        # correctly the first time. The gap is existing databases: an
+        # Administrator role row that already had its permissions wired
+        # up (zero-rows check in _seed_roles_and_permissions) BEFORE
+        # action:product_intelligence:approve_requests existed in the
+        # catalog never automatically receives new keys added later --
+        # exactly the class of gap this backfill helper exists for.
+        # Without this, an existing Administrator can see the permission
+        # toggle but not grant it to themselves (self-permission-
+        # modification is intentionally blocked), a real dead end.
+        "action:product_intelligence:approve_requests",
     ])
     # Item 3: existing Procurement role holders get the new approval
     # permission (and its view prerequisite) without any other part of
