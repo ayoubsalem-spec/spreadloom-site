@@ -5003,18 +5003,34 @@ def product_intelligence():
         # Fix 3 (Attention Required -> Review navigation): when there's
         # exactly one matching request, open it directly instead of
         # dropping the user into a filtered All Requests list they then
-        # have to search through themselves. With more than one match,
-        # a single click still can't reasonably pick which one, so the
-        # filtered list (unchanged, existing behavior) is the honest
-        # destination. back= carries them straight back to this section
-        # -- reusing the exact same safe, already-audited back-context
-        # mechanism the rest of Product Intelligence uses, not a new one.
+        # have to search through themselves.
+        #
+        # PI navigation refinement (this pass): with more than one
+        # match, "Review" now lands directly on the existing All
+        # Requests section, filtered to EXACTLY the same population the
+        # Attention Required count itself represents -- reusing the two
+        # existing, independent filter dimensions All Requests already
+        # supports (status IN (...) AND approval_status = ?, see the
+        # conditions built above) rather than inventing any new
+        # filtering logic. `approved_requests` (used to compute
+        # status_counts/pending_requests_count above) is ALREADY
+        # filtered to approval_status == 'Approved', so
+        # status=Submitted,Reviewing + approval=Approved together is
+        # the identical factual population, not an approximation --
+        # status alone would incorrectly also match Pending/Returned
+        # requests sitting at dev-status Submitted, which are NOT part
+        # of this count. back= is not needed for this destination
+        # itself (it *is* All Requests), but any request opened FROM
+        # this filtered view still gets a real back= automatically --
+        # the All Requests row-link/back-context code further below
+        # builds it from back_base_url, which already reflects
+        # whatever query string got us here.
         awaiting_review_matches = [r for r in approved_requests if r["status"] in ("Submitted", "Reviewing")]
         if len(awaiting_review_matches) == 1:
             review_url = url_for("product_intelligence_detail", request_id=awaiting_review_matches[0]["id"],
                                   back=back_base_url + "#pi2-attention")
         else:
-            review_url = url_for("product_intelligence", status="Submitted,Reviewing")
+            review_url = url_for("product_intelligence", status="Submitted,Reviewing", approval="Approved") + "#pi2-all-requests"
         attention_items.append({
             "priority": "med", "title": f"{pending_requests_count} new request{'s' if pending_requests_count != 1 else ''} awaiting review",
             "meta": "REQUEST CENTER", "action_label": "Review",

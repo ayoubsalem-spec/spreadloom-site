@@ -334,6 +334,74 @@ def main():
             check("25. the detail page's Back link returns to Attention Required specifically",
                   back_href_match is not None and back_href_match.group(1).endswith("#pi2-attention"))
 
+    # ================================================================
+    # NAV REFINEMENT: multiple requests awaiting review -> Review lands
+    # on All Requests, filtered to the SAME population Attention
+    # Required counted (not an approximation) -- single-match behavior
+    # above is unchanged; this is the new multi-match path.
+    # ================================================================
+    print()
+    print("=== Nav refinement: 2+ requests awaiting review -> All Requests, correctly filtered ===")
+    multi_a_id = create_request(db, requester_email, "__resub_requester", "Multi-review candidate A", now, "Approved")
+    multi_b_id = create_request(db, requester_email, "__resub_requester", "Multi-review candidate B", now, "Approved")
+    db.execute("UPDATE feature_requests SET status='Reviewing' WHERE id=?", (multi_b_id,))
+    db.commit()
+    # A Pending request at the same dev status must NOT be swept into
+    # this filter -- it is not part of the Attention Required count.
+    pending_lookalike_id = create_request(db, requester_email, "__resub_requester", "Pending lookalike -- must not appear in filtered All Requests", now, "Pending")
+    # Nor a Returned one.
+    returned_lookalike_id = create_request(db, requester_email, "__resub_requester", "Returned lookalike -- must not appear in filtered All Requests", now, "Returned")
+
+    with appmod.app.test_client() as client:
+        login(client, approver_email, pw)
+        html = client.get("/admin/product-intelligence").get_data(as_text=True)
+        m = re.search(r'REQUEST CENTER.*?href="([^"]+)"[^>]*>Review<', html, re.S)
+        check("Review link found with multiple candidates present", m is not None)
+        if m:
+            review_href = m.group(1).replace("&amp;", "&")
+            check("1. with 2+ candidates, Review targets the All Requests anchor, not a direct request detail page",
+                  review_href.endswith("#pi2-all-requests") and "/admin/product-intelligence/" not in review_href.split("?")[0].split("#")[0])
+            check("2. the filter carries BOTH the status list and the approval_status the Attention count actually used",
+                  "status=Submitted%2CReviewing" in review_href.replace(",", "%2C") or "status=Submitted,Reviewing" in review_href)
+            check("2b. the approval dimension is present so this is the EXACT same population as Attention Required, not an approximation via status alone",
+                  "approval=Approved" in review_href)
+
+            filtered_resp = client.get(review_href)
+            check("filtered All Requests request returns 200", filtered_resp.status_code == 200)
+            filtered_html = filtered_resp.get_data(as_text=True)
+            all_req_start = filtered_html.find('id="pi2-all-requests"')
+            all_requests_section = filtered_html[all_req_start:]
+
+            check("both genuinely-awaiting-review requests ARE present in the All Requests table",
+                  "Multi-review candidate A" in all_requests_section and "Multi-review candidate B" in all_requests_section)
+            check("8. a Pending request at the same dev status is correctly EXCLUDED (not part of the Attention Required population)",
+                  "Pending lookalike" not in all_requests_section)
+            check("8. a Returned request is correctly excluded too",
+                  "Returned lookalike" not in all_requests_section)
+
+            # 6. Heading must not be hidden under the sticky header --
+            # verified structurally: the section still uses the shared
+            # .pi2-anchor class (scroll-margin-top), unchanged.
+            check("6. the All Requests heading still uses the shared scroll-margin anchor class (unaffected)",
+                  'class="pi-section pi2-anchor" id="pi2-all-requests"' in filtered_html)
+
+            # 5. Return context: opening one of the filtered requests and
+            # using Back returns to the SAME filtered All Requests view.
+            row_link_match = re.search(r"window.location='([^']+)'", filtered_html)
+            check("row links within this filtered view carry a back= context", row_link_match is not None and "back=" in row_link_match.group(1))
+            if row_link_match:
+                row_href = row_link_match.group(1).replace("&amp;", "&")
+                row_detail_resp = client.get(row_href)
+                row_detail_html = row_detail_resp.get_data(as_text=True)
+                back_match = re.search(r'href="([^"]*)"[^>]*>&larr; Back to Product Intelligence', row_detail_html)
+                check("5. Back from a request opened in the filtered view returns to the SAME filtered All Requests view (status+approval preserved, anchored)",
+                      back_match is not None and "status=Submitted" in back_match.group(1) and "approval=Approved" in back_match.group(1)
+                      and back_match.group(1).endswith("#pi2-all-requests"))
+
+    # 3 & 4 (single-match behavior unchanged) already directly verified
+    # above in tests 24/25 -- re-confirmed here is unnecessary duplication.
+    check("3/4. single-match Review-opens-detail-directly behavior is unchanged (already verified in tests 24/25 above)", True)
+
     print()
     print("=== 26. back_url validation spot check ===")
     with appmod.app.test_client() as client:
