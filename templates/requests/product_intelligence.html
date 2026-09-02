@@ -162,9 +162,6 @@
     .pi2-approval-actions .btn { padding:6px 14px; font-size:11.5px; }
     .pi2-approval-review-link { font-size:11px; color:var(--text-faint); text-decoration:none; margin-left:2px; }
     .pi2-approval-review-link:hover { color:var(--text-dim); text-decoration:underline; }
-    .pi2-return-reason { display:none; margin-top:8px; gap:8px; align-items:center; }
-    .pi2-return-reason.open { display:flex; }
-    .pi2-return-reason input[type="text"] { flex:1; min-width:0; max-width:320px; font-size:11.5px; padding:6px 10px; }
     @media (max-width:600px) {
         .pi2-approval-card { flex-direction:column; }
         .pi2-approval-text { max-width:100%; }
@@ -228,7 +225,7 @@
     </a>
 </div>
 {% if status_filter %}
-<p class="sub" style="margin-top:-14px; margin-bottom:20px; font-size:12px;">Filtered &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
+<p class="sub" style="margin-top:-14px; margin-bottom:20px; font-size:12px;">Filtered &middot; <a href="{{ url_for('product_intelligence') }}#pi2-all-requests" style="color:var(--brass);">Clear filter</a></p>
 {% endif %}
 
 <!-- PENDING APPROVAL -- the Procurement Manager's first real destination.
@@ -256,21 +253,26 @@
                 <div class="pi2-approval-text">{{ pr['original_request'] }}</div>
                 {% if is_product_request_approver and current_user.email != pr['requester_email'] %}
                 <div class="pi2-approval-actions">
-                    <form method="POST" action="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}" style="display:inline;">
+                    <button type="button" class="btn btn-gold" onclick="piToggleApprove({{ pr['id'] }})">Approve</button>
+                    <button type="button" class="btn btn-danger" onclick="piToggleReturn({{ pr['id'] }})">Return</button>
+                    <a href="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}?back={{ (back_base_url ~ '#pi2-pending-approval')|urlencode }}" class="pi2-approval-review-link">Review full details &rarr;</a>
+                </div>
+                <div class="pi2-return-reason" id="pi2-approve-{{ pr['id'] }}">
+                    <form method="POST" action="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}" style="display:flex; gap:8px; align-items:center; flex:1; flex-wrap:wrap;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="approve_request">
                         <input type="hidden" name="return_to" value="pending_approval">
-                        <button type="submit" class="btn btn-gold">Approve</button>
+                        <input type="text" name="reason" maxlength="{{ APPROVAL_NOTE_MAX_LENGTH }}" placeholder="Optional note (e.g. &quot;prioritize this for next sprint&quot;)">
+                        <button type="submit" class="btn btn-gold">Confirm Approval</button>
+                        <button type="button" class="btn btn-sm" onclick="piToggleApprove({{ pr['id'] }})">Cancel</button>
                     </form>
-                    <button type="button" class="btn btn-danger" onclick="piToggleReturn({{ pr['id'] }})">Return</button>
-                    <a href="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}?back={{ (back_base_url ~ '#pi2-pending-approval')|urlencode }}" class="pi2-approval-review-link">Review full details &rarr;</a>
                 </div>
                 <div class="pi2-return-reason" id="pi2-return-{{ pr['id'] }}">
                     <form method="POST" action="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}" style="display:flex; gap:8px; align-items:center; flex:1;">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="action" value="return_request">
                         <input type="hidden" name="return_to" value="pending_approval">
-                        <input type="text" name="reason" placeholder="Reason for returning this request (required)" required>
+                        <input type="text" name="reason" maxlength="{{ APPROVAL_NOTE_MAX_LENGTH }}" placeholder="Reason for returning this request (required)" required>
                         <button type="submit" class="btn btn-danger">Confirm Return</button>
                     </form>
                 </div>
@@ -372,8 +374,14 @@
         {% for a in recent_activity[:4] %}
         <div class="pi2-movement-item">
             <span class="pi2-movement-dot"></span>
-            <span class="pi2-movement-text">{{ a['original_request'][:42] }}{% if a['original_request']|length > 42 %}&hellip;{% endif %} &mdash; {{ a['status']|replace('Released','Resolved') }}</span>
-            <span class="pi2-movement-time">{{ a['changed_at']|friendly_short_dt }}</span>
+            <span class="pi2-movement-text">{{ a['original_request'][:42] }}{% if a['original_request']|length > 42 %}&hellip;{% endif %} &mdash;
+                {% if a['kind'] == 'approval' and a['label'] == 'Returned' %}Returned &mdash; Procurement
+                {% elif a['kind'] == 'approval' and a['label'] == 'Approved' %}Approved &mdash; Procurement
+                {% elif a['kind'] == 'resubmission' %}Resubmitted
+                {% else %}{{ a['label']|replace('Released','Resolved') }}
+                {% endif %}
+            </span>
+            <span class="pi2-movement-time">{{ a['at']|friendly_short_dt }}</span>
         </div>
         {% endfor %}
         {% else %}
@@ -547,7 +555,7 @@
 <!-- ALL REQUESTS -->
 <div class="pi-section pi2-anchor" id="pi2-all-requests" style="margin-top:24px;">
     <p class="pi-section-title">All Requests</p>
-    <form method="GET" class="pi-table-toolbar">
+    <form method="GET" class="pi-table-toolbar" action="{{ url_for('product_intelligence') }}#pi2-all-requests">
         <input type="text" id="pi-req-search" placeholder="Search requests..." oninput="ccFilterRequests()" style="max-width:220px;">
         <select name="status" onchange="this.form.submit()">
             <option value="">All statuses</option>
@@ -636,11 +644,13 @@ function ccFilterRequests() {
 // so clicking it opens a small form next to the card instead of either
 // submitting immediately with no reason (which the server would reject
 // anyway) or navigating away to a separate page.
-function piToggleReturn(requestId) {
-    var el = document.getElementById('pi2-return-' + requestId);
+function piToggleReason(elId) {
+    var el = document.getElementById(elId);
     if (!el) return;
     var isOpen = el.classList.contains('open');
-    // Only one open reason field at a time, to keep the inbox calm.
+    // Only one open panel (Approve note OR Return reason, across any
+    // card) at a time, to keep the inbox calm -- shared by both toggles
+    // below since Approve and Return panels use the same CSS class.
     document.querySelectorAll('.pi2-return-reason.open').forEach(function (open) {
         if (open !== el) open.classList.remove('open');
     });
@@ -649,6 +659,14 @@ function piToggleReturn(requestId) {
         var input = el.querySelector('input[type="text"]');
         if (input) input.focus();
     }
+}
+
+function piToggleReturn(requestId) {
+    piToggleReason('pi2-return-' + requestId);
+}
+
+function piToggleApprove(requestId) {
+    piToggleReason('pi2-approve-' + requestId);
 }
 
 (function () {

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "requests/_styles.html" %}
+
+<a href="{{ url_for('request_center') }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; Request Center</a>
+
+<span class="rc-eyebrow">Update &amp; Resubmit</span>
+<h1>Update your request</h1>
+<p class="sub" style="margin-bottom:24px; max-width:560px;">Procurement returned this request. Update the details below and resubmit it for another review -- the same request stays intact, and procurement will see exactly what changed.</p>
+
+<div class="rc-submit" style="border-left:3px solid var(--red); max-width:560px;">
+    <p class="sub" style="margin:0 0 6px; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; color:var(--red);">Procurement returned this request</p>
+    {% if r['approval_reason'] %}
+    <p style="margin:0 0 4px; font-size:14px; line-height:1.5;">&ldquo;{{ r['approval_reason'] }}&rdquo;</p>
+    {% endif %}
+    {% if r['approval_decided_by'] and r['approval_decided_at'] %}
+    <p class="sub" style="margin:0; font-size:11px;">{{ r['approval_decided_by'] }} &middot; {{ r['approval_decided_at']|friendly_short_dt }}</p>
+    {% endif %}
+</div>
+
+<div class="rc-submit" style="max-width:560px;">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label style="margin-top:0;">What do you need?</label>
+        <textarea name="original_request" required>{{ r['original_request'] }}</textarea>
+        <label style="margin-top:14px;">Department</label>
+        <select name="department">
+            <option value="">&mdash; Select department &mdash;</option>
+            {% for opt in department_options %}
+            <option value="{{ opt }}" {{ 'selected' if r['department'] == opt }}>{{ opt }}</option>
+            {% endfor %}
+            {% if r['department'] and r['department'] not in department_options %}
+            <option value="{{ r['department'] }}" selected>{{ r['department'] }} (existing)</option>
+            {% endif %}
+        </select>
+        <div class="rc-submit-foot">
+            <span class="rc-submit-hint">This will go back to Pending Approval</span>
+            <button type="submit" class="btn btn-gold">Resubmit for Approval</button>
+        </div>
+    </form>
+</div>
+{% endblock %}

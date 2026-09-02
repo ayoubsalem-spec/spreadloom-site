@@ -1256,6 +1256,24 @@ def init_db():
             decided_at TEXT NOT NULL,
             FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
         );
+        -- v4 (employee feedback loop / Update & Resubmit): a Resubmission
+        -- is NOT an approval decision -- overloading feature_request_approvals
+        -- with a fake "decision" value for it would corrupt that table's
+        -- actual meaning (every real row there already means "a
+        -- procurement approver made this call", which a resubmission
+        -- specifically is not -- the REQUESTER performs it). Smallest
+        -- clean addition: its own tiny, purely-additive table, exactly
+        -- mirroring feature_request_approvals' shape/intent (an
+        -- append-only event log), so it can be merged into the same
+        -- chronological timeline views without confusing the two kinds
+        -- of event.
+        CREATE TABLE IF NOT EXISTS feature_request_resubmissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_request_id INTEGER NOT NULL,
+            resubmitted_by TEXT NOT NULL,
+            resubmitted_at TEXT NOT NULL,
+            FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
+        );
 
         CREATE TABLE IF NOT EXISTS inventory_concrete_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
@@ -4513,6 +4531,12 @@ def assistant_confirm_write():
 
 
 REQUEST_STATUSES = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
+# Fix 7 (optional approval notes): a reasonable server-side cap, checked
+# in code -- not just the HTML maxlength attribute, which is only a UX
+# hint and never a security/data-integrity boundary on its own. Applies
+# to both the (required) Return reason and the (optional) Approve note,
+# since both are stored in the same field.
+APPROVAL_NOTE_MAX_LENGTH = 500
 CONCRETE_STATUS_OPTIONS = ["Submitted", "Scheduled", "Completed"]
 # Not previously a named constant -- inventory_update_purchase_status /
 # inventory_place_purchase_order use these two literal strings directly.
@@ -4594,8 +4618,125 @@ def request_center():
             "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id",
             (r["id"],)
         ).fetchall()
-        requests_with_history.append({"r": r, "history": history, "attachments": attachments})
+        approval_timeline = _get_approval_timeline(db, r["id"])
+        requests_with_history.append({"r": r, "history": history, "attachments": attachments, "approval_timeline": approval_timeline})
     return render_template("requests/my_requests.html", requests_with_history=requests_with_history, department_options=department_options)
+
+
+@app.route("/requests/<int:request_id>/resubmit", methods=["GET", "POST"])
+@login_required
+def request_resubmit(request_id):
+    """Update & Resubmit for a Returned request -- the missing employee
+    feedback-loop workflow. SAME request_id throughout (no duplicate row
+    ever created): this only ever UPDATEs the existing feature_requests
+    row and appends one feature_request_resubmissions event; it never
+    INSERTs a new feature_requests row.
+
+    AUTHORIZATION (both GET and POST, server-side, never trusting a
+    hidden field): the authoritative DB record is re-read fresh on every
+    request. Only the ORIGINAL requester (current_user.email ==
+    r['requester_email'], read from the DB row itself, never from any
+    client-supplied value) may use this route, and only while
+    approval_status is exactly 'Returned'. An Administrator does not get
+    special access here merely by being an Administrator -- ownership,
+    not role, is the boundary the brief specifically calls for. Pending,
+    Approved, and Released requests all fail this check the same way a
+    stranger's Returned request would.
+    """
+    db = get_db()
+    r = db.execute("SELECT * FROM feature_requests WHERE id = ?", (request_id,)).fetchone()
+    if not r:
+        flash("Request not found.", "error")
+        return redirect(url_for("request_center"))
+    if r["requester_email"] != current_user.email:
+        flash("You can only edit and resubmit your own requests.", "error")
+        return redirect(url_for("request_center"))
+    if r["approval_status"] != "Returned":
+        flash("This request isn't in a state that can be resubmitted.", "error")
+        return redirect(url_for("request_center"))
+
+    if request.method == "POST":
+        text = request.form.get("original_request", "").strip()
+        if not text:
+            flash("Please describe what you need before resubmitting.", "error")
+            return redirect(url_for("request_resubmit", request_id=request_id))
+        # BLOCKER 2 FIX: department must come from the same canonical,
+        # controlled vocabulary Request Center already uses (the real
+        # departments table) -- never arbitrary free text. A submitted
+        # value that isn't in that authoritative list is rejected and
+        # ignored safely: the request's EXISTING department is kept
+        # rather than silently accepting a typo'd/invented value that
+        # would quietly pollute Product Intelligence's department
+        # filters and reporting.
+        submitted_department = request.form.get("department", "").strip()
+        valid_departments = {d["name"] for d in db.execute("SELECT name FROM departments").fetchall()}
+        if submitted_department and submitted_department in valid_departments:
+            department = submitted_department
+        else:
+            department = r["department"]
+        now = datetime.utcnow().isoformat()
+
+        # ATOMIC ONE-WINNER TRANSITION -- same principle as the
+        # Approve/Return concurrency fix: the WHERE clause, not a
+        # Python-side read-then-check, is what actually decides whether
+        # this resubmission is allowed to apply. Two resubmit attempts
+        # against the same Returned row (e.g. a double-click, or two
+        # tabs) can only ever have exactly one winner; the loser's
+        # UPDATE matches zero rows.
+        try:
+            cur = db.execute(
+                """UPDATE feature_requests SET original_request = ?, department = ?,
+                   approval_status = 'Pending', approval_decided_by = NULL,
+                   approval_decided_at = NULL, approval_reason = NULL, updated_at = ?
+                   WHERE id = ? AND approval_status = 'Returned' AND requester_email = ?""",
+                (text, department, now, request_id, current_user.email)
+            )
+            if cur.rowcount == 1:
+                db.execute(
+                    "INSERT INTO feature_request_resubmissions (feature_request_id, resubmitted_by, resubmitted_at) VALUES (?,?,?)",
+                    (request_id, current_user.email, now)
+                )
+                log_activity("product_intelligence", "feature_request", request_id, "updated",
+                             field="approval_status", old_value="Returned", new_value="Pending")
+                db.commit()
+                flash("Request updated and resubmitted for procurement approval.")
+                return redirect(url_for("request_center"))
+            else:
+                db.rollback()
+                flash("This request has already changed -- please review its current state.", "error")
+                return redirect(url_for("request_center"))
+        except sqlite3.OperationalError as e:
+            db.rollback()
+            log_activity("product_intelligence", "feature_request", request_id, "resubmit_contention_error", new_value=str(e))
+            db.commit()
+            flash("That update couldn't be processed right now because of a conflicting update -- please try again.", "error")
+            return redirect(url_for("request_center"))
+
+    approval_timeline = _get_approval_timeline(db, request_id)
+    department_options = [d["name"] for d in db.execute("SELECT name FROM departments ORDER BY name").fetchall()]
+    return render_template("requests/resubmit_request.html", r=r, approval_timeline=approval_timeline, department_options=department_options)
+
+
+def _get_approval_timeline(db, request_id):
+    """The merged, chronological Approve/Return/Resubmit event log for
+    ONE request -- Approved/Returned decisions from
+    feature_request_approvals plus Resubmitted events from
+    feature_request_resubmissions, sorted together. Used by both the
+    employee card (Returned reason + resubmit affordance) and the
+    approver's detail page (so a returned-then-resubmitted request's
+    full story -- original Return reason, who resubmitted it, when --
+    is visible, not just the latest state)."""
+    approvals = db.execute(
+        "SELECT 'approval' AS kind, decision, reason, decided_by AS actor, decided_at AS at "
+        "FROM feature_request_approvals WHERE feature_request_id = ?", (request_id,)
+    ).fetchall()
+    resubmissions = db.execute(
+        "SELECT 'resubmission' AS kind, 'Resubmitted' AS decision, NULL AS reason, resubmitted_by AS actor, resubmitted_at AS at "
+        "FROM feature_request_resubmissions WHERE feature_request_id = ?", (request_id,)
+    ).fetchall()
+    combined = [dict(row) for row in approvals] + [dict(row) for row in resubmissions]
+    combined.sort(key=lambda e: e["at"])
+    return combined
 
 
 def _render_my_requests_for(db, email):
@@ -4616,7 +4757,8 @@ def _render_my_requests_for(db, email):
             "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id",
             (r["id"],)
         ).fetchall()
-        requests_with_history.append({"r": r, "history": history, "attachments": attachments})
+        approval_timeline = _get_approval_timeline(db, r["id"])
+        requests_with_history.append({"r": r, "history": history, "attachments": attachments, "approval_timeline": approval_timeline})
     return requests_with_history
 
 
@@ -4779,10 +4921,29 @@ def product_intelligence():
         key=lambda x: -x["count"]
     )
 
+    # v4 (Latest Movement truthfulness fix): the previous query only
+    # ever looked at feature_request_status_history, so a request whose
+    # most recent REAL event was a procurement Approve/Return/Resubmit
+    # (which don't touch status_history at all -- they're a separate,
+    # independent dimension by design) still showed its stale original
+    # dev-status entry (e.g. "Submitted") as if that were the latest
+    # thing that happened. This does not invent a new unified status
+    # column -- it's a read-only UNION of the three REAL, existing event
+    # tables, ordered by actual timestamp, so whichever genuinely
+    # happened most recently for a request is what's shown for it.
     recent_activity = db.execute(
-        """SELECT h.status, h.changed_by, h.changed_at, f.original_request, f.id as request_id
-           FROM feature_request_status_history h JOIN feature_requests f ON f.id = h.feature_request_id
-           ORDER BY h.changed_at DESC LIMIT 8"""
+        """SELECT * FROM (
+             SELECT 'status' AS kind, h.status AS label, h.changed_by AS actor, h.changed_at AS at, h.feature_request_id AS request_id
+             FROM feature_request_status_history h
+             UNION ALL
+             SELECT 'approval' AS kind, a.decision AS label, a.decided_by AS actor, a.decided_at AS at, a.feature_request_id AS request_id
+             FROM feature_request_approvals a
+             UNION ALL
+             SELECT 'resubmission' AS kind, 'Resubmitted' AS label, r.resubmitted_by AS actor, r.resubmitted_at AS at, r.feature_request_id AS request_id
+             FROM feature_request_resubmissions r
+           ) combined
+           JOIN feature_requests f ON f.id = combined.request_id
+           ORDER BY combined.at DESC LIMIT 8"""
     ).fetchall()
 
     recently_released = db.execute(
@@ -4839,10 +5000,25 @@ def product_intelligence():
 
     pending_requests_count = status_counts.get("Submitted", 0) + status_counts.get("Reviewing", 0)
     if pending_requests_count > 0:
+        # Fix 3 (Attention Required -> Review navigation): when there's
+        # exactly one matching request, open it directly instead of
+        # dropping the user into a filtered All Requests list they then
+        # have to search through themselves. With more than one match,
+        # a single click still can't reasonably pick which one, so the
+        # filtered list (unchanged, existing behavior) is the honest
+        # destination. back= carries them straight back to this section
+        # -- reusing the exact same safe, already-audited back-context
+        # mechanism the rest of Product Intelligence uses, not a new one.
+        awaiting_review_matches = [r for r in approved_requests if r["status"] in ("Submitted", "Reviewing")]
+        if len(awaiting_review_matches) == 1:
+            review_url = url_for("product_intelligence_detail", request_id=awaiting_review_matches[0]["id"],
+                                  back=back_base_url + "#pi2-attention")
+        else:
+            review_url = url_for("product_intelligence", status="Submitted,Reviewing")
         attention_items.append({
             "priority": "med", "title": f"{pending_requests_count} new request{'s' if pending_requests_count != 1 else ''} awaiting review",
             "meta": "REQUEST CENTER", "action_label": "Review",
-            "url": url_for("product_intelligence", status="Submitted,Reviewing")
+            "url": review_url
         })
 
     tomorrow = (today + timedelta(days=1)).isoformat()
@@ -5091,6 +5267,7 @@ def product_intelligence():
         lifecycle=lifecycle, priority_builds=priority_builds, situation=situation,
         pulse=pulse, platform_state=platform_state, ecosystem_atlas=ecosystem_atlas,
         approval_filter=approval_filter, pending_approval_requests=pending_approval_requests,
+        APPROVAL_NOTE_MAX_LENGTH=APPROVAL_NOTE_MAX_LENGTH,
         back_base_url=back_base_url,
     )
 
@@ -5321,6 +5498,9 @@ def product_intelligence_detail(request_id):
             if action == "return_request" and not reason:
                 flash("A reason is required to return a request.", "error")
                 return redirect_after_action()
+            if len(reason) > APPROVAL_NOTE_MAX_LENGTH:
+                flash(f"That note is too long (max {APPROVAL_NOTE_MAX_LENGTH} characters) -- please shorten it and try again.", "error")
+                return redirect_after_action()
 
             decision = "Approved" if action == "approve_request" else "Returned"
 
@@ -5408,10 +5588,11 @@ def product_intelligence_detail(request_id):
         "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
         (request_id,)
     ).fetchall()
-    approval_history = db.execute(
-        "SELECT * FROM feature_request_approvals WHERE feature_request_id = ? ORDER BY decided_at",
-        (request_id,)
-    ).fetchall()
+    # v4: merged Approve/Return/Resubmit timeline (was: approvals only)
+    # -- so an approver reviewing a resubmitted request can see the full
+    # story (original Return + reason, who resubmitted it, when) instead
+    # of only the latest decision.
+    approval_history = _get_approval_timeline(db, request_id)
     intel = db.execute("SELECT * FROM feature_request_intelligence WHERE feature_request_id = ?", (request_id,)).fetchone()
     attachments = db.execute(
         "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id", (request_id,)
@@ -5422,7 +5603,7 @@ def product_intelligence_detail(request_id):
     return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel,
                             statuses=REQUEST_STATUSES, attachments=attachments, department_options=department_options,
                             approval_history=approval_history, can_manage_product_intelligence=can_manage,
-                            can_approve_request=can_approve, back_url=back_url)
+                            can_approve_request=can_approve, back_url=back_url, APPROVAL_NOTE_MAX_LENGTH=APPROVAL_NOTE_MAX_LENGTH)
 
 
 @app.route("/admin/product-intelligence/preview")

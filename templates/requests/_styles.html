@@ -83,6 +83,38 @@
         background:var(--surface-2); color:var(--text-dim); border:1px solid var(--line);
     }
 
+    /* --- Procurement decision layer (v4) -- intentionally distinct from
+       both the development-status badge above it and the .req-offpath
+       treatment used for On Hold/Not Planned, so approval state never
+       visually blends with development state. --- */
+    .req-approval-gate {
+        margin-top:16px; padding:14px 16px; border-radius:6px; font-size:13px;
+    }
+    .req-approval-gate-title {
+        margin:0 0 4px; font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:12.5px;
+        text-transform:uppercase; letter-spacing:0.4px;
+    }
+    .req-approval-gate-body { margin:0; color:var(--text-dim); font-size:13px; line-height:1.5; }
+    .req-approval-gate-pending {
+        background:var(--surface-2); border:1px solid var(--line);
+    }
+    .req-approval-gate-pending .req-approval-gate-title { color:var(--brass); }
+    .req-approval-gate-returned {
+        background:rgba(248,113,113,0.06); border:1px solid var(--red);
+    }
+    .req-approval-gate-returned .req-approval-gate-title { color:var(--red); }
+
+    /* --- Approve/Return inline confirmation panel (shared by the
+       Pending Approval inbox AND the request detail page -- moved here,
+       not duplicated in each template, specifically so both pages get
+       identical panel behavior/appearance from one definition. See
+       piToggleApprove()/piToggleReturn() in each page's own script for
+       why the JS itself is still local to each template rather than
+       shared -- these two pages don't share a script include. --- */
+    .pi2-return-reason { display:none; margin-top:8px; gap:8px; align-items:center; }
+    .pi2-return-reason.open { display:flex; }
+    .pi2-return-reason input[type="text"] { flex:1; min-width:0; max-width:320px; font-size:11.5px; padding:6px 10px; }
+
     /* --- Released / shipped showcase --- */
     .req-released {
         background:linear-gradient(135deg, rgba(94,234,212,0.07), rgba(94,234,212,0.015));

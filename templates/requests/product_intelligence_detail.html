@@ -48,13 +48,30 @@
     {% if r['approval_reason'] %}<p class="sub" style="margin:0 0 12px;">Reason: {{ r['approval_reason'] }}</p>{% endif %}
 
     {% if can_approve_request %}
-    <form method="POST" style="display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <input type="hidden" name="back" value="{{ back_url }}">
-        <input type="text" name="reason" placeholder="Reason (required to return, optional to approve)" style="flex:1; min-width:220px; max-width:360px;">
-        <button type="submit" name="action" value="approve_request" class="btn btn-gold">Approve</button>
-        <button type="submit" name="action" value="return_request" class="btn btn-danger">Return</button>
-    </form>
+    <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+        <button type="button" class="btn btn-gold" onclick="piToggleApprove('{{ r['id'] }}')">Approve</button>
+        <button type="button" class="btn btn-danger" onclick="piToggleReturn('{{ r['id'] }}')">Return</button>
+    </div>
+    <div class="pi2-return-reason" id="pi2-approve-{{ r['id'] }}" style="margin-top:10px;">
+        <form method="POST" style="display:flex; gap:8px; align-items:center; flex:1; flex-wrap:wrap;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="back" value="{{ back_url }}">
+            <input type="hidden" name="action" value="approve_request">
+            <input type="text" name="reason" maxlength="{{ APPROVAL_NOTE_MAX_LENGTH }}" placeholder="Optional note (e.g. &quot;prioritize this for next sprint&quot;)" style="flex:1; min-width:220px; max-width:360px;">
+            <button type="submit" class="btn btn-gold">Confirm Approval</button>
+            <button type="button" class="btn btn-sm" onclick="piToggleApprove('{{ r['id'] }}')">Cancel</button>
+        </form>
+    </div>
+    <div class="pi2-return-reason" id="pi2-return-{{ r['id'] }}" style="margin-top:10px;">
+        <form method="POST" style="display:flex; gap:8px; align-items:center; flex:1; flex-wrap:wrap;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="back" value="{{ back_url }}">
+            <input type="hidden" name="action" value="return_request">
+            <input type="text" name="reason" maxlength="{{ APPROVAL_NOTE_MAX_LENGTH }}" placeholder="Reason for returning this request (required)" required style="flex:1; min-width:220px; max-width:360px;">
+            <button type="submit" class="btn btn-danger">Confirm Return</button>
+            <button type="button" class="btn btn-sm" onclick="piToggleReturn('{{ r['id'] }}')">Cancel</button>
+        </form>
+    </div>
     {% elif r['approval_status'] == 'Pending' %}
     <p class="sub" style="margin:0;">
         {% if current_user.email == r['requester_email'] %}You cannot approve or return your own request.
@@ -66,8 +83,8 @@
     <p class="pi-section-title" style="margin-top:18px;">Approval History</p>
     {% for a in approval_history %}
     <div class="pi-feed-item">
-        <span style="color:{{ 'var(--teal)' if a['decision'] == 'Approved' else 'var(--red)' }};">{{ a['decision'] }}</span>
-        <div class="pi-feed-meta">{{ a['decided_at']|friendly_short_dt }} &middot; {{ a['decided_by'] }}{% if a['reason'] %} &middot; {{ a['reason'] }}{% endif %}</div>
+        <span style="color:{{ 'var(--teal)' if a['decision'] == 'Approved' else 'var(--brass)' if a['decision'] == 'Resubmitted' else 'var(--red)' }};">{{ a['decision'] }}</span>
+        <div class="pi-feed-meta">{{ a['at']|friendly_short_dt }} &middot; {{ a['actor'] }}{% if a['reason'] %} &middot; {{ a['reason'] }}{% endif %}</div>
     </div>
     {% endfor %}
     {% endif %}
@@ -164,4 +181,31 @@
 </div>
 
 <a href="{{ back_url }}" class="btn" style="margin-top:28px; display:inline-block;">&larr; Back to Product Intelligence</a>
+
+<script>
+// Local to this page -- deliberately NOT relying on product_intelligence.html's
+// script (that page is never loaded here), so this detail page's approval
+// UX is self-contained and works identically without any cross-template
+// dependency. Same toggle-panel behavior/semantics as the Pending Approval
+// inbox: Approve/Return each open their own panel, mutually exclusive.
+function piToggleReason(elId) {
+    var el = document.getElementById(elId);
+    if (!el) return;
+    var isOpen = el.classList.contains('open');
+    document.querySelectorAll('.pi2-return-reason.open').forEach(function (open) {
+        if (open !== el) open.classList.remove('open');
+    });
+    el.classList.toggle('open', !isOpen);
+    if (!isOpen) {
+        var input = el.querySelector('input[type="text"]');
+        if (input) input.focus();
+    }
+}
+function piToggleApprove(requestId) {
+    piToggleReason('pi2-approve-' + requestId);
+}
+function piToggleReturn(requestId) {
+    piToggleReason('pi2-return-' + requestId);
+}
+</script>
 {% endblock %}

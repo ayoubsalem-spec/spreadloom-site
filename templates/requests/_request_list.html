@@ -34,11 +34,34 @@
     </div>
     {% endif %}
 
+    {% if r['approval_status'] == 'Pending' %}
+    <!-- Procurement decision layer -- intentionally separate from the
+         development-status badge/timeline above: approval and
+         development status are independent, and the UI says so. -->
+    <div class="req-approval-gate req-approval-gate-pending">
+        <p class="req-approval-gate-title">Awaiting Procurement Approval</p>
+        <p class="req-approval-gate-body">Procurement reviews every request before it enters the development pipeline. You'll see this move to Reviewing once it's approved.</p>
+    </div>
+    {% elif r['approval_status'] == 'Returned' %}
+    <div class="req-approval-gate req-approval-gate-returned">
+        <p class="req-approval-gate-title">Returned &mdash; Action Needed</p>
+        {% if r['approval_reason'] %}
+        <p class="req-approval-gate-body">Procurement returned this request:<br>&ldquo;{{ r['approval_reason'] }}&rdquo;</p>
+        {% else %}
+        <p class="req-approval-gate-body">Procurement returned this request for changes.</p>
+        {% endif %}
+        <a href="{{ url_for('request_resubmit', request_id=r['id']) }}" class="btn btn-danger" style="margin-top:10px; display:inline-block;">Update &amp; Resubmit</a>
+    </div>
+    {% endif %}
+
     {% if r['status'] in ('On Hold', 'Not Planned') %}
     <div class="req-offpath">
         {% if r['status'] == 'On Hold' %}This one's on hold for now -- it'll pick back up when it's ready.{% else %}Not currently planned, but every request helps shape what gets built next.{% endif %}
     </div>
-    {% else %}
+    {% elif r['approval_status'] == 'Approved' %}
+    {% if r['approval_reason'] %}
+    <p class="sub" style="font-size:11.5px; margin:2px 0 10px; color:var(--teal);">Procurement note: &ldquo;{{ r['approval_reason'] }}&rdquo;</p>
+    {% endif %}
     <div class="req-timeline">
         {% for step in pipeline_steps %}
         {% set reached = item.history|selectattr('status', 'equalto', step)|list %}
