@@ -126,6 +126,50 @@
     .pi2-eco-metric { flex:1; font-size:11px; color:var(--text-dim); min-width:0; }
     .pi2-eco-spark { width:78px; height:22px; flex-shrink:0; }
     @media (max-width:640px) { .pi2-eco-status { display:none; } .pi2-eco-spark { display:none; } }
+
+    /* PI flow refinement -- every section anchor uses this ONE shared
+       class instead of scattered inline scroll-margin-top values (which
+       were all set to a token 16px, far too small to clear the sticky
+       global titlebar (~78px tall -- see .cc-jumpnav's own top:78px a
+       few lines below in _styles.html, which already had to account for
+       the same header) -- so jumping to any section left its heading
+       partially hidden underneath the header. One class, one value,
+       applied consistently to every anchor below -- not a per-section
+       fix, and not a JS scroll calculation to keep in sync by hand. */
+    .pi2-anchor { scroll-margin-top: 96px; }
+
+    /* Active-section indicator for the left jump-nav -- subtle border
+       accent only, no color/background flash, no animation. */
+    .cc-jumpnav a.jn-active { color:var(--text); border-left:2px solid var(--brass); padding-left:6px; margin-left:-8px; }
+    .cc-jumpnav a.jn-active .jn-dot { background:var(--brass); }
+    /* PENDING APPROVAL inbox -- the Procurement Manager's first real
+       destination. Deliberately styled as a distinct, list-like inbox
+       (not a smaller copy of the All Requests table, and not styled to
+       resemble the development-status badges elsewhere on this page) --
+       approval is its own dimension from development status, and the
+       UI says so at a glance, not just in the data model. */
+    .pi2-approval-inbox { display:flex; flex-direction:column; gap:0; }
+    .pi2-approval-card { display:flex; gap:14px; align-items:flex-start; padding:14px 4px; border-bottom:1px solid var(--line); }
+    .pi2-approval-card:last-child { border-bottom:none; }
+    .pi2-approval-avatar { width:34px; height:34px; border-radius:50%; background:var(--surface-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13px; color:var(--text-dim); flex-shrink:0; }
+    .pi2-approval-body { flex:1; min-width:0; }
+    .pi2-approval-top { display:flex; justify-content:space-between; align-items:baseline; gap:10px; flex-wrap:wrap; }
+    .pi2-approval-requester { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13px; }
+    .pi2-approval-dept { font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.4px; }
+    .pi2-approval-time { font-size:10.5px; color:var(--text-faint); flex-shrink:0; }
+    .pi2-approval-text { font-size:12.5px; color:var(--text-dim); margin-top:3px; line-height:1.45; max-width:560px; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+    .pi2-approval-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; align-items:center; }
+    .pi2-approval-actions .btn { padding:6px 14px; font-size:11.5px; }
+    .pi2-approval-review-link { font-size:11px; color:var(--text-faint); text-decoration:none; margin-left:2px; }
+    .pi2-approval-review-link:hover { color:var(--text-dim); text-decoration:underline; }
+    .pi2-return-reason { display:none; margin-top:8px; gap:8px; align-items:center; }
+    .pi2-return-reason.open { display:flex; }
+    .pi2-return-reason input[type="text"] { flex:1; min-width:0; max-width:320px; font-size:11.5px; padding:6px 10px; }
+    @media (max-width:600px) {
+        .pi2-approval-card { flex-direction:column; }
+        .pi2-approval-text { max-width:100%; }
+        .pi2-return-reason input[type="text"] { max-width:100%; }
+    }
 </style>
 
 <div class="cc-shell">
@@ -134,14 +178,15 @@
     <h1 style="font-size:20px; margin-bottom:6px;">BuildIQ Command Center</h1>
     <p class="sub" style="font-size:11.5px; margin-bottom:22px; line-height:1.5;">What we're building, what needs attention, and where the platform is heading.</p>
     <div class="cc-jumpnav-label">Jump to</div>
-    <a href="#pi2-builds" class="jn-brass"><span class="jn-dot"></span>Priority Builds</a>
-    <a href="#pi2-lifecycle" class="jn-brass"><span class="jn-dot"></span>Request Lifecycle</a>
-    <a href="#pi2-attention"><span class="jn-dot"></span>Attention Required</a>
-    <a href="#pi2-pulse" class="jn-teal"><span class="jn-dot"></span>BuildIQ Pulse</a>
-    <a href="#pi2-resolved" class="jn-teal"><span class="jn-dot"></span>Recently Resolved</a>
-    <a href="#pi2-direction" class="jn-brass"><span class="jn-dot"></span>Build Direction</a>
-    <a href="#pi2-ecosystem" class="jn-teal"><span class="jn-dot"></span>BuildIQ Ecosystem</a>
-    <a href="#pi2-all-requests"><span class="jn-dot"></span>All Requests</a>
+    <a href="#pi2-pending-approval" id="jn-pi2-pending-approval"><span class="jn-dot"></span>Pending Approval</a>
+    <a href="#pi2-attention" id="jn-pi2-attention"><span class="jn-dot"></span>Attention Required</a>
+    <a href="#pi2-builds" class="jn-brass" id="jn-pi2-builds"><span class="jn-dot"></span>Priority Builds</a>
+    <a href="#pi2-lifecycle" class="jn-brass" id="jn-pi2-lifecycle"><span class="jn-dot"></span>Request Lifecycle</a>
+    <a href="#pi2-pulse" class="jn-teal" id="jn-pi2-pulse"><span class="jn-dot"></span>BuildIQ Pulse</a>
+    <a href="#pi2-resolved" class="jn-teal" id="jn-pi2-resolved"><span class="jn-dot"></span>Recently Resolved</a>
+    <a href="#pi2-direction" class="jn-brass" id="jn-pi2-direction"><span class="jn-dot"></span>Build Direction</a>
+    <a href="#pi2-ecosystem" class="jn-teal" id="jn-pi2-ecosystem"><span class="jn-dot"></span>BuildIQ Ecosystem</a>
+    <a href="#pi2-all-requests" id="jn-pi2-all-requests"><span class="jn-dot"></span>All Requests</a>
 </div>
 <div class="cc-main">
 
@@ -157,7 +202,7 @@
 
 <!-- COMPACT STATUS STRIP -->
 <div class="pi2-strip">
-    <a href="{{ url_for('product_intelligence') }}" class="pi2-strip-item {{ 'active' if not status_filter }}">
+    <a href="{{ url_for('product_intelligence') }}#pi2-all-requests" class="pi2-strip-item {{ 'active' if not status_filter }}">
         <div class="pi2-strip-value">{{ kpi.total }}</div>
         <div class="pi2-strip-label">Total Requests</div>
     </a>
@@ -173,17 +218,112 @@
         <div class="pi2-strip-value" style="color:var(--teal);">{{ kpi.released }}</div>
         <div class="pi2-strip-label">Resolved</div>
     </a>
-    <a href="#pi2-attention" class="pi2-strip-item">
+    <a href="#pi2-attention" class="pi2-strip-item pi2-anchor-link">
         <div class="pi2-strip-value" style="color:{{ 'var(--red)' if situation.blockers else 'var(--text-dim)' }};">{{ attention_items|length }}</div>
         <div class="pi2-strip-label">Need Attention</div>
+    </a>
+    <a href="{{ url_for('product_intelligence') }}#pi2-pending-approval" class="pi2-strip-item {{ 'active' if approval_filter == 'Pending' }}">
+        <div class="pi2-strip-value" style="color:{{ 'var(--red)' if kpi.pending_approval else 'var(--text-dim)' }};">{{ kpi.pending_approval }}</div>
+        <div class="pi2-strip-label">Pending Approval</div>
     </a>
 </div>
 {% if status_filter %}
 <p class="sub" style="margin-top:-14px; margin-bottom:20px; font-size:12px;">Filtered &middot; <a href="{{ url_for('product_intelligence') }}" style="color:var(--brass);">Clear filter</a></p>
 {% endif %}
 
+<!-- PENDING APPROVAL -- the Procurement Manager's first real destination.
+     Approval is an independent dimension from development status (see
+     the meeting-batch approval-gate architecture) and looks like one
+     here: a plain inbox, not a smaller All Requests table and not
+     styled with the development-status badges used everywhere else on
+     this page. -->
+<p class="pi-section-title pi2-anchor" id="pi2-pending-approval" style="margin-bottom:4px;">Pending Approval</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Requests waiting for a procurement decision before they can enter development.</p>
+<div class="card">
+    {% if pending_approval_requests %}
+    <div class="pi2-approval-inbox">
+        {% for pr in pending_approval_requests %}
+        <div class="pi2-approval-card">
+            <div class="pi2-approval-avatar">{{ (pr['requester_name'] or pr['requester_email'] or '?')[0]|upper }}</div>
+            <div class="pi2-approval-body">
+                <div class="pi2-approval-top">
+                    <span>
+                        <span class="pi2-approval-requester">{{ pr['requester_name'] or pr['requester_email'] }}</span>
+                        {% if pr['department'] %}<span class="pi2-approval-dept">&nbsp;&middot; {{ pr['department'] }}</span>{% endif %}
+                    </span>
+                    <span class="pi2-approval-time">{{ pr['created_at']|friendly_short_dt }}</span>
+                </div>
+                <div class="pi2-approval-text">{{ pr['original_request'] }}</div>
+                {% if is_product_request_approver and current_user.email != pr['requester_email'] %}
+                <div class="pi2-approval-actions">
+                    <form method="POST" action="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}" style="display:inline;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="approve_request">
+                        <input type="hidden" name="return_to" value="pending_approval">
+                        <button type="submit" class="btn btn-gold">Approve</button>
+                    </form>
+                    <button type="button" class="btn btn-danger" onclick="piToggleReturn({{ pr['id'] }})">Return</button>
+                    <a href="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}?back={{ (back_base_url ~ '#pi2-pending-approval')|urlencode }}" class="pi2-approval-review-link">Review full details &rarr;</a>
+                </div>
+                <div class="pi2-return-reason" id="pi2-return-{{ pr['id'] }}">
+                    <form method="POST" action="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}" style="display:flex; gap:8px; align-items:center; flex:1;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="action" value="return_request">
+                        <input type="hidden" name="return_to" value="pending_approval">
+                        <input type="text" name="reason" placeholder="Reason for returning this request (required)" required>
+                        <button type="submit" class="btn btn-danger">Confirm Return</button>
+                    </form>
+                </div>
+                {% elif current_user.email == pr['requester_email'] %}
+                <p class="sub" style="font-size:11px; margin-top:8px;">This is your own request &mdash; another approver needs to review it.</p>
+                {% else %}
+                <a href="{{ url_for('product_intelligence_detail', request_id=pr['id']) }}?back={{ (back_base_url ~ '#pi2-pending-approval')|urlencode }}" class="pi2-approval-review-link">Review full details &rarr;</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="pi2-attention-clear">
+        <div class="pi2-attention-clear-icon">&#10003;</div>
+        <div>
+            <div style="font-family:'Space Grotesk',sans-serif; font-weight:700; color:var(--teal); font-size:14px;">Clear</div>
+            <p class="sub" style="font-size:12px; margin:2px 0 0;">No requests are waiting for approval.</p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+<!-- ATTENTION REQUIRED -->
+<p class="pi-section-title pi2-anchor" id="pi2-attention" style="margin-bottom:4px; margin-top:20px;">Attention Required</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Items that need your immediate action.</p>
+<div class="card">
+    {% if attention_items %}
+    <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0 20px;">
+        {% for item in attention_items %}
+        <div class="cc-queue-item" style="padding:8px 0;">
+            <div class="cc-queue-pri {{ 'cc-pri-high' if item.priority == 'high' else 'cc-pri-med' }}"></div>
+            <div style="flex:1; min-width:0;">
+                <div class="cc-queue-title" style="font-size:12px;">{{ item.title }}</div>
+                <div class="cc-queue-meta">{{ item.meta }}</div>
+            </div>
+            <a href="{{ item.url }}" class="cc-queue-action">{{ item.action_label }}</a>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="pi2-attention-clear">
+        <div class="pi2-attention-clear-icon">&#10003;</div>
+        <div>
+            <div style="font-family:'Space Grotesk',sans-serif; font-weight:700; color:var(--teal); font-size:14px;">Clear</div>
+            <p class="sub" style="font-size:12px; margin:2px 0 0;">No product-development blockers currently require attention.</p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
 <!-- PRIORITY BUILDS + SITUATION -->
-<p class="pi-section-title" id="pi2-builds" style="margin-bottom:4px; scroll-margin-top:16px;">Priority Builds</p>
+<p class="pi-section-title pi2-anchor" id="pi2-builds" style="margin-bottom:4px; margin-top:20px;">Priority Builds</p>
 <p class="sub" style="font-size:12px; margin-bottom:14px;">Our top development priorities and current focus.</p>
 <div class="pi2-hero-grid">
     <div>
@@ -243,8 +383,8 @@
 </div>
 
 <!-- REQUEST LIFECYCLE -->
-<p class="pi-section-title" id="pi2-lifecycle" style="margin-bottom:4px; scroll-margin-top:16px;">Request Lifecycle</p>
-<p class="sub" style="font-size:12px; margin-bottom:14px;">Where requests are in the development pipeline.</p>
+<p class="pi-section-title pi2-anchor" id="pi2-lifecycle" style="margin-bottom:4px;">Request Lifecycle</p>
+<p class="sub" style="font-size:12px; margin-bottom:14px;">Where APPROVED requests are in the development pipeline. Pending/Returned requests are tracked separately above until a decision is made.</p>
 <div class="card" style="padding:20px 18px;">
     <div class="pi2-lifecycle">
         {% for stage in lifecycle %}
@@ -257,38 +397,10 @@
     </div>
 </div>
 
-<!-- ATTENTION REQUIRED -->
-<p class="pi-section-title" id="pi2-attention" style="margin-bottom:4px; scroll-margin-top:16px;">Attention Required</p>
-<p class="sub" style="font-size:12px; margin-bottom:14px;">Items that need your immediate action.</p>
-<div class="card">
-    {% if attention_items %}
-    <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:0 20px;">
-        {% for item in attention_items %}
-        <div class="cc-queue-item" style="padding:8px 0;">
-            <div class="cc-queue-pri {{ 'cc-pri-high' if item.priority == 'high' else 'cc-pri-med' }}"></div>
-            <div style="flex:1; min-width:0;">
-                <div class="cc-queue-title" style="font-size:12px;">{{ item.title }}</div>
-                <div class="cc-queue-meta">{{ item.meta }}</div>
-            </div>
-            <a href="{{ item.url }}" class="cc-queue-action">{{ item.action_label }}</a>
-        </div>
-        {% endfor %}
-    </div>
-    {% else %}
-    <div class="pi2-attention-clear">
-        <div class="pi2-attention-clear-icon">&#10003;</div>
-        <div>
-            <div style="font-family:'Space Grotesk',sans-serif; font-weight:700; color:var(--teal); font-size:14px;">Clear</div>
-            <p class="sub" style="font-size:12px; margin:2px 0 0;">No product-development blockers currently require attention.</p>
-        </div>
-    </div>
-    {% endif %}
-</div>
-
 <!-- BUILDIQ PULSE + RECENTLY RESOLVED -->
 <div class="pi-two-col" style="margin-top:20px;">
     <div>
-        <p class="pi-section-title" id="pi2-pulse" style="margin-bottom:4px; scroll-margin-top:16px;">BuildIQ Pulse <span class="dim">last 14 days</span></p>
+        <p class="pi-section-title pi2-anchor" id="pi2-pulse" style="margin-bottom:4px;">BuildIQ Pulse <span class="dim">last 14 days</span></p>
         <div class="card" style="margin-top:14px;">
             <div class="pi2-pulse-row">
                 <div class="pi2-pulse-tile"><div class="pi2-pulse-value" style="color:#5AC8E0;">{{ pulse.requests_received }}</div><div class="pi2-pulse-label">Received</div></div>
@@ -317,7 +429,7 @@
     </div>
 
     <div>
-        <p class="pi-section-title" id="pi2-resolved" style="margin-bottom:4px; scroll-margin-top:16px;">Recently Resolved</p>
+        <p class="pi-section-title pi2-anchor" id="pi2-resolved" style="margin-bottom:4px;">Recently Resolved</p>
         <div class="card" style="margin-top:14px; max-height:280px; overflow-y:auto;">
             {% if recently_released %}
             {% for r in recently_released %}
@@ -325,7 +437,7 @@
                 <div class="pi-resolved-icon">&#10003;</div>
                 <div class="pi-resolved-body">
                     <div class="pi-resolved-top">
-                        <a href="{{ url_for('product_intelligence_detail', request_id=r['id']) }}" class="pi-resolved-title" style="text-decoration:none; color:inherit;">{{ r['original_request'] }}</a>
+                        <a href="{{ url_for('product_intelligence_detail', request_id=r['id']) }}?back={{ (back_base_url ~ '#pi2-resolved')|urlencode }}" class="pi-resolved-title" style="text-decoration:none; color:inherit;">{{ r['original_request'] }}</a>
                         {% if r['buildiq_module'] %}<span class="pi-resolved-module">{{ r['buildiq_module'] }}</span>{% endif %}
                     </div>
                     <div class="pi2-eco-metric">{{ r['department'] or '' }}{% if r['department'] %} &middot; {% endif %}{{ r['changed_at']|friendly_short_dt }}</div>
@@ -340,7 +452,7 @@
 </div>
 
 <!-- BUILD DIRECTION -->
-<p class="pi-section-title" id="pi2-direction" style="margin-bottom:4px; margin-top:20px; scroll-margin-top:16px;">Build Direction</p>
+<p class="pi-section-title pi2-anchor" id="pi2-direction" style="margin-bottom:4px; margin-top:20px;">Build Direction</p>
 <div class="pi2-direction-wrap">
 <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:14px; gap:12px; flex-wrap:wrap;">
     <p class="sub" style="font-size:12px; margin:0;">Our roadmap and development focus.</p>
@@ -394,7 +506,7 @@
 </div>
 
 <!-- BUILDIQ ECOSYSTEM -->
-<p class="pi-section-title" id="pi2-ecosystem" style="margin-bottom:4px; margin-top:20px; scroll-margin-top:16px;">BuildIQ Ecosystem</p>
+<p class="pi-section-title pi2-anchor" id="pi2-ecosystem" style="margin-bottom:4px; margin-top:20px;">BuildIQ Ecosystem</p>
 <p class="sub" style="font-size:12px; margin-bottom:14px;">Connected modules, centered on the shared Project Core identity layer.</p>
 <div class="card" style="padding:16px 18px;">
     <div class="pi2-eco-hub">
@@ -433,7 +545,7 @@
 </div>
 
 <!-- ALL REQUESTS -->
-<div class="pi-section" id="pi2-all-requests" style="margin-top:24px; scroll-margin-top:16px;">
+<div class="pi-section pi2-anchor" id="pi2-all-requests" style="margin-top:24px;">
     <p class="pi-section-title">All Requests</p>
     <form method="GET" class="pi-table-toolbar">
         <input type="text" id="pi-req-search" placeholder="Search requests..." oninput="ccFilterRequests()" style="max-width:220px;">
@@ -449,7 +561,11 @@
             <option value="{{ d }}" {{ 'selected' if department_filter == d }}>{{ d }}</option>
             {% endfor %}
         </select>
+        {% if approval_filter %}<input type="hidden" name="approval" value="{{ approval_filter }}">{% endif %}
     </form>
+    {% if approval_filter %}
+    <p class="sub" style="margin:8px 0 0;">Showing: <strong>{{ approval_filter }} Approval</strong> &mdash; <a href="{{ url_for('product_intelligence', status=status_filter, department=department_filter) }}#pi2-all-requests">clear</a></p>
+    {% endif %}
     <p id="pi-req-no-match" class="sub" style="display:none;">No requests match your search.</p>
 
     {% if requests %}
@@ -462,7 +578,7 @@
             <th>Submitted</th>
         </tr>
         {% for r in requests %}
-        <tr onclick="window.location='{{ url_for('product_intelligence_detail', request_id=r['id']) }}'" style="cursor:pointer;" data-search="{{ (r['original_request'] ~ ' ' ~ (r['department'] or '') ~ ' ' ~ (r['requester_name'] or r['requester_email'] or ''))|lower }}">
+        <tr onclick="window.location='{{ url_for('product_intelligence_detail', request_id=r['id']) }}?back={{ (back_base_url ~ '#pi2-all-requests')|urlencode }}'" style="cursor:pointer;" data-search="{{ (r['original_request'] ~ ' ' ~ (r['department'] or '') ~ ' ' ~ (r['requester_name'] or r['requester_email'] or ''))|lower }}">
             <td style="max-width:400px;">
                 <div class="pi-req-title" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ r['original_request'] }}</div>
                 <div class="pi-req-id">REQ-{{ '%03d'|format(r['id']) }}</div>
@@ -472,6 +588,11 @@
                 {% set meta = status_meta(r['status'])|trim %}
                 {% set badge_class = meta.split('|')[0] %}
                 <span class="rc-badge {{ badge_class }}">{{ r['status']|replace('Released','Resolved') }}</span>
+                {% if r['approval_status'] == 'Pending' %}
+                <span class="rc-badge" style="background:rgba(248,113,113,0.12); color:var(--red); margin-left:4px;" title="Awaiting procurement approval">Pending Approval</span>
+                {% elif r['approval_status'] == 'Returned' %}
+                <span class="rc-badge" style="background:rgba(248,113,113,0.10); color:var(--red); margin-left:4px;" title="Returned by procurement">Returned</span>
+                {% endif %}
             </td>
             <td>
                 <div style="display:flex; align-items:center; gap:7px;">
@@ -502,5 +623,69 @@ function ccFilterRequests() {
     });
     document.getElementById('pi-req-no-match').style.display = (visible === 0 && rows.length > 0) ? 'block' : 'none';
 }
+
+// Active-section jump-nav highlighting. Deliberately NOT hardcoded pixel
+// math: rootMargin below is expressed relative to the shared CSS anchor
+// offset already used for scroll-margin-top (.pi2-anchor, 96px) via a
+// single JS constant that mirrors it -- one number to keep in sync, not
+// scattered per-section calculations. IntersectionObserver only, no
+// dependency, no continuous scroll-listener/animation loop -- it fires
+// only when a section actually crosses the threshold.
+// Reveals the inline "reason" field for a Return action -- Return
+// requires a reason (server-enforced; this is just the matching UI),
+// so clicking it opens a small form next to the card instead of either
+// submitting immediately with no reason (which the server would reject
+// anyway) or navigating away to a separate page.
+function piToggleReturn(requestId) {
+    var el = document.getElementById('pi2-return-' + requestId);
+    if (!el) return;
+    var isOpen = el.classList.contains('open');
+    // Only one open reason field at a time, to keep the inbox calm.
+    document.querySelectorAll('.pi2-return-reason.open').forEach(function (open) {
+        if (open !== el) open.classList.remove('open');
+    });
+    el.classList.toggle('open', !isOpen);
+    if (!isOpen) {
+        var input = el.querySelector('input[type="text"]');
+        if (input) input.focus();
+    }
+}
+
+(function () {
+    var ANCHOR_OFFSET_PX = 96; // must match .pi2-anchor's scroll-margin-top above
+    var sections = Array.prototype.slice.call(document.querySelectorAll('.pi2-anchor[id]'));
+    var navLinks = {};
+    sections.forEach(function (s) {
+        var link = document.getElementById('jn-' + s.id);
+        if (link) navLinks[s.id] = link;
+    });
+    if (!sections.length || !window.IntersectionObserver) return;
+
+    var currentActiveId = null;
+    function setActive(id) {
+        if (id === currentActiveId) return;
+        if (currentActiveId && navLinks[currentActiveId]) navLinks[currentActiveId].classList.remove('jn-active');
+        if (id && navLinks[id]) navLinks[id].classList.add('jn-active');
+        currentActiveId = id;
+    }
+
+    var observer = new IntersectionObserver(function (entries) {
+        // Pick whichever observed section is currently closest to the
+        // top of the viewport among those still intersecting -- avoids
+        // flicker when two short sections are both partially visible
+        // near a boundary.
+        var visible = entries.filter(function (e) { return e.isIntersecting; });
+        if (!visible.length) return;
+        visible.sort(function (a, b) { return a.boundingClientRect.top - b.boundingClientRect.top; });
+        setActive(visible[0].target.id);
+    }, {
+        // Treat a section as "current" once its heading has cleared the
+        // sticky header (top margin matches the anchor offset) and
+        // until it's most of the way off-screen at the bottom.
+        rootMargin: '-' + ANCHOR_OFFSET_PX + 'px 0px -70% 0px',
+        threshold: 0
+    });
+    sections.forEach(function (s) { observer.observe(s); });
+})();
 </script>
 {% endblock %}

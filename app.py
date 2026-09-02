@@ -513,6 +513,17 @@ def is_whatsapp_admin():
         return False
     return user_has_permission(current_user, "action:team_admin:manage_whatsapp")
 
+
+def is_product_request_approver():
+    # RUNTIME AUTHORIZATION -- same as is_project_hunt_allowed() above.
+    # Item 3: whoever holds action:product_intelligence:approve_requests
+    # (via role or direct grant -- see ROLE_DEFAULT_PERMISSIONS above) is
+    # the procurement approver. Nothing here names a specific person; the
+    # authority moves if the permission grant moves.
+    if not current_user.is_authenticated:
+        return False
+    return user_has_permission(current_user, "action:product_intelligence:approve_requests")
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
@@ -522,6 +533,18 @@ def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
+        # Concurrency fix (Product Intelligence approval-gate atomicity
+        # review): with no busy_timeout, two genuinely simultaneous
+        # writers on two separate connections/threads can hit SQLite's
+        # own "database is locked" error immediately rather than one of
+        # them briefly waiting -- turning an ordinary race into an
+        # unhandled exception instead of a clean one-winner outcome.
+        # This makes a losing writer wait briefly for the winner's
+        # short transaction to finish, then proceed normally (and, for
+        # the approval transition below, correctly see rowcount==0
+        # because the winner already committed) instead of erroring.
+        # Connection-level setting only -- no schema change.
+        g.db.execute("PRAGMA busy_timeout = 5000")
     return g.db
 
 
@@ -593,6 +616,7 @@ def inject_permissions():
         "has_activity_log_access": _authorized("action:activity_log:view"),
         "has_manage_users_access": _authorized("action:team_admin:manage_users"),
         "has_manage_inventory_access": _authorized("action:sitepulse:manage_inventory"),
+        "is_product_request_approver": is_product_request_approver(),
         # Explicit, dedicated flag for the temporary Atlas Voice
         # Diagnostics panel (templates/assistant.html) -- see
         # ATLAS_VOICE_DIAGNOSTICS above. Independent of APP_ENV; defaults
@@ -781,6 +805,16 @@ PERMISSION_CATALOG = [
     ("action:sitepulse:manage", "action", "Manage SitePulse Requests"),
     ("action:sitepulse:place_order", "action", "Place Purchase Orders"),
     ("action:product_intelligence:manage", "action", "Manage Product Intelligence"),
+    # Procurement approval gate (item 3): deliberately a SEPARATE
+    # permission from action:product_intelligence:manage above -- the
+    # procurement approver (e.g. a Procurement Manager) is not
+    # necessarily the same person as whoever manages the dev pipeline
+    # (Ayoub), and shouldn't need to be granted full PI-manage rights
+    # just to approve/return incoming requests. No name/email is
+    # hardcoded anywhere -- whoever holds this permission (via role or
+    # direct grant) is the approver, and that can change with zero code
+    # changes.
+    ("action:product_intelligence:approve_requests", "action", "Approve Product Requests (Procurement)"),
     ("action:team_admin:manage_users", "action", "Manage Users"),
     ("action:team_admin:manage_whatsapp", "action", "Manage WhatsApp Groups"),
     # -- Phase 3A additions: these three existed as gaps in the Phase 2
@@ -811,6 +845,13 @@ ROLE_DEFAULT_PERMISSIONS = {
     "Procurement": [
         "module:sitepulse:view", "action:sitepulse:manage", "action:sitepulse:place_order",
         "module:equipment_center:view", "action:equipment_center:manage",
+        # Item 3 (procurement approval gate): Procurement approvers need
+        # to see the Product Intelligence "Pending Approval" queue and
+        # act on it -- module:product_intelligence:view (see) plus the
+        # dedicated approve_requests action (act), NOT the broader
+        # action:product_intelligence:manage (that stays scoped to
+        # whoever runs the dev pipeline, e.g. Ayoub).
+        "module:product_intelligence:view", "action:product_intelligence:approve_requests",
     ],
     "Estimator": [
         "module:project_hunt:view",
@@ -878,6 +919,24 @@ def _grant_administrator_new_permissions(db, keys):
     admin has already configured, and every existing admin keeps every
     permission they already had."""
     role_row = db.execute("SELECT id FROM roles WHERE name = 'Administrator'").fetchone()
+    if not role_row:
+        return
+    role_id = role_row[0]
+    for key in keys:
+        perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
+        if perm_row:
+            db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (role_id, perm_row[0]))
+
+
+def _grant_role_new_permissions(db, role_name, keys):
+    """Same idea as _grant_administrator_new_permissions, generalized to
+    any role -- used for item 3 (procurement approval gate) so existing
+    Procurement role holders actually receive the new
+    action:product_intelligence:approve_requests permission (and the
+    module:product_intelligence:view it depends on) without their
+    role's other, possibly hand-edited, permissions being touched.
+    Idempotent (INSERT OR IGNORE) and purely additive."""
+    role_row = db.execute("SELECT id FROM roles WHERE name = ?", (role_name,)).fetchone()
     if not role_row:
         return
     role_id = role_row[0]
@@ -1179,6 +1238,24 @@ def init_db():
             created_at TEXT,
             FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
         );
+        -- Procurement approval gate (independent dimension from the
+        -- feature_requests.status dev-lifecycle column -- see the long
+        -- comment above _log_request_status()/product_intelligence()
+        -- for why these are deliberately NOT the same field). Mirrors
+        -- the existing status/feature_request_status_history pattern:
+        -- feature_requests carries a fast "current decision" cache
+        -- (columns added via the ALTER block below, since this table
+        -- already existed before this feature), this table is the full
+        -- audit trail of every decision ever made (not just the latest).
+        CREATE TABLE IF NOT EXISTS feature_request_approvals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            feature_request_id INTEGER NOT NULL,
+            decision TEXT NOT NULL,
+            reason TEXT,
+            decided_by TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
+        );
 
         CREATE TABLE IF NOT EXISTS inventory_concrete_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
@@ -1309,11 +1386,46 @@ def init_db():
         "ALTER TABLE inventory_purchase_requests ADD COLUMN project_id INTEGER",
         "ALTER TABLE sitepulse_usage_log ADD COLUMN project_id INTEGER",
         "ALTER TABLE sitepulse_rentals ADD COLUMN project_id INTEGER",
+        # Procurement approval gate columns (see feature_request_approvals
+        # above). Deliberately NO SQL-level DEFAULT here -- rows that
+        # existed before this migration must come through as NULL so the
+        # one-time backfill below (and only that backfill) can mark them
+        # 'Approved' explicitly, once, conservatively. Every new insert
+        # after this point sets approval_status itself (in request_center()
+        # below) -- it never relies on a column default.
+        "ALTER TABLE feature_requests ADD COLUMN approval_status TEXT",
+        "ALTER TABLE feature_requests ADD COLUMN approval_decided_by TEXT",
+        "ALTER TABLE feature_requests ADD COLUMN approval_decided_at TEXT",
+        "ALTER TABLE feature_requests ADD COLUMN approval_reason TEXT",
     ]:
         try:
             db.execute(column_sql)
         except sqlite3.OperationalError:
             pass
+
+    # One-time, idempotent backfill for the procurement approval gate:
+    # any row that predates this migration has approval_status IS NULL
+    # (see the ALTER above -- no SQL default on purpose). Those requests
+    # were never subject to an approval gate at all, so treating them as
+    # "not yet approved" would silently block/reclassify real historical
+    # work that already went through Building/Testing/Released under the
+    # old rules. Conservative choice: mark them Approved, using their own
+    # created_at as the decision time and a clearly-labeled system actor
+    # (never a real person's name, so this never looks like someone
+    # secretly approved old requests). Idempotent: only ever touches rows
+    # still NULL, so running this on every app start is a no-op after the
+    # first time. New requests (see request_center()) always set
+    # approval_status='Pending' explicitly at insert time and therefore
+    # never match this WHERE clause.
+    _now_backfill = datetime.utcnow().isoformat()
+    db.execute(
+        """UPDATE feature_requests SET approval_status = 'Approved',
+           approval_decided_by = 'system (predates approval gate)',
+           approval_decided_at = COALESCE(created_at, ?)
+           WHERE approval_status IS NULL""",
+        (_now_backfill,)
+    )
+    db.commit()
 
     # Belt-and-suspenders: project_link_review table, same pattern as
     # departments below.
@@ -1387,6 +1499,14 @@ def init_db():
         "action:system_data:manage",
         "action:activity_log:view",
         "action:sitepulse:manage_inventory",
+    ])
+    # Item 3: existing Procurement role holders get the new approval
+    # permission (and its view prerequisite) without any other part of
+    # their role -- or any hand-edits an admin already made to it --
+    # being touched.
+    _grant_role_new_permissions(db, "Procurement", [
+        "module:product_intelligence:view",
+        "action:product_intelligence:approve_requests",
     ])
     _backfill_user_roles(db)
 
@@ -2584,13 +2704,20 @@ def build_concrete_order_notification(r):
             return t
 
     pour_time = fmt_time(r["pour_time"])
+    # The header announces the confirmed/scheduled delivery, so it should
+    # prefer the confirmed arrival time over the originally requested
+    # pour_time when the two differ (e.g. requested 7:00 AM, confirmed
+    # slot 8:00 AM) -- same precedence the concrete-company line below
+    # already uses. `pour_time` itself is left untouched: it's still the
+    # requested-time fallback used further down.
+    scheduled_time_display = fmt_time(r["concrete_arrival_time"]) or pour_time
     lines = []
     header = f"Concrete scheduled {when}".strip()
     if r["area_description"]:
         header += f" ({r['area_description']})"
     header += f" {date_display}"
-    if pour_time:
-        header += f" at {pour_time}"
+    if scheduled_time_display:
+        header += f" at {scheduled_time_display}"
     lines.append(header)
 
     amount_line = " ".join(x for x in [r["concrete_amount"], f"plus {r['mix_design_psi']} PSI" if r["mix_design_psi"] else ""] if x)
@@ -2729,7 +2856,15 @@ def inventory_place_concrete_order(request_id):
         updated_r = db.execute("SELECT * FROM inventory_concrete_requests WHERE id = ?", (request_id,)).fetchone()
         order_chat_id = whatsapp_chat_id_for_site(updated_r["project"], updated_r["job_site_address"])
         pour_date_display = friendly_date(updated_r["pour_date"])
-        pour_time_display = " at " + friendly_time(updated_r["pour_time"]) if updated_r["pour_time"] else ""
+        # Use the confirmed/scheduled arrival time (just captured on this
+        # very form) for the notification announcing the schedule, not the
+        # original requested pour_time -- they can legitimately differ
+        # (e.g. requested 7:00 AM, confirmed slot 8:00 AM). pour_time
+        # remains the requested-time record for audit/history and is
+        # intentionally left untouched by this route. Falls back to
+        # pour_time only if no confirmed arrival time was set.
+        scheduled_time = updated_r["concrete_arrival_time"] or updated_r["pour_time"]
+        pour_time_display = " at " + friendly_time(scheduled_time) if scheduled_time else ""
         send_whatsapp_group_message(
             f"Concrete Scheduled for {pour_date_display}{pour_time_display}",
             chat_id=order_chat_id
@@ -3366,10 +3501,30 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
-def _build_atlas_system_prompt(snapshot, fields):
+def _build_atlas_system_prompt(snapshot, fields, project_context=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
-    messages array now, not flattened into this text."""
+    messages array now, not flattened into this text.
+
+    PROJECT CONTEXT (item 6): project_context (session-scoped, see
+    ATLAS_SESSIONS[token]["project_context"]) is surfaced here as plain
+    fact, not as an instruction to use any tool -- the live conversation
+    loop does not dynamically dispatch to the Tool Registry today (only
+    the snapshot above and the concrete-request field-collection state
+    machine below actually run inside a turn); this prompt line is
+    exactly the "make it available to the prompt so the model can reason
+    consistently" connection point, nothing more. The one thing the
+    model IS asked to do here is state, in <state>, the project NAME
+    when the person establishes or changes which project they mean --
+    never an id (the model never invents an id). That name is then
+    resolved for real, server-side, via the same _find_project()-backed
+    set_project_context tool call every other project lookup uses --
+    ambiguous or unmatched names never get silently set.
+    """
+    if project_context and project_context.get("project_id"):
+        context_line = f"CURRENT PROJECT CONTEXT: {project_context.get('name')} (project_id={project_context.get('project_id')}) -- assume this is the project unless the person clearly means a different one.\n\n"
+    else:
+        context_line = "CURRENT PROJECT CONTEXT: none established yet.\n\n"
     return (
         "You are Atlas, the assistant inside BuildIQ. If asked your name, "
         "say Atlas. People talk to you like they'd talk to Claude or "
@@ -3388,6 +3543,9 @@ def _build_atlas_system_prompt(snapshot, fields):
         "Rules for filling out a request:\n"
         "- Only ask about fields that are still blank in the current draft.\n"
         "- Never invent or assume a value the person didn't actually say.\n"
+        "- If a project context is already established below and the "
+        "request is for that project, use it for the 'project' field "
+        "instead of asking the person to repeat the project name.\n"
         "- Once every REQUIRED field is filled, read back a short spoken "
         "summary of the whole request and ask them to confirm before "
         "submitting anything.\n"
@@ -3398,13 +3556,25 @@ def _build_atlas_system_prompt(snapshot, fields):
         "normally -- don't force them back to the form.\n"
         "- If they say cancel/never mind/start over, clear the fields and "
         "set mode back to chat.\n\n"
+        "PROJECT CONTEXT rules:\n"
+        "- If the person establishes or changes which project they're "
+        "talking about (e.g. \"we're working on Patel Farm\", \"switch to "
+        "the Overlook Tower job\"), put that project's name -- exactly as "
+        "they said it -- in the state block's project_name field.\n"
+        "- If you are not confident which specific project they mean (the "
+        "name could plausibly match more than one project), ask them to "
+        "clarify in your reply instead, and leave project_name null this "
+        "turn. Never guess.\n"
+        "- If the project hasn't changed this turn, leave project_name "
+        "null -- don't repeat it every turn.\n\n"
+        + context_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
         + json.dumps(fields) + "\n\n"
         "Respond in exactly two parts:\n"
         "1. Your natural reply.\n"
         "2. On its own line, a state block in EXACTLY this format:\n"
-        '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit"}</state>'
+        '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit", "project_name": "<name, or null if unchanged>"}</state>'
     )
 
 
@@ -3419,6 +3589,18 @@ class ToolResult:
 
     def to_dict(self):
         return {"success": self.success, "data": self.data, "error": self.error}
+
+
+class ToolWriteRejected(Exception):
+    """Raised by a tool handler (never caught anywhere except
+    execute_tool) to fail a write CLOSED with a specific, structured
+    reason -- as opposed to execute_tool's generic except-Exception
+    catch-all ("something went wrong running that"). Used specifically
+    for canonical-project-identity integrity failures (project_not_found)
+    so an Atlas write that attempted to use a project_id never silently
+    degrades into an unlinked write just because that id turned out to
+    be invalid or stale -- see _tool_create_concrete_request."""
+    pass
 
 
 class AtlasTool:
@@ -3503,20 +3685,114 @@ def _validate_tool_params(tool, raw_params):
     return clean, None
 
 
-def execute_tool(tool_name, raw_params, user, confirmed=False):
+def execute_tool(tool_name, raw_params, user, confirmed=False, session_context=None):
     """The single centralized gateway every Atlas action must pass
     through -- this is what Phase 2's authorization requirement actually
     means in code. Every call is validated, permission-checked against
-    BOTH the manual and Atlas-specific permission, confirmation-gated if
-    it's a write, executed, and logged -- in that order, every time, with
-    no bypass path. The parser in stream_atlas_turn never calls a
-    handler directly; it only ever calls this.
+    BOTH the manual and Atlas-specific permission, stale-project-checked,
+    confirmation-gated if it's a write, executed, and logged -- in
+    EXACTLY that order, every time, with no bypass path:
+        validate params -> permission check -> stale-context rejection
+        -> confirmation check -> handler
+    The stale-context check deliberately sits AFTER permission (so an
+    unauthorized caller learns only "not permitted", never anything
+    about whether a project exists) but BEFORE confirmation (so a stale
+    canonical-project write is rejected on its very first call --
+    confirmed or not -- and never enters the confirm/retry exchange at
+    all; see the write_context_stale block below for exactly why this
+    ordering, not just "check it somewhere", is the actual fix). The
+    parser in stream_atlas_turn never calls a handler directly; it only
+    ever calls this.
+
+    PROJECT CONTEXT (item 6): `session_context` is the current Atlas
+    session's project-context dict (see ATLAS_SESSIONS[token] --
+    "project_context": {"project_id": int, "name": str} or {}), owned by
+    the caller and passed in explicitly -- execute_tool never reaches
+    into session state on its own. Two things happen here, both
+    generically, so no per-tool special-casing is needed as more tools
+    gain project_id support later:
+      1. If the tool declares a `project_id` parameter and the caller
+         didn't supply one, but session_context has a resolved
+         project_id, it's filled in automatically -- this is what lets
+         "create a purchase request for 40 sheets of plywood" reuse a
+         project established earlier in the same conversation without
+         the model having to re-ask or re-guess it. set_project_context
+         itself is deliberately EXCLUDED from this injection (it's the
+         one tool whose whole purpose is to CHANGE session_context --
+         auto-filling its project_id from the very context it's meant
+         to update would make switching projects by name alone
+         impossible, since the old project_id would keep winning).
+      2. If this IS the dedicated set_project_context tool and it
+         resolves successfully, the result is written back into
+         session_context so it persists for the rest of the session.
+         This is the ONLY tool allowed to mutate session_context --
+         every other tool only ever reads project_id like any other
+         parameter.
+    Nothing here infers an ambiguous project silently: resolution
+    (including the "ambiguous -- ask the user" case) is entirely
+    _find_project()'s existing logic, reused as-is.
     """
     tool = ATLAS_TOOLS.get(tool_name)
     if not tool:
         log_activity("atlas", "tool_call", 0, "atlas_unknown_tool", new_value=tool_name)
         get_db().commit()
         return ToolResult(False, error=f"unknown tool: {tool_name}")
+
+    raw_params = dict(raw_params or {})
+    write_context_stale = False
+    if (session_context and tool_name != "set_project_context"
+            and "project_id" in tool.parameters and not raw_params.get("project_id")):
+        # STICKY STALE MARKER: if a PRIOR call already found this
+        # session's project context stale and popped project_id/name
+        # (below), that popping alone is not enough to protect a
+        # SUBSEQUENT call on the same session_context object -- once
+        # project_id is gone, a second call has literally no evidence
+        # left that a project was ever intended, and would look
+        # identical to a genuinely-unlinked request. The
+        # "_project_context_stale" marker is what actually carries that
+        # evidence forward: it keeps failing write attempts closed until
+        # set_project_context succeeds again (which clears the marker as
+        # part of establishing fresh, valid context -- see below) or an
+        # explicit project_id is supplied directly (which bypasses
+        # session context entirely and is unaffected by this marker).
+        if session_context.get("_project_context_stale") and tool.kind == "write":
+            write_context_stale = True
+        else:
+            ctx_project_id = session_context.get("project_id")
+            if ctx_project_id:
+                # Re-verify the stored project still exists every time
+                # it's used, rather than trusting whatever was resolved
+                # whenever set_project_context last ran -- a project can
+                # be deleted from Project Hunt at any point after
+                # context was established.
+                still_exists = get_db().execute(
+                    "SELECT 1 FROM tracker_projects WHERE id = ?", (ctx_project_id,)
+                ).fetchone()
+                if still_exists:
+                    raw_params["project_id"] = ctx_project_id
+                else:
+                    # Fail-safe, but NOT the same fail-safe for every
+                    # tool kind. Clearing the stale id/name so the
+                    # person is asked to re-establish it is always
+                    # correct. But for a WRITE tool, simply proceeding
+                    # without project_id would silently convert "the
+                    # person meant this to attach to a specific project"
+                    # into an unlinked write -- a real canonical-identity
+                    # loss, not a graceful degradation. Reads have no
+                    # such risk (there's nothing to attach), so they're
+                    # allowed to continue gracefully, same as before.
+                    # The actual short-circuit for writes happens below,
+                    # AFTER the normal permission/confirmation gates --
+                    # this flag only records that it must happen; it
+                    # never skips or reorders those checks. The sticky
+                    # marker (see top of this block) is what makes this
+                    # protection survive a second call on the same
+                    # session_context, not just this one.
+                    session_context.pop("project_id", None)
+                    session_context.pop("name", None)
+                    if tool.kind == "write":
+                        session_context["_project_context_stale"] = True
+                        write_context_stale = True
 
     clean_params, err = _validate_tool_params(tool, raw_params or {})
     if err:
@@ -3532,6 +3808,30 @@ def execute_tool(tool_name, raw_params, user, confirmed=False):
         get_db().commit()
         return ToolResult(False, error="not permitted")
 
+    if write_context_stale:
+        # MUST be checked here -- after permission (so an unauthorized
+        # caller still gets "not permitted", not a way to probe project
+        # existence) but BEFORE the confirmation check below. Root cause
+        # of the bug this ordering fixes: confirmation is a two-step
+        # exchange (unconfirmed call -> "confirmation required" -> caller
+        # retries with confirmed=True). Context was being cleared, once,
+        # unconditionally, the moment staleness was DETECTED -- which
+        # happens on every call, confirmed or not. If the confirmation
+        # check ran first, the FIRST (unconfirmed) call would see
+        # "confirmation required" while the stale project_id was already
+        # wiped from session_context; the caller, told only to confirm,
+        # would retry with confirmed=True, and by then there would be
+        # nothing left to reject -- the write would go through unlinked,
+        # exactly the silent identity loss this whole mechanism exists
+        # to prevent. Rejecting BEFORE the confirmation check closes
+        # that: the very first call (confirmed or not) that would have
+        # depended on a stale project gets "project_context_stale"
+        # immediately, writes nothing, and never enters the confirm
+        # exchange at all -- so there is no confirmed retry to exploit.
+        log_activity("atlas", "tool_call", 0, "atlas_stale_context", field=tool_name)
+        get_db().commit()
+        return ToolResult(False, error="project_context_stale")
+
     if tool.kind == "write" and tool.confirm and not confirmed:
         log_activity("atlas", "tool_call", 0, "atlas_unconfirmed", field=tool_name)
         get_db().commit()
@@ -3539,10 +3839,34 @@ def execute_tool(tool_name, raw_params, user, confirmed=False):
 
     try:
         data = tool.handler(user=user, **clean_params)
+    except ToolWriteRejected as e:
+        # Structured rejection from the handler itself (e.g. an
+        # explicitly-supplied project_id that doesn't resolve to any
+        # current tracker_projects row) -- distinct from an actual
+        # unexpected error, so the caller gets the real, specific reason
+        # instead of a generic "something went wrong".
+        log_activity("atlas", "tool_call", 0, "atlas_rejected", field=tool_name, new_value=str(e))
+        get_db().commit()
+        return ToolResult(False, error=str(e))
     except Exception as e:
         log_activity("atlas", "tool_call", 0, "atlas_error", field=tool_name, new_value=str(e))
         get_db().commit()
         return ToolResult(False, error="something went wrong running that")
+
+    if tool_name == "set_project_context" and session_context is not None and isinstance(data, dict) and data.get("found"):
+        # The only tool allowed to write back into session_context, and
+        # only ever with a project genuinely resolved by _find_project
+        # (never a guess -- an ambiguous result is NOT written here,
+        # leaving session_context unchanged until the user disambiguates).
+        session_context["project_id"] = data.get("project_id")
+        session_context["name"] = data.get("name")
+        # A fresh, valid resolution clears the sticky stale marker (if
+        # any) -- this is the ONLY way _project_context_stale ever gets
+        # removed, which is exactly the "require Atlas to re-establish
+        # valid project context" behavior: the marker persists across
+        # any number of write attempts until this specific, successful
+        # re-resolution happens.
+        session_context.pop("_project_context_stale", None)
 
     action_label = f"atlas_{tool.kind}_{tool_name}"
     entity_id = data.get("id") if isinstance(data, dict) else 0
@@ -3555,7 +3879,56 @@ def _tool_create_concrete_request(user, **fields):
     """Handler for the 'create_concrete_request' tool -- a thin wrapper
     around the exact same create_concrete_request() the web form has
     always used. No new insert logic, no new validation logic; only the
-    call site changed (see stream_atlas_turn's submit branch)."""
+    call site changed (see stream_atlas_turn's submit branch).
+
+    CANONICAL IDENTITY CORRECTION (item 6 follow-up): this is
+    deliberately done HERE, in the Atlas-only wrapper, and NOT inside
+    create_concrete_request() itself. The web form's "project" text
+    field and its optional "Link to a Project Hunt project" project_id
+    dropdown are independently editable by design (someone can type a
+    shorthand/external job name while still linking a real project_id
+    for cross-referencing) -- changing create_concrete_request() to
+    force-overwrite project text from project_id would silently change
+    that existing, intentional web-form behavior. Atlas is different: a
+    project_id reaching this handler came either directly from the
+    model or from execute_tool()'s session-context injection, and in
+    both cases the free-text `project` the model also produced is only
+    ever a best-effort guess at a display name, never an independent,
+    deliberate choice the way a human filling out the web form makes.
+    So here, and only here: if a project_id is present, it -- not the
+    model's free-text guess -- decides the stored project identity.
+    Resolved fresh against tracker_projects every call (never trusts a
+    stale id). SECURITY INVARIANT: if it doesn't resolve, this fails
+    CLOSED -- raises ToolWriteRejected("project_not_found") and creates
+    NOTHING, rather than dropping the id and quietly writing an unlinked
+    request. A project_id reaching this handler means canonical identity
+    was actually attempted (by the model directly, or injected from
+    Atlas session context by execute_tool); if that attempt can't be
+    honored, that is an integrity failure to report back, not something
+    to paper over by degrading to an unlinked write. Genuinely
+    unlinked/external requests -- where no project_id was ever attempted
+    at all -- are a completely different path and are unaffected: they
+    still work exactly as they always have.
+    """
+    project_id = fields.get("project_id")
+    if project_id:
+        db = get_db()
+        canonical = db.execute("SELECT name FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+        if canonical:
+            fields = dict(fields)
+            fields["project"] = canonical["name"]
+        else:
+            # FAIL CLOSED, not a silent downgrade to an unlinked request.
+            # A project_id reaching this point means canonical identity
+            # was explicitly attempted (either the model supplied one
+            # directly, or execute_tool injected one from session
+            # context) -- if it doesn't resolve, that's an integrity
+            # failure to report, not something to quietly paper over by
+            # dropping the id and writing an unlinked record anyway.
+            # Genuinely-unlinked/external requests (no project_id at
+            # all) are unaffected and still work exactly as before --
+            # this branch only runs when a project_id was present.
+            raise ToolWriteRejected("project_not_found")
     submitted_id = create_concrete_request(fields, user.name or user.email)
     return {"id": submitted_id, "submitted_id": submitted_id}
 
@@ -3664,7 +4037,7 @@ def stream_atlas_turn(user_text, draft):
         return
 
     snapshot = gather_business_snapshot()
-    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}))
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"))
 
     history = draft.get("history", [])[-20:]  # last 10 exchanges, real turns
     messages = [{"role": h["role"], "content": h["content"]} for h in history]
@@ -3804,11 +4177,28 @@ def stream_atlas_turn(user_text, draft):
     fields = state.get("fields", {}) if mode == "concrete_request" else {}
     action = state.get("action", "none")
 
+    # PROJECT CONTEXT (item 6): carry the session's established project
+    # context forward turn-to-turn (it's session-scoped, not turn-scoped
+    # -- new_draft otherwise replaces the whole draft each turn). If the
+    # model named a project this turn, resolve it for real through the
+    # exact same execute_tool("set_project_context", ...) gateway every
+    # other tool call goes through -- permission-checked, logged, and
+    # backed by _find_project()'s existing exact/unique-substring/
+    # ambiguous logic. The model's stated name is only ever a hint to
+    # resolve; an ambiguous or unmatched name leaves project_context
+    # unchanged rather than guessing, and this is enforced here in code,
+    # not just by the prompt asking nicely.
+    project_context = dict(draft.get("project_context") or {})
+    model_project_name = state.get("project_name")
+    if model_project_name and isinstance(model_project_name, str) and model_project_name.strip():
+        execute_tool("set_project_context", {"project_name": model_project_name.strip()},
+                     current_user, session_context=project_context)
+
     new_history = history + [
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": spoken},
     ]
-    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:], "pending_submit": None}
+    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:], "pending_submit": None, "project_context": project_context}
 
     submitted_id = None
     pending_write_token = None
@@ -3997,7 +4387,7 @@ def assistant_ask():
     if not token:
         token = secrets.token_hex(16)
         session["atlas_token"] = token
-    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None})
+    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}})
 
     def generate():
         yield f"data: {json.dumps({'type': 'question', 'text': question, 'transcribe_error': transcribe_error})}\n\n"
@@ -4097,7 +4487,8 @@ def assistant_confirm_write():
         draft["pending_write"] = None
         draft["pending_submit"] = None
 
-    result = execute_tool("create_concrete_request", fields, current_user, confirmed=True)
+    result = execute_tool("create_concrete_request", fields, current_user, confirmed=True,
+                          session_context=draft.get("project_context", {}))
     if result.success:
         draft["mode"] = "chat"
         draft["fields"] = {}
@@ -4158,8 +4549,8 @@ def request_center():
             department = submitted_department
             now = datetime.utcnow().isoformat()
             cur = db.execute(
-                "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                (current_user.email, current_user.name or current_user.email, department, text, "Submitted", now, now)
+                "INSERT INTO feature_requests (requester_email, requester_name, department, original_request, status, approval_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (current_user.email, current_user.name or current_user.email, department, text, "Submitted", "Pending", now, now)
             )
             request_id = cur.lastrowid
             db.commit()
@@ -4260,6 +4651,7 @@ def product_intelligence():
     db = get_db()
     status_filter = request.args.get("status", "")
     department_filter = request.args.get("department", "")
+    approval_filter = request.args.get("approval", "")
     conditions, params = [], []
     if status_filter:
         # Supports a single status (the existing dropdown) or a
@@ -4272,20 +4664,65 @@ def product_intelligence():
     if department_filter:
         conditions.append("department = ?")
         params.append(department_filter)
+    if approval_filter:
+        # Item 3: independent filter dimension alongside status/department
+        # above -- approval_status is a separate column, not a status
+        # value, so this is its own condition rather than folded into the
+        # status IN (...) clause.
+        conditions.append("approval_status = ?")
+        params.append(approval_filter)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = db.execute(f"SELECT * FROM feature_requests {where} ORDER BY created_at DESC", params).fetchall()
     departments = [d["department"] for d in db.execute(
         "SELECT DISTINCT department FROM feature_requests WHERE department IS NOT NULL AND department != ''"
     ).fetchall()]
 
+    # PI flow refinement: a safe "come back here" URL for links FROM this
+    # page INTO a request's detail page -- captures whatever filters are
+    # currently applied (request.full_path already includes the query
+    # string) plus which section the link came from, via the anchor
+    # appended at each call site below. product_intelligence_detail()
+    # validates this is actually a path on this same route before ever
+    # using it (never an open redirect) -- see that route.
+    back_base_url = request.full_path.rstrip("?")
+
     # Dashboard data -- all real aggregate queries against feature_requests
     # and its related tables, computed fresh every load. Nothing here is
     # fabricated or estimated; every number traces back to an actual row.
     all_requests = db.execute("SELECT * FROM feature_requests").fetchall()
+    # Gate correction: a request whose approval_status isn't 'Approved'
+    # cannot have actually advanced through the development lifecycle
+    # (change_status/release now enforce that server-side -- see the
+    # POST handler below), so it must not be counted as though it's
+    # already "awaiting product review" or otherwise progressing through
+    # that pipeline. `approved_requests` is what every development-
+    # lifecycle-facing count below (status_counts, the KPI strip except
+    # Total/Pending Approval, the Request Lifecycle chart, the pipeline
+    # breakdown, the backlog trend, and the "awaiting review" attention
+    # item) is computed from. `all_requests`/`total_requests` stays the
+    # TRUE, complete count -- Total Requests and the All Requests table
+    # below intentionally still include Pending/Returned requests, since
+    # that table is the full historical list, not a development-pipeline
+    # view.
+    approved_requests = [r for r in all_requests if r["approval_status"] == "Approved"]
     status_counts = {}
-    for r in all_requests:
+    for r in approved_requests:
         status_counts[r["status"]] = status_counts.get(r["status"], 0) + 1
     total_requests = len(all_requests)
+    # Item 3: pending-approval count is a real COUNT against the real
+    # approval_status column -- not derived from status, and not an
+    # estimate. Historical rows backfilled to 'Approved' (see the
+    # migration) never appear here.
+    pending_approval_count = db.execute(
+        "SELECT COUNT(*) FROM feature_requests WHERE approval_status = 'Pending'"
+    ).fetchone()[0]
+    # Item 2 (PI flow refinement): the actual inbox rows for the new
+    # Pending Approval section -- real rows, oldest-first (first-in-
+    # first-out, matching how an actual approval queue should read),
+    # not a re-derivation of the count above.
+    pending_approval_requests = db.execute(
+        "SELECT * FROM feature_requests WHERE approval_status = 'Pending' ORDER BY created_at ASC"
+    ).fetchall()
     kpi = {
         "total": total_requests,
         "new_reviewing": status_counts.get("Submitted", 0) + status_counts.get("Reviewing", 0),
@@ -4293,18 +4730,21 @@ def product_intelligence():
         "testing": status_counts.get("Testing", 0),
         "released": status_counts.get("Released", 0),
         "stalled": status_counts.get("On Hold", 0) + status_counts.get("Not Planned", 0),
+        "pending_approval": pending_approval_count,
     }
 
-    pipeline_order = ["Submitted", "Reviewing", "Approved", "Building", "Testing", "Released", "On Hold", "Not Planned"]
-    pipeline_colors = {
-        "Submitted": "#5AC8E0", "Reviewing": "#8A7238", "Approved": "#C9A24B", "Building": "#C9A24B",
-        "Testing": "#C9A24B", "Released": "#5EEAD4", "On Hold": "#4A5D70", "Not Planned": "#4A5D70",
-    }
-    pipeline = [
-        {"status": s, "count": status_counts.get(s, 0), "color": pipeline_colors[s],
-         "pct": round(100 * status_counts.get(s, 0) / total_requests, 1) if total_requests else 0}
-        for s in pipeline_order if status_counts.get(s, 0) > 0
-    ]
+    # NOTE: a `pipeline` (status/pct breakdown) list used to be computed
+    # here, but was verified NOT to be consumed anywhere in
+    # templates/requests/product_intelligence.html -- the visually
+    # similar "Request Lifecycle" section on that page actually renders
+    # `lifecycle` (below), a different variable. Its denominator
+    # (total_requests) was also stale relative to status_counts now
+    # being Approved-only (see the approval gate correction above), but
+    # since the whole list was confirmed dead rather than just
+    # mis-denominated, it -- and its now-unused pipeline_order/
+    # pipeline_colors helpers -- have been removed rather than "fixed",
+    # since carrying forward a corrected-but-unused calculation isn't
+    # meaningfully safer than removing it.
 
     dept_counts = {}
     for r in all_requests:
@@ -4484,7 +4924,7 @@ def product_intelligence():
     ).fetchall():
         released_map[row["feature_request_id"]] = row["released_at"]
 
-    created_map = {r["id"]: r["created_at"] for r in all_requests}
+    created_map = {r["id"]: r["created_at"] for r in approved_requests}
 
     resolve_days = []
     for req_id, released_at in released_map.items():
@@ -4627,7 +5067,7 @@ def product_intelligence():
     return render_template(
         "requests/product_intelligence.html", requests=rows, statuses=REQUEST_STATUSES,
         departments=departments, status_filter=status_filter, department_filter=department_filter,
-        kpi=kpi, pipeline=pipeline, dept_breakdown=dept_breakdown, module_breakdown=module_breakdown,
+        kpi=kpi, dept_breakdown=dept_breakdown, module_breakdown=module_breakdown,
         recent_activity=recent_activity, recently_released=recently_released,
         attention_items=attention_items,
         submitted_line=submitted_line, resolved_line=resolved_line, resolved_fill=resolved_fill,
@@ -4636,6 +5076,8 @@ def product_intelligence():
         roadmap_lanes=roadmap_lanes, module_health=module_health, can_manage_roadmap=can_manage_roadmap,
         lifecycle=lifecycle, priority_builds=priority_builds, situation=situation,
         pulse=pulse, platform_state=platform_state, ecosystem_atlas=ecosystem_atlas,
+        approval_filter=approval_filter, pending_approval_requests=pending_approval_requests,
+        back_base_url=back_base_url,
     )
 
 
@@ -4675,10 +5117,55 @@ def roadmap_item_update(item_id):
 @app.route("/admin/product-intelligence/<int:request_id>", methods=["GET", "POST"])
 @login_required
 def product_intelligence_detail(request_id):
-    if not _authorized("action:product_intelligence:manage"):
+    # Item 3: a procurement approver (action:product_intelligence:approve_requests)
+    # needs to reach this page to act on a Pending request even if they
+    # don't hold the broader action:product_intelligence:manage permission
+    # (that stays scoped to whoever runs the dev pipeline). Every
+    # individual POST action below is separately, specifically gated --
+    # this outer check only decides who can load the page at all.
+    if not (_authorized("action:product_intelligence:manage") or is_product_request_approver()):
         flash("Product Intelligence is restricted to admins.", "error")
         return redirect(url_for("home"))
     db = get_db()
+
+    # PI flow refinement: a safe "back" destination, carried through GET
+    # (from a link on the main PI page) and, if the form includes it as
+    # a hidden field, through POST redirects too -- so acting on a
+    # request and returning lands the user back where they actually
+    # came from (their filtered All Requests view, the Pending Approval
+    # section, etc.) instead of always the bare PI page.
+    #
+    # SECURITY: this value is attacker-controlled (a GET query param or
+    # POST form field), so it is validated STRICTLY, not just with a
+    # prefix check -- a plain `.startswith("/admin/product-intelligence")`
+    # would still accept e.g. "/admin/product-intelligence@evil.com" or
+    # a value containing ".." (still same-origin, but not a real
+    # verification that it's actually the product_intelligence route --
+    # not itself an open redirect, but not the "same-route" guarantee
+    # this is supposed to provide either). Using urlsplit() and checking
+    # each component explicitly instead:
+    #   - scheme must be empty (rejects "https://...", "javascript:...")
+    #   - netloc must be empty (rejects "//evil.com" and "http://evil.com")
+    #   - path must be EXACTLY the product_intelligence route, not just
+    #     prefixed by it (rejects any lookalike or traversal attempt --
+    #     urlsplit does not collapse "..", so a path containing it can
+    #     never equal the exact expected path string)
+    # Query string and fragment are passed through as-is (that's the
+    # actual filter/anchor state being preserved) since they can't
+    # change which host/path the browser navigates to.
+    from urllib.parse import urlsplit
+    pi_base_path = url_for("product_intelligence")
+
+    def _safe_pi_back_url(raw):
+        if not raw:
+            return None
+        parsed = urlsplit(raw)
+        if parsed.scheme or parsed.netloc or parsed.path != pi_base_path:
+            return None
+        return raw
+
+    raw_back = request.args.get("back") or request.form.get("back") or ""
+    back_url = _safe_pi_back_url(raw_back) or pi_base_path
     r = db.execute("SELECT * FROM feature_requests WHERE id = ?", (request_id,)).fetchone()
     if not r:
         flash("Request not found.", "error")
@@ -4688,7 +5175,25 @@ def product_intelligence_detail(request_id):
         action = request.form.get("action")
         now = datetime.utcnow().isoformat()
 
+        # PI flow refinement: lets the new Pending Approval inbox cards
+        # (on the main Product Intelligence page) submit approve/return
+        # directly, then land back on that same page/section instead of
+        # the request detail page -- "I remain oriented on the page."
+        # Deliberately a closed whitelist value, never a raw URL/path
+        # from the client, so this can never become an open redirect.
+        return_to = request.form.get("return_to", "")
+
+        def redirect_after_action():
+            if return_to == "pending_approval":
+                return redirect(url_for("product_intelligence") + "#pi2-pending-approval")
+            if back_url != pi_base_path:
+                return redirect(url_for("product_intelligence_detail", request_id=request_id, back=back_url))
+            return redirect(url_for("product_intelligence_detail", request_id=request_id))
+
         if action == "change_department":
+            if not _authorized("action:product_intelligence:manage"):
+                flash("You don't have permission to make that change.", "error")
+                return redirect(url_for("product_intelligence_detail", request_id=request_id))
             new_department = request.form.get("department", "").strip()
             db.execute("UPDATE feature_requests SET department = ?, updated_at = ? WHERE id = ?",
                        (new_department, now, request_id))
@@ -4696,6 +5201,9 @@ def product_intelligence_detail(request_id):
             flash("Department corrected.")
 
         elif action == "save_details":
+            if not _authorized("action:product_intelligence:manage"):
+                flash("You don't have permission to make that change.", "error")
+                return redirect(url_for("product_intelligence_detail", request_id=request_id))
             # Saves the admin-only intelligence fields WITHOUT touching
             # status at all -- exactly the separation asked for.
             db.execute(
@@ -4714,6 +5222,21 @@ def product_intelligence_detail(request_id):
             flash("Details saved.")
 
         elif action == "change_status":
+            if not _authorized("action:product_intelligence:manage"):
+                flash("You don't have permission to make that change.", "error")
+                return redirect(url_for("product_intelligence_detail", request_id=request_id))
+            # Gate correction: approval and development status stay
+            # independent FIELDS (no merging), but the WORKFLOW between
+            # them is now enforced here, server-side -- a request that
+            # hasn't cleared procurement approval cannot be advanced
+            # through the development lifecycle. Template hiding alone
+            # was previously the only thing stopping this; a direct POST
+            # from someone holding action:product_intelligence:manage
+            # but not approval authority could still move a Pending
+            # request forward. This check closes that.
+            if r["approval_status"] != "Approved":
+                flash(f"This request cannot enter the development pipeline yet -- approval_status is {r['approval_status']}, not Approved.", "error")
+                return redirect(url_for("product_intelligence_detail", request_id=request_id))
             new_status = request.form.get("status", "")
             if new_status in REQUEST_STATUSES and new_status != "Released":
                 _log_request_status(db, request_id, new_status, current_user.email)
@@ -4723,6 +5246,14 @@ def product_intelligence_detail(request_id):
                 flash("Invalid status change.", "error")
 
         elif action == "release":
+            if not _authorized("action:product_intelligence:manage"):
+                flash("You don't have permission to make that change.", "error")
+                return redirect(url_for("product_intelligence_detail", request_id=request_id))
+            # Same gate as change_status above -- a request that isn't
+            # Approved cannot be released either.
+            if r["approval_status"] != "Approved":
+                flash(f"This request cannot be released -- approval_status is {r['approval_status']}, not Approved.", "error")
+                return redirect(url_for("product_intelligence_detail", request_id=request_id))
             # Deliberate, separate action -- requires a note, confirmed
             # via the checkbox on the form. This is the only path that
             # can ever set status to Released.
@@ -4741,10 +5272,130 @@ def product_intelligence_detail(request_id):
                 db.commit()
                 flash("Request released.")
 
-        return redirect(url_for("product_intelligence_detail", request_id=request_id))
+        elif action in ("approve_request", "return_request"):
+            # Item 3: procurement approval gate. Server-side authorization
+            # in TWO independent parts, both required:
+            #   1. the actor must hold the dedicated approve permission
+            #      (never action:product_intelligence:manage alone --
+            #      someone with only the broader manage permission but
+            #      not explicitly granted approval authority cannot
+            #      approve/return through this action).
+            #   2. the actor cannot be the request's own requester, even
+            #      if they otherwise hold approval authority.
+            # Both checks happen here, on the POST handler itself -- not
+            # only in the UI -- so a direct POST from someone lacking
+            # either can never succeed.
+            if not is_product_request_approver():
+                flash("You don't have permission to approve or return requests.", "error")
+                return redirect_after_action()
+            if current_user.email == r["requester_email"]:
+                flash("You cannot approve or return your own request.", "error")
+                return redirect_after_action()
+            if r["approval_status"] != "Pending":
+                # Fast, friendly path only -- NOT the actual security
+                # guarantee. `r` was read at the top of this request,
+                # before any of the checks above ran; a concurrent
+                # decision could still land in the gap between that read
+                # and the UPDATE below. This early check just avoids
+                # bothering an already-doomed request with reason
+                # validation etc. The UPDATE...WHERE clause further down
+                # is the ONLY thing that actually decides who wins.
+                flash(f"This request has already been handled (now {r['approval_status']}) -- no action was taken.", "error")
+                return redirect_after_action()
+
+            reason = request.form.get("reason", "").strip()
+            if action == "return_request" and not reason:
+                flash("A reason is required to return a request.", "error")
+                return redirect_after_action()
+
+            decision = "Approved" if action == "approve_request" else "Returned"
+
+            # ATOMIC ONE-WINNER TRANSITION (concurrency fix). The
+            # earlier design read approval_status, decided in Python
+            # that it was Pending, then unconditionally wrote the new
+            # state -- correct against a SEQUENTIAL stale request (the
+            # second POST re-reads `r` at the top and sees the already-
+            # changed value), but not against two truly concurrent
+            # writers who could each pass that same Python-side check
+            # before either commits. SQLite guarantees that a single
+            # UPDATE statement is atomic with respect to the specific
+            # rows it matches: the WHERE clause is evaluated against
+            # the database's actual current state at the moment the
+            # statement runs (under the connection's write lock), not
+            # against a value read earlier in Python. So folding the
+            # "still Pending" check directly into the UPDATE's WHERE
+            # clause, and trusting ONLY `cur.rowcount` afterward, is
+            # what makes this genuinely race-proof: whichever of two
+            # concurrent UPDATEs against the same row actually acquires
+            # SQLite's write lock first is guaranteed to see
+            # approval_status = 'Pending' (still true) and win,
+            # updating exactly one row; the second writer's UPDATE then
+            # runs against a row that is no longer 'Pending' (the
+            # winner's change is already committed, or the DB's locking
+            # serializes the second UPDATE to run strictly after the
+            # first), so its WHERE clause matches zero rows.
+            #
+            # ORDERING: the UPDATE runs FIRST, before the audit-history
+            # INSERT, specifically so a loser (rowcount == 0) can never
+            # produce a history row -- if the INSERT happened first and
+            # the UPDATE lost the race, we would have "corrected" that
+            # by deleting the row we just wrote (extra complexity, and
+            # a real window where a losing decision is briefly visible
+            # in the audit trail). Checking rowcount immediately after
+            # the UPDATE and only inserting history when it's exactly 1
+            # means a losing writer's transaction contains no writes at
+            # all -- there's nothing to roll back beyond ending the
+            # (otherwise-empty) transaction.
+            try:
+                cur = db.execute(
+                    """UPDATE feature_requests SET approval_status = ?, approval_decided_by = ?,
+                       approval_decided_at = ?, approval_reason = ?, updated_at = ?
+                       WHERE id = ? AND approval_status = 'Pending'""",
+                    (decision, current_user.email, now, reason or None, now, request_id)
+                )
+                if cur.rowcount == 1:
+                    # This request won the race (or there was no race
+                    # at all) -- exactly one approval-history row for
+                    # exactly one winning decision.
+                    db.execute(
+                        "INSERT INTO feature_request_approvals (feature_request_id, decision, reason, decided_by, decided_at) VALUES (?,?,?,?,?)",
+                        (request_id, decision, reason or None, current_user.email, now)
+                    )
+                    log_activity("product_intelligence", "feature_request", request_id, "updated",
+                                 field="approval_status", old_value="Pending", new_value=decision)
+                    db.commit()
+                    if decision == "Approved":
+                        flash("Request approved and moved to the development queue.")
+                    else:
+                        flash("Request returned to the requester.")
+                else:
+                    # Lost the race (or the sequential-stale case) --
+                    # another decision already committed. No history
+                    # row, no overwrite of the winner's data. Roll back
+                    # explicitly so this connection doesn't hold an
+                    # open (empty) transaction/lock any longer than
+                    # necessary.
+                    db.rollback()
+                    fresh = db.execute("SELECT approval_status FROM feature_requests WHERE id = ?", (request_id,)).fetchone()
+                    current_state = fresh["approval_status"] if fresh else "unknown"
+                    flash(f"This request has already been handled (now {current_state}) -- no action was taken.", "error")
+            except sqlite3.OperationalError as e:
+                # Fail safe rather than let a raw SQLite locking error
+                # (e.g. a busy-timeout still being exceeded under heavy
+                # contention) reach the user as an unhandled exception.
+                db.rollback()
+                log_activity("product_intelligence", "feature_request", request_id, "approval_contention_error", new_value=str(e))
+                db.commit()
+                flash("That decision couldn't be processed right now because of a conflicting update -- please check the request's current status and try again if needed.", "error")
+
+        return redirect_after_action()
 
     history = db.execute(
         "SELECT * FROM feature_request_status_history WHERE feature_request_id = ? ORDER BY changed_at",
+        (request_id,)
+    ).fetchall()
+    approval_history = db.execute(
+        "SELECT * FROM feature_request_approvals WHERE feature_request_id = ? ORDER BY decided_at",
         (request_id,)
     ).fetchall()
     intel = db.execute("SELECT * FROM feature_request_intelligence WHERE feature_request_id = ?", (request_id,)).fetchone()
@@ -4752,7 +5403,12 @@ def product_intelligence_detail(request_id):
         "SELECT * FROM feature_request_attachments WHERE feature_request_id = ? ORDER BY id", (request_id,)
     ).fetchall()
     department_options = [d["name"] for d in db.execute("SELECT name FROM departments ORDER BY name").fetchall()]
-    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel, statuses=REQUEST_STATUSES, attachments=attachments, department_options=department_options)
+    can_manage = _authorized("action:product_intelligence:manage")
+    can_approve = is_product_request_approver() and r["approval_status"] == "Pending" and current_user.email != r["requester_email"]
+    return render_template("requests/product_intelligence_detail.html", r=r, history=history, intel=intel,
+                            statuses=REQUEST_STATUSES, attachments=attachments, department_options=department_options,
+                            approval_history=approval_history, can_manage_product_intelligence=can_manage,
+                            can_approve_request=can_approve, back_url=back_url)
 
 
 @app.route("/admin/product-intelligence/preview")
@@ -5404,7 +6060,14 @@ def tracker_view_project(project_id):
         if q["is_submit_blocking"] and q["status"] != "Received":
             seen_trades[key]["any_blocking"] = True
 
-    return render_template("tracker/project.html", p=project, trade_groups=trade_groups, docs=docs, status_options=TR_STATUS_OPTIONS)
+    # Deterministic Back-to-dashboard navigation: carries through whichever
+    # dashboard filter the user came from (e.g. ?filter=active), rather than
+    # relying only on the browser's back button, so "Back" always lands on
+    # the same filtered view the user was looking at -- not just wherever
+    # browser history happens to point.
+    back_filter = request.args.get("filter", "")
+    return render_template("tracker/project.html", p=project, trade_groups=trade_groups, docs=docs,
+                            status_options=TR_STATUS_OPTIONS, back_filter=back_filter)
 
 
 @app.route("/tracker/project/<int:project_id>/update", methods=["POST"])

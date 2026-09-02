@@ -6,8 +6,10 @@
 <h1>{{ r['requester_name'] or r['requester_email'] }}</h1>
 <p class="sub" style="margin-bottom:8px;">{{ r['department'] or 'No department set' }} &middot; Submitted {{ r['created_at']|friendly_short_dt }}</p>
 
+{% if can_manage_product_intelligence %}
 <form method="POST" style="display:flex; gap:8px; align-items:center; margin-bottom:20px;">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
     <input type="hidden" name="action" value="change_department">
     <select name="department" style="max-width:220px;">
         <option value="">&mdash; None &mdash;</option>
@@ -20,6 +22,7 @@
     </select>
     <button type="submit" class="btn">Correct Department</button>
 </form>
+{% endif %}
 
 <div class="card" style="border-left:3px solid var(--brass);">
     <p class="sub" style="margin:0 0 8px;">Original Request</p>
@@ -33,6 +36,43 @@
     {% endif %}
 </div>
 
+<div class="card" style="border-left:3px solid var(--red); margin-top:16px;">
+    <p class="sub" style="margin:0 0 8px;">Procurement Approval <span class="dim">independent of development status below</span></p>
+    <p style="margin:0 0 12px;">Current:
+        {% if r['approval_status'] == 'Approved' %}<span class="rc-badge" style="background:rgba(94,234,212,0.14); color:var(--teal);">Approved</span>
+        {% elif r['approval_status'] == 'Returned' %}<span class="rc-badge" style="background:rgba(248,113,113,0.14); color:var(--red);">Returned</span>
+        {% else %}<span class="rc-badge" style="background:rgba(248,113,113,0.12); color:var(--red);">Pending Approval</span>
+        {% endif %}
+        {% if r['approval_decided_by'] %}<span class="sub" style="margin-left:8px;">by {{ r['approval_decided_by'] }}{% if r['approval_decided_at'] %} &middot; {{ r['approval_decided_at']|friendly_short_dt }}{% endif %}</span>{% endif %}
+    </p>
+    {% if r['approval_reason'] %}<p class="sub" style="margin:0 0 12px;">Reason: {{ r['approval_reason'] }}</p>{% endif %}
+
+    {% if can_approve_request %}
+    <form method="POST" style="display:flex; flex-wrap:wrap; gap:8px; align-items:flex-start;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
+        <input type="text" name="reason" placeholder="Reason (required to return, optional to approve)" style="flex:1; min-width:220px; max-width:360px;">
+        <button type="submit" name="action" value="approve_request" class="btn btn-gold">Approve</button>
+        <button type="submit" name="action" value="return_request" class="btn btn-danger">Return</button>
+    </form>
+    {% elif r['approval_status'] == 'Pending' %}
+    <p class="sub" style="margin:0;">
+        {% if current_user.email == r['requester_email'] %}You cannot approve or return your own request.
+        {% else %}Awaiting a procurement approver.{% endif %}
+    </p>
+    {% endif %}
+
+    {% if approval_history %}
+    <p class="pi-section-title" style="margin-top:18px;">Approval History</p>
+    {% for a in approval_history %}
+    <div class="pi-feed-item">
+        <span style="color:{{ 'var(--teal)' if a['decision'] == 'Approved' else 'var(--red)' }};">{{ a['decision'] }}</span>
+        <div class="pi-feed-meta">{{ a['decided_at']|friendly_short_dt }} &middot; {{ a['decided_by'] }}{% if a['reason'] %} &middot; {{ a['reason'] }}{% endif %}</div>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
+
 <div class="pi-two-col" style="margin-top:8px;">
     <div>
         <p class="pi-section-title">Status</p>
@@ -43,9 +83,13 @@
             {% else %}<span class="rc-badge b-progress">{{ r['status'] }}</span>{% endif %}
         </p>
 
-        {% if r['status'] != 'Released' %}
+        {% if can_manage_product_intelligence %}
+        {% if r['approval_status'] != 'Approved' %}
+        <p class="sub" style="margin:0 0 24px;">This request cannot enter the development pipeline until procurement approves it (currently {{ r['approval_status'] or 'Pending' }}).</p>
+        {% elif r['status'] != 'Released' %}
         <form method="POST" style="margin-bottom:24px;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
             <input type="hidden" name="action" value="change_status">
             <select name="status" style="max-width:260px; display:inline-block;">
                 {% for s in statuses %}
@@ -60,6 +104,7 @@
         <p class="pi-section-title" style="margin-top:24px;">Release</p>
         <form method="POST" class="card" style="background:var(--surface-2);">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
             <input type="hidden" name="action" value="release">
             <label style="margin-top:0;">Release Note (shown to the requester)</label>
             <textarea name="release_note" rows="3" required></textarea>
@@ -76,6 +121,7 @@
             {% if release_row %}<p style="margin:0; max-width:80%;">{{ release_row[0]['release_note'] }}</p>{% endif %}
         </div>
         {% endif %}
+        {% endif %}
 
         <p class="pi-section-title" style="margin-top:24px;">Status History</p>
         <div class="card" style="padding:6px 20px;">
@@ -88,10 +134,12 @@
         </div>
     </div>
 
+    {% if can_manage_product_intelligence %}
     <div>
         <p class="pi-section-title">Details <span class="dim">private</span></p>
         <form method="POST" class="card">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="back" value="{{ back_url }}">
             <input type="hidden" name="action" value="save_details">
             <label style="margin-top:0;">BuildIQ Module</label>
             <input type="text" name="buildiq_module" value="{{ intel['buildiq_module'] if intel else '' }}" placeholder="e.g. Atlas, Redline, SitePulse">
@@ -112,7 +160,8 @@
         </form>
         <p class="sub" style="margin-top:10px; font-size:12px;">Saving here never changes the request's status.</p>
     </div>
+    {% endif %}
 </div>
 
-<a href="{{ url_for('product_intelligence') }}" class="btn" style="margin-top:28px; display:inline-block;">&larr; Back to Product Intelligence</a>
+<a href="{{ back_url }}" class="btn" style="margin-top:28px; display:inline-block;">&larr; Back to Product Intelligence</a>
 {% endblock %}

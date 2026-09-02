@@ -37,7 +37,12 @@
         <tr><th>Project</th><th>Area</th><th>Pour Date</th><th>Amount</th><th>Status</th><th></th></tr>
         {% for r in requests %}
         <tr>
-            <td><strong>{{ r['project'] }}</strong></td>
+            <td>
+                {% if r['status'] == 'Submitted' %}
+                <span title="Needs ordering/scheduling" aria-label="Needs attention: not yet ordered or scheduled" style="color:var(--gold); font-weight:700; margin-right:6px;">&#9888;</span>
+                {% endif %}
+                <strong>{{ r['project'] }}</strong>
+            </td>
             <td>{{ r['area_description'] or '\u2014' }}</td>
             <td>{{ r['pour_date']|friendly_date }}</td>
             <td>{{ r['concrete_amount'] or '\u2014' }}</td>

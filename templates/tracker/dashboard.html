@@ -81,7 +81,7 @@
             {% set dl = p['bid_due_date']|daysleft %}
             <td>{% if dl is not none %}<span style="color: {{ '#F87171' if dl <= 3 else '#FDE047' if dl <= 14 else 'inherit' }}; font-weight:700;">{{ dl }} day{{ 's' if dl != 1 else '' }}</span>{% else %}—{% endif %}</td>
             <td style="max-width:220px; white-space:normal;">{{ p['notes'] or '—' }}</td>
-            <td><a href="{{ url_for('tracker_view_project', project_id=p['id']) }}">Open →</a></td>
+            <td><a href="{{ url_for('tracker_view_project', project_id=p['id'], filter=filter_status) }}">Open →</a></td>
         </tr>
         {% endfor %}
     </table>

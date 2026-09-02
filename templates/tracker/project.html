@@ -1,5 +1,6 @@
 {% extends "tracker/base.html" %}
 {% block content %}
+<a href="{{ url_for('tracker_dashboard', filter=back_filter) if back_filter else url_for('tracker_dashboard') }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; Project Hunt</a>
 <div class="section-row" style="margin-top:0;">
     <div>
         <h1>{{ p['name'] }}</h1>

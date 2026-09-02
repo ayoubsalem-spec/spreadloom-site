@@ -1,5 +1,6 @@
 {% extends "tracker/base.html" %}
 {% block content %}
+<a href="{{ url_for('tracker_view_project', project_id=project['id']) }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; {{ project['name'] }}</a>
 <div class="card" style="max-width:520px; margin:0 auto;">
     <h1 style="font-size:20px;">Edit Vendor Quote</h1>
     <p class="sub">{{ project['name'] }}</p>

@@ -1,5 +1,6 @@
 {% extends "tracker/base.html" %}
 {% block content %}
+<a href="{{ url_for('tracker_view_project', project_id=p['id']) }}" class="btn btn-sm" style="margin-bottom:16px;">&larr; {{ p['name'] }}</a>
 <div class="card" style="max-width:520px; margin:0 auto;">
     <h1 style="font-size:20px;">Edit Project</h1>
     <form method="POST">
@@ -38,7 +39,7 @@
     <form method="POST" action="{{ url_for('tracker_delete_project', project_id=p['id']) }}"
           onsubmit="return confirm('Delete this project permanently? This also deletes all its quotes and documents. This cannot be undone.');">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" style="color:#F87171; border-color:#7F1D1D;">Delete Project Permanently</button>
+        <button type="submit" class="btn btn-danger">Delete Project Permanently</button>
     </form>
 </div>
 {% endblock %}

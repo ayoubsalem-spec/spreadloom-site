@@ -248,6 +248,27 @@ def _find_project(db, project_name=None, project_id=None):
     return None, []
 
 
+def _tool_set_project_context(user, project_name=None, project_id=None):
+    """Item 6 -- Atlas canonical project awareness. Resolves a project
+    exactly the same way get_project_status does (same _find_project
+    helper, same never-guess-on-ambiguity behavior) but returns only the
+    identity fields needed to establish session context, not the full
+    status payload. The actual writing of this result into the
+    session's project_context happens in execute_tool() (app.py) --
+    this handler, like every other tool handler, only ever touches the
+    database/read path and returns a plain dict; it has no access to
+    (and does not need) the session itself.
+    """
+    from app import get_db
+    db = get_db()
+    project, ambiguous = _find_project(db, project_name, project_id)
+    if not project:
+        if ambiguous:
+            return {"found": False, "reason": "ambiguous", "matches": ambiguous}
+        return {"found": False, "reason": "not_found"}
+    return {"found": True, "project_id": project["id"], "name": project["name"]}
+
+
 def _tool_get_project_status(user, project_name=None, project_id=None):
     from app import get_db, user_has_permission
     db = get_db()
@@ -487,4 +508,28 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
         atlas_permission="atlas:view_business_data",
         kind="read",
         handler=_tool_get_attention_items,
+    )
+    register_tool(
+        name="set_project_context",
+        description=(
+            "Establish (or switch) the canonical project this Atlas session is currently working on, by name or "
+            "id, so other tools that accept project_id can reuse it without asking again. Uses the exact same "
+            "resolution as get_project_status -- an exact name match, or a unique substring match. If more than "
+            "one project matches, nothing is set and the caller must ask the person which one they mean; this "
+            "never guesses. Call this whenever the person establishes or changes which project they mean (e.g. "
+            "'we're working on Patel Farm', 'switch to the Overlook Tower job') -- not on every turn."
+        ),
+        parameters={
+            "project_name": {"type": "string", "required": False},
+            "project_id": {"type": "integer", "required": False},
+        },
+        # Read-level permission only -- this never writes to the
+        # database, only resolves an existing tracker_projects row and
+        # (via execute_tool's session_context handling) remembers it for
+        # the rest of this Atlas session. The same permission
+        # get_project_status already requires.
+        permission="module:project_hunt:view",
+        atlas_permission="atlas:view_business_data",
+        kind="read",
+        handler=_tool_set_project_context,
     )
