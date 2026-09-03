@@ -17,6 +17,7 @@ attachments, and Excel export -- flagged here rather than silently dropped,
 to be added in a follow-up pass.
 """
 import os
+import sys
 import sqlite3
 import uuid
 import hashlib
@@ -4188,7 +4189,70 @@ def _atlas_native_tool_declarations(only=None):
     return declarations
 
 
-def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=600):
+# ---------------------------------------------------------------------------
+# TEST-ONLY ATLAS TURN DIAGNOSTICS (release review: "stop patching,
+# instrument the pipeline"). Purely additive observability -- adds
+# logging calls at existing points in the pipeline, changes NO control
+# flow, NO timeouts, NO retries, NO prompts, NO SQL. Completely inert
+# (zero output, zero behavior difference) unless explicitly enabled.
+# ---------------------------------------------------------------------------
+ATLAS_TURN_DIAGNOSTICS = os.environ.get("ATLAS_TURN_DIAGNOSTICS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _atlas_trace(event, **safe_fields):
+    """Logs ONE diagnostic line for the CURRENT request's Atlas turn --
+    timings/state/safe-enum fields ONLY. Reads the current turn's trace
+    id from flask.g (set once per /assistant/ask request) rather than
+    being threaded through every function's parameters, so this can be
+    called from anywhere in the pipeline (including intelligence.py's
+    per-source queries) without changing any existing function
+    signature except _stream_claude_completion's own optional `label`.
+
+    HARD RULE, enforced by convention at every call site (never by this
+    function itself, since it has no way to inspect what a caller
+    passes): `safe_fields` values must already be safe on their own --
+    durations, counts, fixed closed-enum outcomes (e.g. "success",
+    "ambiguous", "failed"), or exception CLASS names (type(e).__name__,
+    e.g. "ReadTimeout") -- NEVER prompt/message/model-response/tool-
+    result content, database row values, API keys, or auth headers.
+    Every call site in this diagnostics pass was written to honor that;
+    see the regression tests proving no content ever appears in a
+    captured trace line.
+
+    No-ops entirely (zero string formatting, zero I/O) when
+    ATLAS_TURN_DIAGNOSTICS is off, which is the default -- this is not
+    just "quiet," the code path is never even entered.
+    """
+    if not ATLAS_TURN_DIAGNOSTICS:
+        return
+    trace_id = getattr(g, "atlas_trace_id", None)
+    if not trace_id:
+        return
+    parts = " ".join(f"{k}={v}" for k, v in safe_fields.items())
+    line = f"[ATLAS TRACE {trace_id}] {event}" + (f" {parts}" if parts else "")
+    print(line, file=sys.stderr)
+
+
+def _atlas_trace_safe_scope(raw_scope):
+    """Sanitizes a scope value for DIAGNOSTIC LOGGING ONLY -- never used
+    for actual tool validation/execution, which already has its own
+    independent, correct enum check elsewhere (the Tool Registry's
+    schema validation, plus the handler's own defense-in-depth check in
+    intelligence.py). This exists purely because a diagnostic log call
+    site must never write an arbitrary, model-supplied string verbatim
+    into logs, even a supposedly-harmless one -- `scope` originates from
+    a model tool call, so nothing about its actual content can be
+    trusted for logging purposes until it's been checked against this
+    exact same small closed enum. Anything not exactly one of these six
+    values -- including log-injection attempts (embedded newlines),
+    employee-text-looking content, SQL-looking content, or simply an
+    unexpected/malformed value -- is logged as the fixed literal
+    "invalid", never the raw value itself."""
+    ALLOWED_DIAG_SCOPES = {"overview", "equipment", "concrete", "purchases", "rentals", "attention"}
+    return raw_scope if raw_scope in ALLOWED_DIAG_SCOPES else "invalid"
+
+
+def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=600, label=None):
     """Makes ONE Claude API call and yields low-level parsed events as it
     streams back -- this is the single place SSE-from-Anthropic parsing
     happens, reused for both the tool-detection pass and the (optional)
@@ -4223,6 +4287,9 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
     payload = {"model": "claude-sonnet-4-6", "max_tokens": max_tokens, "system": system, "messages": messages, "stream": True}
     if tools:
         payload["tools"] = tools
+    _trace_start = time.perf_counter()
+    if label:
+        _atlas_trace(f"{label}_START")
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -4238,11 +4305,14 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
                 detail = resp_obj.text[:500]
             except Exception:
                 pass
+        if label:
+            _atlas_trace(f"{label}_END", duration_ms=int((time.perf_counter() - _trace_start) * 1000), outcome="error", error_type=type(e).__name__)
         yield ("error", detail)
         return
 
     stop_reason = None
     message_stop_received = False
+    _first_event_traced = False
     try:
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data:"):
@@ -4250,6 +4320,9 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
             raw_payload = line[len("data:"):].strip()
             if raw_payload in ("", "[DONE]"):
                 continue
+            if label and not _first_event_traced:
+                _atlas_trace(f"{label}_FIRST_EVENT")
+                _first_event_traced = True
             try:
                 event = json.loads(raw_payload)
             except json.JSONDecodeError:
@@ -4291,6 +4364,8 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
                 # fallback after the loop below, which is what actually
                 # enforces that.
                 message_stop_received = True
+                if label:
+                    _atlas_trace(f"{label}_MESSAGE_STOP")
             elif etype == "error":
                 # Anthropic's own in-stream error event (distinct from an
                 # HTTP/request-level failure, which is caught above by the
@@ -4303,6 +4378,8 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
                 # which would be silently misinterpreted downstream as an
                 # ordinary completed (if odd) turn.
                 err_detail = (event.get("error", {}) or {}).get("message") or json.dumps(event.get("error", {}))
+                if label:
+                    _atlas_trace(f"{label}_END", duration_ms=int((time.perf_counter() - _trace_start) * 1000), outcome="error", error_type="AnthropicStreamError")
                 yield ("error", err_detail)
                 return
     except requests.exceptions.RequestException as e:
@@ -4331,6 +4408,8 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
                 detail = resp_obj.text[:500]
             except Exception:
                 pass
+        if label:
+            _atlas_trace(f"{label}_END", duration_ms=int((time.perf_counter() - _trace_start) * 1000), outcome="error", error_type=type(e).__name__)
         yield ("error", detail)
         return
 
@@ -4344,8 +4423,12 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
         # contain sensitive request/response material -- and treated
         # exactly like any other terminal error: the caller must not
         # execute a tool or advance any state from an incomplete stream.
+        if label:
+            _atlas_trace(f"{label}_END", duration_ms=int((time.perf_counter() - _trace_start) * 1000), outcome="incomplete_no_message_stop")
         yield ("error", "Anthropic stream ended before message_stop")
         return
+    if label:
+        _atlas_trace(f"{label}_END", duration_ms=int((time.perf_counter() - _trace_start) * 1000), outcome="success", stop_reason=str(stop_reason))
     yield ("stop", stop_reason)
 
 
@@ -4618,7 +4701,7 @@ def stream_atlas_turn(user_text, draft):
     protocol_anomaly = {"value": None}  # e.g. "orphan_block_stop", "orphan_tool_input_delta", "duplicate_block_stop", "duplicate_content_block_start", "duplicate_tool_use_start"
     pass1_error = {"value": None}
     pass1_stop_reason = {"value": None}
-    for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(), max_tokens=200):
+    for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(), max_tokens=200, label="PASS1"):
         kind = event[0]
         if kind == "block_start":
             _, btype, idx = event
@@ -4816,7 +4899,17 @@ def stream_atlas_turn(user_text, draft):
                 # _find_project()'s exact/unique-substring/ambiguous
                 # logic, session-context write-back, audit logging.
                 # Nothing here duplicates or bypasses any of that.
+                _trace_label = "CONTEXT_TOOL" if tool_name == "set_project_context" else "INTELLIGENCE" if tool_name == "get_project_intelligence" else None
+                if _trace_label:
+                    _atlas_trace(f"{_trace_label}_START", **({"scope": _atlas_trace_safe_scope(tool_input.get("scope", "overview"))} if _trace_label == "INTELLIGENCE" else {}))
+                _tool_trace_start = time.perf_counter()
                 result = execute_tool(tool_name, tool_input, current_user, session_context=project_context)
+                if _trace_label:
+                    if result.success and result.data is not None:
+                        _outcome = "success" if result.data.get("found", True) else result.data.get("reason", "not_found")
+                    else:
+                        _outcome = "failed"
+                    _atlas_trace(f"{_trace_label}_END", duration_ms=int((time.perf_counter() - _tool_trace_start) * 1000), outcome=_outcome)
                 if not result.success and result.error == "not permitted":
                     yield from _fail_safe_reply("You don't have permission to look up projects right now.")
                     turn_level_error = "__handled_fail_safe__"
@@ -4898,7 +4991,7 @@ def stream_atlas_turn(user_text, draft):
         protocol_anomaly_1b = {"value": None}
         pass1b_error = {"value": None}
         pass1b_stop_reason = {"value": None}
-        for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(only=["get_project_intelligence"]), max_tokens=200):
+        for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(only=["get_project_intelligence"]), max_tokens=200, label="PASS1B"):
             kind = event[0]
             if kind == "block_start":
                 _, btype, idx = event
@@ -4950,7 +5043,14 @@ def stream_atlas_turn(user_text, draft):
                     # project_id comes ONLY from execute_tool's own
                     # session_context auto-fill of the value Pass 1 just
                     # established, never from anything in candidate_input.
+                    _atlas_trace("INTELLIGENCE_START", scope=_atlas_trace_safe_scope(candidate_input.get("scope", "overview")))
+                    _tool_trace_start_1b = time.perf_counter()
                     result_1b = execute_tool("get_project_intelligence", candidate_input, current_user, session_context=project_context)
+                    if result_1b.success and result_1b.data is not None:
+                        _outcome_1b = "success" if result_1b.data.get("found", True) else result_1b.data.get("reason", "not_found")
+                    else:
+                        _outcome_1b = "failed"
+                    _atlas_trace("INTELLIGENCE_END", duration_ms=int((time.perf_counter() - _tool_trace_start_1b) * 1000), outcome=_outcome_1b)
                     if result_1b.success or result_1b.error != "not permitted":
                         tool_name_1b, tool_use_id_1b, tool_input_1b = candidate_name, candidate_id, candidate_input
                         tool_result_content_1b = json.dumps(result_1b.data if result_1b.success else {"error": result_1b.error})
@@ -5018,8 +5118,12 @@ def stream_atlas_turn(user_text, draft):
         pass2_error = {"value": None}
 
         def _pass2_delta_source():
-            for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=None):
+            _first_text_traced = False
+            for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=None, label="PASS2"):
                 if ev[0] == "text_delta":
+                    if not _first_text_traced:
+                        _atlas_trace("PASS2_FIRST_TEXT")
+                        _first_text_traced = True
                     yield ev[1]
                 elif ev[0] == "error":
                     pass2_error["value"] = ev[1]
@@ -5364,6 +5468,18 @@ def assistant_ask():
     if not is_atlas_allowed():
         return {"error": "not authorized"}, 403
 
+    # TEST-ONLY diagnostics: generate a short random trace id for this
+    # request when ATLAS_TURN_DIAGNOSTICS is enabled, and stash it on
+    # flask.g so _atlas_trace() (called from deep inside stream_atlas_turn
+    # and intelligence.py) can find it without any parameter threading.
+    # No-op entirely, zero id generated, when diagnostics are off.
+    atlas_trace_id = None
+    if ATLAS_TURN_DIAGNOSTICS:
+        atlas_trace_id = secrets.token_hex(3)
+        g.atlas_trace_id = atlas_trace_id
+    _request_trace_start = time.perf_counter()
+    _atlas_trace("REQUEST_START")
+
     transcribe_error = None
     if request.content_type and "multipart/form-data" in request.content_type:
         audio_file = request.files.get("audio")
@@ -5447,7 +5563,32 @@ def assistant_ask():
     draft["interaction_mode"] = "voice" if raw_mode == "voice" else "text"
 
     def generate():
+        # TEST-ONLY diagnostics wrapper: transparently passes every real
+        # chunk through unchanged (zero effect on actual SSE content),
+        # and adds exactly two things when enabled: the diagnostic
+        # trace-id event right after 'question', and a SSE_DONE_SENT/
+        # REQUEST_END trace line. This wraps the ORIGINAL generate()
+        # body (now _generate_inner, unmodified in its own control flow
+        # except for the one new diagnostic-event yield right after
+        # 'question') rather than touching every one of its several
+        # existing return points individually.
+        try:
+            for chunk in _generate_inner():
+                if '"type": "done"' in chunk:
+                    _atlas_trace("SSE_DONE_SENT")
+                yield chunk
+        finally:
+            _atlas_trace("REQUEST_END", total_ms=int((time.perf_counter() - _request_trace_start) * 1000))
+
+    def _generate_inner():
         yield f"data: {json.dumps({'type': 'question', 'text': question, 'transcribe_error': transcribe_error})}\n\n"
+        if ATLAS_TURN_DIAGNOSTICS and atlas_trace_id:
+            # TEST-ONLY: lets the browser (in diagnostics mode only)
+            # display the trace id near the thinking indicator, so an
+            # employee/tester can hand it to us for correlating with
+            # server-side trace lines. Never emitted otherwise -- no new
+            # SSE event type reaches production traffic.
+            yield f"data: {json.dumps({'type': 'diagnostic', 'trace_id': atlas_trace_id})}\n\n"
         if transcribe_error:
             yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return

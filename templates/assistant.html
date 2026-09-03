@@ -690,6 +690,29 @@
         function isStillCurrent() { return myNetworkTurn === networkTurnCounter; }
         var terminalDoneReceived = false; // set true only by a REAL Atlas 'done' event -- see pump()'s own EOF handling below for why this matters
 
+        // TEST-ONLY diagnostics: a 'diagnostic' SSE event is only ever
+        // emitted server-side when ATLAS_TURN_DIAGNOSTICS is enabled --
+        // when it's off, none of this fires at all and setStatus() below
+        // behaves exactly as before ('Thinking...' with no suffix). The
+        // elapsed timer and trace id are diagnostic instrumentation, not
+        // production UX -- they exist to let a tester correlate a
+        // specific stuck browser request with the matching server-side
+        // trace lines. Both are torn down (interval cleared) the moment
+        // this turn reaches ANY terminal state (done, EOF-recovery, or
+        // reject), and a superseded turn's own timer can never keep
+        // running to affect a newer turn's status line.
+        var atlasDiagTraceId = null;
+        var atlasDiagTimerHandle = null;
+        var atlasDiagStartMs = null;
+        function stopDiagTimer() {
+            if (atlasDiagTimerHandle) { clearInterval(atlasDiagTimerHandle); atlasDiagTimerHandle = null; }
+        }
+        function diagStatusSuffix() {
+            if (!atlasDiagTraceId) return '';
+            var elapsedS = (atlasDiagStartMs !== null) ? Math.floor((Date.now() - atlasDiagStartMs) / 1000) : 0;
+            return ' ' + elapsedS + 's [' + atlasDiagTraceId + ']';
+        }
+
         doFetch(myAbortController.signal).then(function (response) {
             var reader = response.body.getReader();
             var decoder = new TextDecoder();
@@ -716,6 +739,7 @@
                         // turn's own trailing EOF must never touch a
                         // newer turn's UI state.
                         if (!terminalDoneReceived && isStillCurrent()) {
+                            stopDiagTimer();
                             removeTyping();
                             setStatus('');
                             sendBtn.disabled = false;
@@ -744,6 +768,17 @@
                 if (evt.type === 'question') {
                     if (!questionAlreadyShown) addMessage('user', evt.text);
                     if (evt.transcribe_error) addMessage('error', 'Could not transcribe: ' + evt.transcribe_error);
+                } else if (evt.type === 'diagnostic') {
+                    // TEST-ONLY -- see the block comment above where these
+                    // variables are declared. Never emitted in production.
+                    atlasDiagTraceId = evt.trace_id;
+                    atlasDiagStartMs = Date.now();
+                    setStatus('Thinking...' + diagStatusSuffix());
+                    stopDiagTimer();
+                    atlasDiagTimerHandle = setInterval(function () {
+                        if (!isStillCurrent()) { stopDiagTimer(); return; }
+                        setStatus('Thinking...' + diagStatusSuffix());
+                    }, 1000);
                 } else if (evt.type === 'delta') {
                     if (!assistantBubble) {
                         removeTyping();
@@ -760,6 +795,7 @@
                     if (evt.audio_error) addMessage('error', 'Atlas voice unavailable for part of that reply, using free voice instead: ' + evt.audio_error);
                 } else if (evt.type === 'done') {
                     terminalDoneReceived = true; // a REAL Atlas 'done' arrived -- pump()'s EOF-recovery path must not also fire for this turn
+                    stopDiagTimer();
                     setStatus('');
                     sendBtn.disabled = false;
                     turnInFlight = false;
@@ -784,6 +820,7 @@
             return pump();
         }).catch(function (err) {
             if (!isStillCurrent()) return; // this turn was superseded -- a newer turn owns turnInFlight/vState/etc. now, don't touch them
+            stopDiagTimer();
             removeTyping();
             setStatus('');
             sendBtn.disabled = false;

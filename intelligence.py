@@ -683,7 +683,8 @@ def _tool_get_project_intelligence(user, scope=None, project_id=None):
     _pi_source_failure for what gets logged, and for how a SECOND
     failure (in the logging itself) is also contained.
     """
-    from app import get_db, user_has_permission
+    from app import get_db, user_has_permission, _atlas_trace
+    import time as _time
     db = get_db()
 
     if scope is not None and scope not in _PI_VALID_SCOPES:
@@ -699,6 +700,7 @@ def _tool_get_project_intelligence(user, scope=None, project_id=None):
 
     # Re-verify the project still exists and is still real RIGHT NOW --
     # never trust that it was valid whenever context was last set.
+    _core_start = _time.perf_counter()
     project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
     if not project:
         return {"found": False, "reason": "not_found"}
@@ -706,39 +708,50 @@ def _tool_get_project_intelligence(user, scope=None, project_id=None):
     pid = project["id"]
     pname = project["name"]
     result = {"found": True, "project": _pi_project_core(db, project)}
+    _atlas_trace("INTELLIGENCE_PROJECT_CORE_END", duration_ms=int((_time.perf_counter() - _core_start) * 1000))
 
     want = lambda s: scope == "overview" or scope == s
 
     if want("concrete") and user_has_permission(user, "module:sitepulse:view"):
+        _src_start = _time.perf_counter()
         try:
             result["concrete"] = _pi_concrete(db, pid, pname)
         except Exception as exc:
             _pi_source_failure("concrete", pid, exc)
+        _atlas_trace("INTELLIGENCE_CONCRETE_END", duration_ms=int((_time.perf_counter() - _src_start) * 1000))
 
     if want("purchases") and user_has_permission(user, "module:sitepulse:view"):
+        _src_start = _time.perf_counter()
         try:
             result["purchases"] = _pi_purchases(db, pid, pname)
         except Exception as exc:
             _pi_source_failure("purchases", pid, exc)
+        _atlas_trace("INTELLIGENCE_PURCHASES_END", duration_ms=int((_time.perf_counter() - _src_start) * 1000))
 
     if want("equipment") and user_has_permission(user, "module:equipment_center:view"):
+        _src_start = _time.perf_counter()
         try:
             result["equipment"] = _pi_equipment(db, pid)
         except Exception as exc:
             _pi_source_failure("equipment", pid, exc)
+        _atlas_trace("INTELLIGENCE_EQUIPMENT_END", duration_ms=int((_time.perf_counter() - _src_start) * 1000))
 
     if want("rentals") and user_has_permission(user, "module:equipment_center:view"):
+        _src_start = _time.perf_counter()
         try:
             result["rentals"] = _pi_rentals(db, pid, pname)
         except Exception as exc:
             _pi_source_failure("rentals", pid, exc)
+        _atlas_trace("INTELLIGENCE_RENTALS_END", duration_ms=int((_time.perf_counter() - _src_start) * 1000))
 
     if want("attention"):
+        _src_start = _time.perf_counter()
         try:
             project_attention = [item for item in build_attention_items(user) if item.get("project_id") == pid]
             result["attention"] = project_attention[:_PI_ATTENTION_LIMIT]
         except Exception as exc:
             _pi_source_failure("attention", pid, exc)
+        _atlas_trace("INTELLIGENCE_ATTENTION_END", duration_ms=int((_time.perf_counter() - _src_start) * 1000))
 
     return result
 
