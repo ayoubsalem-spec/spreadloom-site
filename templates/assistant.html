@@ -343,6 +343,27 @@
         return div;
     }
 
+    function clearTranscript() {
+        // Removes every rendered message and restores the "no messages
+        // yet" empty state -- used when switching to a different saved
+        // conversation (or starting a new one) so the previous
+        // conversation's messages don't linger mixed in with the newly
+        // loaded ones.
+        while (messagesEl.firstChild) { messagesEl.removeChild(messagesEl.firstChild); }
+        emptyEl.style.display = '';
+    }
+
+    // PUBLIC INTERFACE (Atlas history sidebar phase): addMessage/
+    // setStatus/clearTranscript are otherwise private to this closure --
+    // the conversation-history sidebar is a deliberately SEPARATE
+    // script block/IIFE (so it never touches voice/VAD state directly),
+    // and needs a way to render historical messages using the exact
+    // same visual presentation as live ones rather than maintaining a
+    // second, duplicate rendering implementation. This is the ONLY
+    // thing exposed outside this closure for that purpose -- no other
+    // voice/VAD internals are exported.
+    window.AtlasChat = { addMessage: addMessage, setStatus: setStatus, clearTranscript: clearTranscript };
+
     function addTyping() {
         emptyEl.style.display = 'none';
         var div = document.createElement('div');
@@ -1363,9 +1384,11 @@
 
 <script>
 // Atlas conversation-history sidebar (interaction-modes/history phase).
-// Deliberately a SEPARATE, self-contained IIFE -- reads csrfToken/
-// addMessage from the surrounding page but does not touch, wrap, or
-// depend on any voice/VAD state machine above.
+// Deliberately a SEPARATE, self-contained IIFE -- reads csrfToken and
+// the window.AtlasChat public interface (addMessage/setStatus/
+// clearTranscript, exported deliberately for exactly this purpose) from
+// the surrounding page, but does not touch, wrap, or depend on any
+// voice/VAD internal state directly.
 (function () {
     var toggleBtn = document.getElementById('atlas-history-toggle-btn');
     var panel = document.getElementById('atlas-history-panel');
@@ -1374,6 +1397,22 @@
     var csrfToken = document.querySelector('meta[name="csrf-token"]') ?
         document.querySelector('meta[name="csrf-token"]').content :
         (window.csrfToken || '');
+
+    function friendlyTimestamp(isoStr) {
+        // Stored timestamps are naive UTC (datetime.utcnow().isoformat()).
+        // Appending 'Z' before parsing tells the browser's Date parser
+        // this is UTC, so toLocaleString() below then correctly renders
+        // it in whatever timezone the browser itself is actually set
+        // to -- the person's real local time, not a guessed/assumed
+        // one, and not falsely labeled as anything else.
+        var d = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
+        if (isNaN(d.getTime())) return isoStr;
+        var now = new Date();
+        var isToday = d.toDateString() === now.toDateString();
+        var timePart = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+        if (isToday) return 'Today, ' + timePart;
+        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + timePart;
+    }
 
     function loadConversations() {
         fetch('{{ url_for("assistant_conversations_list") }}')
@@ -1393,7 +1432,7 @@
                     titleEl.textContent = c.title;
                     var metaEl = document.createElement('div');
                     metaEl.className = 'atlas-history-item-meta';
-                    metaEl.textContent = (c.project_name ? c.project_name + ' \u00b7 ' : '') + c.updated_at;
+                    metaEl.textContent = (c.project_name ? c.project_name + ' \u00b7 ' : '') + friendlyTimestamp(c.updated_at);
                     item.appendChild(titleEl);
                     item.appendChild(metaEl);
                     item.addEventListener('click', function () { openConversation(c.id); });
@@ -1409,18 +1448,25 @@
                 return r.json();
             })
             .then(function (data) {
-                var chatLog = document.getElementById('chat-log') || document.getElementById('atlas-messages');
-                if (chatLog) chatLog.innerHTML = '';
-                (data.messages || []).forEach(function (m) {
-                    if (typeof addMessage === 'function') addMessage(m.role, m.content);
-                });
-                if (data.context_needs_reselection && typeof setStatus === 'function') {
-                    setStatus('This conversation\'s project is no longer available -- please select a project again if needed.');
+                if (window.AtlasChat) {
+                    window.AtlasChat.clearTranscript();
+                    (data.messages || []).forEach(function (m) {
+                        window.AtlasChat.addMessage(m.role, m.content);
+                    });
+                    if (data.context_needs_reselection) {
+                        window.AtlasChat.setStatus('This conversation\'s project is no longer available -- please select a project again if needed.');
+                    }
                 }
+                // Opening a saved conversation really activates it
+                // server-side already (GET /assistant/conversations/<id>
+                // sets it as this Atlas session's current conversation),
+                // so the next typed/voice message naturally continues
+                // THIS SAME conversation -- nothing further to do here
+                // to make that true.
                 panel.classList.remove('open');
             })
             .catch(function () {
-                if (typeof setStatus === 'function') setStatus('Could not open that conversation.');
+                if (window.AtlasChat) window.AtlasChat.setStatus('Could not open that conversation.');
             });
     }
 
@@ -1437,10 +1483,11 @@
                 method: 'POST',
                 headers: { 'X-CSRFToken': csrfToken }
             }).then(function () {
-                var chatLog = document.getElementById('chat-log') || document.getElementById('atlas-messages');
-                if (chatLog) chatLog.innerHTML = '';
+                if (window.AtlasChat) {
+                    window.AtlasChat.clearTranscript();
+                    window.AtlasChat.setStatus('Started a new conversation.');
+                }
                 panel.classList.remove('open');
-                if (typeof setStatus === 'function') setStatus('Started a new conversation.');
             });
         });
     }

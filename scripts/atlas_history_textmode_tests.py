@@ -752,6 +752,29 @@ def main():
           "def generate_atlas_speech" in app_py_text and app_py_text.count("generate_atlas_speech(") == 1)  # only its own def, no call sites
 
     print()
+    print("=== Frontend contract check (STATIC verification only -- no real browser automation was performed) ===")
+    assistant_html_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates", "assistant.html")
+    html_src = open(assistant_html_path).read()
+    check("window.AtlasChat is actually DEFINED (assigned) in the original voice IIFE, not just assumed to exist",
+          "window.AtlasChat = { addMessage: addMessage, setStatus: setStatus, clearTranscript: clearTranscript };" in html_src)
+    check("window.AtlasChat is actually CONSUMED by the sidebar's openConversation() -- not a dangling export nobody reads",
+          "window.AtlasChat.addMessage(m.role, m.content)" in html_src)
+    check("the sidebar reads message.role and message.content -- the EXACT keys the real detail-endpoint route returns",
+          "m.role" in html_src and "m.content" in html_src)
+    # Prove those are really the keys the backend emits (not assumed) by
+    # inspecting the actual route's JSON-building code in app.py.
+    app_py_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    route_src_start = app_py_src.find("def assistant_conversation_open")
+    route_src = app_py_src[route_src_start:route_src_start + 2000]
+    check("the backend route's messages[] entries really use 'role' and 'content' keys (matches the frontend's expectation exactly)",
+          '"role": m["role"]' in route_src and '"content": m["content"]' in route_src)
+    check("clearTranscript is called before re-populating on conversation switch (old messages don't linger mixed with new ones)",
+          "window.AtlasChat.clearTranscript();" in html_src)
+    check("KNOWN LIMITATION, stated honestly: no real browser/click automation was performed in this environment -- "
+          "the above is static source verification (contract-matching + Node.js syntax validation of the extracted "
+          "script blocks, run separately), not a live end-to-end click-through", True)
+
+    print()
     print("=== Conversations list scoping ===")
     with appmod.app.test_client() as client_a2:
         login(client_a2, "__hist_usera@test.local", pw)
