@@ -63,6 +63,27 @@ def fake_response(lines):
     return resp
 
 
+def fake_midstream_hang_response(partial_lines):
+    """Simulates the ACTUAL failure class from the real browser
+    acceptance failure: a connection that starts fine (headers/initial
+    chunks arrive normally, so the connection-phase try/except never
+    triggers) but then dies MID-STREAM while resp.iter_lines() is still
+    being iterated -- a stalled read, dropped connection, or
+    ChunkedEncodingError partway through. This is NOT the same as the
+    already-covered "requests.post() itself fails" case (fake_sse_error_response
+    equivalent) -- that one never gets past the initial try/except at
+    all. This one specifically exercises the iteration loop itself,
+    which is exactly where the real defect was found."""
+    def _iter_lines(decode_unicode=True):
+        for line in partial_lines:
+            yield line
+        raise appmod.requests.exceptions.ConnectionError("simulated mid-stream connection drop")
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.iter_lines = _iter_lines
+    return resp
+
+
 def no_tool_pass():
     return fake_response(build_sse_lines([], stop_reason="end_turn"))
 
@@ -726,6 +747,83 @@ def main():
         d_1b_nf = base_draft()
         _, mp_1b_nf = run_turn("Let's talk about a fake project", d_1b_nf, [pass1_notfound, text_pass("I couldn't find that project.")])
         check("failed/not-found resolution: Pass 1B never attempted (only 2 calls, not 3)", mp_1b_nf.call_count == 2)
+
+        print()
+        print("=== Mid-stream connection failure (the ACTUAL real-browser-acceptance failure class) ===")
+        # This is the defect that caused the real browser hang: a
+        # requests.exceptions.RequestException raised WHILE iterating
+        # resp.iter_lines() (not at initial connection) was completely
+        # unprotected -- it escaped stream_atlas_turn entirely, killing
+        # the SSE response with NO terminal event ever sent, leaving the
+        # browser's thinking indicator stuck forever. Every one of the
+        # three passes on this exact turn shape is tested here.
+
+        # 1. Pass 1 itself hangs/drops mid-stream (after some initial bytes).
+        d_hang1 = base_draft()
+        partial_pass1 = [
+            "data: " + json.dumps({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": []}}),
+            "data: " + json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t1", "name": "set_project_context", "input": {}}}),
+        ]
+        evs_hang1, mp_hang1 = run_turn("Let's talk about Patel Farm - what needs attention?", d_hang1,
+                                         [fake_midstream_hang_response(partial_pass1)])
+        check("1. Pass 1 mid-stream drop: the generator terminates safely -- no exception escapes stream_atlas_turn (proven by run_turn completing without raising)", True)
+        check("1. Pass 1 mid-stream drop: no project_context mutation from an incomplete/killed stream", d_hang1["project_context"] == {})
+        check("1. Pass 1 mid-stream drop: only 1 API call made (fails closed, no Pass 1B/Pass 2 with invalid state)", mp_hang1.call_count == 1)
+        visible_hang1 = "".join(e.get("text", "") for e in evs_hang1 if e.get("type") == "delta")
+        check("1. Pass 1 mid-stream drop: the browser receives an explicit, safe terminal error message (not silence)",
+              ("trouble completing" in visible_hang1.lower() or "try again" in visible_hang1.lower()))
+        check("E. Pass 1 mid-stream drop: the raw simulated exception text is NOT present in the employee-visible SSE output",
+              "simulated mid-stream connection drop" not in visible_hang1 and "ConnectionError" not in visible_hang1)
+        done_hang1 = next((e for e in evs_hang1 if e.get("type") == "done"), None)
+        check("1. Pass 1 mid-stream drop: a real terminal 'done' event was emitted -- the browser's loading/thinking state CAN clear",
+              done_hang1 is not None)
+
+        # 2. Pass 1 completes fine, Pass 1B hangs/drops mid-stream --
+        # Pass 1B's own failure is designed to degrade GRACEFULLY (the
+        # already-successful project switch stands, and Pass 2 still
+        # runs to give a real, useful answer grounded in that switch
+        # alone) rather than aborting the whole turn -- so Pass 2 is
+        # still expected to run here (3 calls total), NOT skipped.
+        d_hang1b = base_draft()
+        partial_pass1b = [
+            "data: " + json.dumps({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": []}}),
+            "data: " + json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}}),
+        ]
+        evs_hang1b, mp_hang1b = run_turn("Let's talk about Patel Farm - what needs attention?", d_hang1b,
+                                           [set_project_pass("Patel Farm"), fake_midstream_hang_response(partial_pass1b),
+                                            text_pass("We're now on Patel Farm Project.")])
+        check("2. Pass 1B mid-stream drop: generator terminates safely, no unhandled exception", True)
+        check("2. Pass 1B mid-stream drop: the successful project switch from Pass 1 STILL stands (not invalidated by Pass 1B's own failure)",
+              d_hang1b["project_context"].get("project_id") == patel_id)
+        check("2. Pass 1B mid-stream drop: Pass 1B's failure degrades GRACEFULLY -- Pass 2 still runs to give a real answer (3 calls total)",
+              mp_hang1b.call_count == 3)
+        visible_hang1b = "".join(e.get("text", "") for e in evs_hang1b if e.get("type") == "delta")
+        check("2. Pass 1B mid-stream drop: the user still gets a real, useful answer about the project switch (not a dead silence, not a fake error either)",
+              "Patel Farm" in visible_hang1b)
+        done_hang1b = next((e for e in evs_hang1b if e.get("type") == "done"), None)
+        check("2. Pass 1B mid-stream drop: a real terminal 'done' event reached the browser", done_hang1b is not None)
+
+        # 3. Pass 1 + Pass 1B complete fine, Pass 2 (the actual visible-answer call) hangs/drops mid-stream.
+        d_hang2 = base_draft()
+        partial_pass2 = [
+            "data: " + json.dumps({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": []}}),
+            "data: " + json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            "data: " + json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Patel Farm has"}}),
+        ]
+        evs_hang2, mp_hang2 = run_turn("Let's talk about Patel Farm - what needs attention?", d_hang2,
+                                         [set_project_pass("Patel Farm"), intelligence_pass("attention"), fake_midstream_hang_response(partial_pass2)])
+        check("3. Pass 2 mid-stream drop: generator terminates safely, no unhandled exception", True)
+        check("3. Pass 2 mid-stream drop: BOTH the project switch and intelligence gathering already genuinely succeeded, and correctly still stand",
+              d_hang2["project_context"].get("project_id") == patel_id)
+        check("3. Pass 2 mid-stream drop: all 3 API calls were made (the failure is specifically in rendering the final answer, not earlier)", mp_hang2.call_count == 3)
+        visible_hang2 = "".join(e.get("text", "") for e in evs_hang2 if e.get("type") == "delta")
+        check("3. Pass 2 mid-stream drop: the browser receives a safe terminal error (partial 'Patel Farm has' text is not left as a fake completed answer)",
+              ("trouble completing" in visible_hang2.lower() or "try again" in visible_hang2.lower()))
+        check("F. Pass 2 mid-stream drop: the raw simulated exception text is NOT present in the employee-visible SSE output",
+              "simulated mid-stream connection drop" not in visible_hang2 and "ConnectionError" not in visible_hang2)
+        done_hang2 = next((e for e in evs_hang2 if e.get("type") == "done"), None)
+        check("3. Pass 2 mid-stream drop: a real terminal 'done' event reached the browser -- the thinking indicator can clear",
+              done_hang2 is not None and done_hang2.get("pending_write_token") is None)
 
         print()
         print("=== get_project_status remains untouched ===")

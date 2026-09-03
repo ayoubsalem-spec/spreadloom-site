@@ -819,7 +819,7 @@ def main():
         visible_real = "".join(e.get("text", "") for e in evs_real if e.get("type") == "delta")
         check("real scenario: no snapshot-based 'I don't see it' style answer was produced",
               "don't see" not in visible_real.lower() and "not listed in the snapshot" not in visible_real.lower())
-        check("real scenario: a safe retry/error message was given instead", "try again" in visible_real.lower() or "hit an error" in visible_real.lower())
+        check("real scenario: a safe retry/error message was given instead", "try again" in visible_real.lower() or ("trouble completing" in visible_real.lower() or "try again" in visible_real.lower()))
         check("real scenario: the fail-safe reply is NOT silently truncated (full text, including its final characters, reaches the browser)",
               visible_real.rstrip().endswith("?") or visible_real.rstrip().endswith("."))
 
@@ -885,7 +885,7 @@ def main():
         )
         evs_ms5, mp_ms5 = run_turn("Tell me something", d_ms5, [pass1_ms5, fake_response(pass2_ms5_lines)])
         visible_ms5 = "".join(e.get("text", "") for e in evs_ms5 if e.get("type") == "delta")
-        check("PASS2-5. user receives an explicit safe generation-failure message", "hit an error" in visible_ms5.lower())
+        check("PASS2-5. user receives an explicit safe generation-failure message", ("trouble completing" in visible_ms5.lower() or "try again" in visible_ms5.lower()))
         done_ms5 = next((e for e in evs_ms5 if e.get("type") == "done"), None)
         check("PASS2-5. no pending_write_token was produced from the partial/incomplete response", done_ms5 is not None and done_ms5.get("pending_write_token") is None)
 
@@ -903,7 +903,7 @@ def main():
         evs_ms6, mp_ms6 = run_turn("Let's talk about patel farm", d_ms6, [pass1_ms6, pass1b_ms6, fake_response(pass2_ms6_lines)])
         check("PASS2-6. canonical project_context REMAINS established despite Pass 2's incomplete stream", d_ms6["project_context"].get("project_id") == patel_id)
         visible_ms6 = "".join(e.get("text", "") for e in evs_ms6 if e.get("type") == "delta")
-        check("PASS2-6. the visible turn fails safely (explicit error shown)", "hit an error" in visible_ms6.lower())
+        check("PASS2-6. the visible turn fails safely (explicit error shown)", ("trouble completing" in visible_ms6.lower() or "try again" in visible_ms6.lower()))
 
         pass1_ms6_follow = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_ms6_follow = fake_response(build_sse_lines([("text", "Sure, about Patel Farm Project...")]))
@@ -964,7 +964,7 @@ def main():
         check("cross-check: an in-stream error still terminates immediately (no message_stop needed to also fail closed)",
               mp_ms9.call_count == 1 and d_ms9["project_context"] == {})
         check("cross-check: exactly one terminal condition reached (no duplicate error-then-stop double-handling artifacts)",
-              len([e for e in evs_ms9 if e.get("type") == "delta" and "hit an error" in e.get("text", "").lower()]) <= 1)
+              len([e for e in evs_ms9 if e.get("type") == "delta" and "trouble completing" in e.get("text", "").lower()]) <= 1)
 
         print()
         print("=== Pass-1 token cap: excessive preamble consumes budget before tool_use starts ===")
@@ -1068,7 +1068,7 @@ def main():
         check("2A. Pass-1 SSE error: no tool executed, context not mutated", d_sse_a["project_context"] == {})
         check("2A. Pass-1 SSE error: only 1 API call made (no Pass 2)", mp_sse_a.call_count == 1)
         visible_sse_a = "".join(e.get("text", "") for e in evs_sse_a if e.get("type") == "delta")
-        check("2A. Pass-1 SSE error: the user gets a safe error message", "hit an error" in visible_sse_a.lower())
+        check("2A. Pass-1 SSE error: the user gets a safe error message", ("trouble completing" in visible_sse_a.lower() or "try again" in visible_sse_a.lower()))
 
         # 2B. set_project_context SUCCEEDS in Pass 1, then Pass 2 itself
         # (not just the HTTP layer) emits an SSE error -> context stays
@@ -1086,7 +1086,7 @@ def main():
               d_sse_b["project_context"].get("project_id") == patel_id)
         visible_sse_b = "".join(e.get("text", "") for e in evs_sse_b if e.get("type") == "delta")
         check("2B. Pass-2 SSE error: user receives a safe failure message, not an invented final answer",
-              "hit an error" in visible_sse_b.lower())
+              ("trouble completing" in visible_sse_b.lower() or "try again" in visible_sse_b.lower()))
         check("2B. Pass-2 SSE error: no fabricated success claim like 'Patel Farm Project' appears in the error turn's visible text",
               "we're now" not in visible_sse_b.lower() and "switched" not in visible_sse_b.lower())
 
@@ -1108,7 +1108,7 @@ def main():
         events_err, mp_err = run_turn("Let's talk about patel farm", err_draft, [pass1_err, pass1b_err, pass2_err])
         check("execute_tool succeeded and mutated context even though Pass 2 failed", err_draft["project_context"].get("project_id") == patel_id)
         visible_err = "".join(e.get("text", "") for e in events_err if e.get("type") == "delta")
-        check("the user receives a safe, honest error message, not an invented final answer", "hit an error" in visible_err.lower())
+        check("the user receives a safe, honest error message, not an invented final answer", ("trouble completing" in visible_err.lower() or "try again" in visible_err.lower()))
 
         pass1_follow = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_follow = fake_response(build_sse_lines([("text", "Sure, what about Patel Farm Project?")]))

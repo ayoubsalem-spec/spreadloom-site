@@ -688,6 +688,7 @@
         var myTurnToken = ++speakingTurnToken; // this turn's audio chunks are only valid while this token is current
 
         function isStillCurrent() { return myNetworkTurn === networkTurnCounter; }
+        var terminalDoneReceived = false; // set true only by a REAL Atlas 'done' event -- see pump()'s own EOF handling below for why this matters
 
         doFetch(myAbortController.signal).then(function (response) {
             var reader = response.body.getReader();
@@ -697,7 +698,33 @@
             function pump() {
                 return reader.read().then(function (result) {
                     if (!isStillCurrent()) return; // superseded mid-stream -- stop reading, don't process further events
-                    if (result.done) return;
+                    if (result.done) {
+                        // UNEXPECTED-EOF FIX: the stream ended (proxy
+                        // termination, worker restart, a connection
+                        // closing cleanly but prematurely, or any future
+                        // server path that returns without emitting a
+                        // real Atlas 'done' event) WITHOUT us ever having
+                        // received that terminal event. Previously this
+                        // simply returned here, leaving the UI
+                        // permanently "Thinking..." with no recovery --
+                        // exactly the real employee-visible failure
+                        // class. If a legitimate 'done' already arrived
+                        // (terminalDoneReceived), this is just the
+                        // normal end of an already-completed stream and
+                        // nothing further is needed. Only act if this
+                        // turn is still the current one -- a superseded
+                        // turn's own trailing EOF must never touch a
+                        // newer turn's UI state.
+                        if (!terminalDoneReceived && isStillCurrent()) {
+                            removeTyping();
+                            setStatus('');
+                            sendBtn.disabled = false;
+                            turnInFlight = false;
+                            addMessage('error', 'Something went wrong reaching the assistant. Please try again.');
+                            if (voiceSessionActive) setVoiceState(VSTATE.ERROR);
+                        }
+                        return;
+                    }
                     buffer += decoder.decode(result.value, { stream: true });
                     var parts = buffer.split('\n\n');
                     buffer = parts.pop();
@@ -732,6 +759,7 @@
                     if (evt.audio || evt.text) enqueueAudioChunk(evt.audio || null, evt.text, myTurnToken);
                     if (evt.audio_error) addMessage('error', 'Atlas voice unavailable for part of that reply, using free voice instead: ' + evt.audio_error);
                 } else if (evt.type === 'done') {
+                    terminalDoneReceived = true; // a REAL Atlas 'done' arrived -- pump()'s EOF-recovery path must not also fire for this turn
                     setStatus('');
                     sendBtn.disabled = false;
                     turnInFlight = false;

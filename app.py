@@ -4243,67 +4243,96 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
 
     stop_reason = None
     message_stop_received = False
-    for line in resp.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
-            continue
-        raw_payload = line[len("data:"):].strip()
-        if raw_payload in ("", "[DONE]"):
-            continue
-        try:
-            event = json.loads(raw_payload)
-        except json.JSONDecodeError:
-            continue
-        etype = event.get("type")
-        if etype == "content_block_start":
-            block = event.get("content_block", {}) or {}
-            idx = event.get("index")
-            yield ("block_start", block.get("type"), idx)
-            if block.get("type") == "tool_use":
-                yield ("tool_use_start", idx, block.get("name"), block.get("id"))
-        elif etype == "content_block_delta":
-            idx = event.get("index")
-            delta = event.get("delta", {}) or {}
-            if delta.get("type") == "text_delta":
-                text = delta.get("text", "")
-                if text:
-                    yield ("text_delta", text)
-            elif delta.get("type") == "input_json_delta":
-                frag = delta.get("partial_json", "")
-                if frag:
-                    yield ("tool_input_delta", idx, frag)
-        elif etype == "content_block_stop":
-            yield ("block_stop", event.get("index"))
-        elif etype == "message_delta":
-            sr = (event.get("delta", {}) or {}).get("stop_reason")
-            if sr:
-                stop_reason = sr
-        elif etype == "message_stop":
-            # THE actual, explicit protocol signal that Anthropic
-            # considers this assistant message complete. Everything
-            # before this point -- including a fully-formed tool_use
-            # block and a message_delta carrying stop_reason="tool_use"
-            # -- is still provisional until this arrives. A stream that
-            # ends (EOF, dropped connection, truncated response) after
-            # emitting message_delta but WITHOUT ever reaching this
-            # event must never be treated as a completed turn, no matter
-            # how complete its individual pieces look -- see the
-            # fallback after the loop below, which is what actually
-            # enforces that.
-            message_stop_received = True
-        elif etype == "error":
-            # Anthropic's own in-stream error event (distinct from an
-            # HTTP/request-level failure, which is caught above by the
-            # try/except around the initial POST) -- e.g. an overloaded
-            # model or a mid-stream server error. This is a TERMINAL
-            # condition: stop reading further and report it as an error,
-            # exactly like the HTTP-level failure path -- never fall
-            # through to a plain ("stop", None) as if the stream had
-            # simply ended normally with no tool use and no stop_reason,
-            # which would be silently misinterpreted downstream as an
-            # ordinary completed (if odd) turn.
-            err_detail = (event.get("error", {}) or {}).get("message") or json.dumps(event.get("error", {}))
-            yield ("error", err_detail)
-            return
+    try:
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            raw_payload = line[len("data:"):].strip()
+            if raw_payload in ("", "[DONE]"):
+                continue
+            try:
+                event = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                continue
+            etype = event.get("type")
+            if etype == "content_block_start":
+                block = event.get("content_block", {}) or {}
+                idx = event.get("index")
+                yield ("block_start", block.get("type"), idx)
+                if block.get("type") == "tool_use":
+                    yield ("tool_use_start", idx, block.get("name"), block.get("id"))
+            elif etype == "content_block_delta":
+                idx = event.get("index")
+                delta = event.get("delta", {}) or {}
+                if delta.get("type") == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        yield ("text_delta", text)
+                elif delta.get("type") == "input_json_delta":
+                    frag = delta.get("partial_json", "")
+                    if frag:
+                        yield ("tool_input_delta", idx, frag)
+            elif etype == "content_block_stop":
+                yield ("block_stop", event.get("index"))
+            elif etype == "message_delta":
+                sr = (event.get("delta", {}) or {}).get("stop_reason")
+                if sr:
+                    stop_reason = sr
+            elif etype == "message_stop":
+                # THE actual, explicit protocol signal that Anthropic
+                # considers this assistant message complete. Everything
+                # before this point -- including a fully-formed tool_use
+                # block and a message_delta carrying stop_reason="tool_use"
+                # -- is still provisional until this arrives. A stream that
+                # ends (EOF, dropped connection, truncated response) after
+                # emitting message_delta but WITHOUT ever reaching this
+                # event must never be treated as a completed turn, no matter
+                # how complete its individual pieces look -- see the
+                # fallback after the loop below, which is what actually
+                # enforces that.
+                message_stop_received = True
+            elif etype == "error":
+                # Anthropic's own in-stream error event (distinct from an
+                # HTTP/request-level failure, which is caught above by the
+                # try/except around the initial POST) -- e.g. an overloaded
+                # model or a mid-stream server error. This is a TERMINAL
+                # condition: stop reading further and report it as an error,
+                # exactly like the HTTP-level failure path -- never fall
+                # through to a plain ("stop", None) as if the stream had
+                # simply ended normally with no tool use and no stop_reason,
+                # which would be silently misinterpreted downstream as an
+                # ordinary completed (if odd) turn.
+                err_detail = (event.get("error", {}) or {}).get("message") or json.dumps(event.get("error", {}))
+                yield ("error", err_detail)
+                return
+    except requests.exceptions.RequestException as e:
+        # BROWSER-HANG FIX: requests' `timeout=` on the initial POST
+        # only bounds connecting and receiving the first response --
+        # NOT the time spent reading the rest of a streaming body.
+        # `resp.iter_lines()` above performs its own repeated socket
+        # reads as the stream continues, and THOSE can raise this same
+        # exception type (a stalled/dropped mid-stream connection,
+        # ChunkedEncodingError, a read timeout on a later chunk, etc.)
+        # at any point during iteration -- which, before this fix, was
+        # completely unprotected: an uncaught exception here would
+        # propagate straight out of this generator, through
+        # stream_atlas_turn, through Flask's response generator, and
+        # kill the HTTP connection with NO terminal SSE event ever sent
+        # -- leaving the browser's fetch reader with a dead connection
+        # and no 'done'/'error' event to react to, which is exactly
+        # "permanent thinking indicator, no error, no recovery." This
+        # mirrors the exact same handling already used for the
+        # connection-phase exception above -- a real, safe terminal
+        # error event, nothing more.
+        detail = str(e)
+        resp_obj = getattr(e, "response", None)
+        if resp_obj is not None:
+            try:
+                detail = resp_obj.text[:500]
+            except Exception:
+                pass
+        yield ("error", detail)
+        return
 
     if not message_stop_received:
         # The HTTP iterator reached EOF (or the connection ended)
@@ -4943,7 +4972,18 @@ def stream_atlas_turn(user_text, draft):
         # may not have changed; whatever it is, it's correct as-is).
         pass
     elif turn_level_error is not None:
-        err_msg = f"I hit an error talking to Claude: {turn_level_error}"
+        # SAFE EMPLOYEE-FACING MESSAGE (release review): the raw
+        # exception/response detail from turn_level_error (an upstream
+        # RequestException's str(), or a response body fragment, or an
+        # Anthropic in-stream error's own message) is NEVER shown to the
+        # employee or sent to the model -- it can contain internal
+        # detail (URLs, socket errors, response bodies) that has no
+        # place in a user-facing chat message. It's logged server-side
+        # instead, where it's actually useful for diagnosis, and the
+        # employee gets a short, fixed, safe, retryable message.
+        log_activity("atlas", "tool_call", 0, "atlas_turn_level_error", new_value=str(turn_level_error)[:500])
+        get_db().commit()
+        err_msg = "Atlas had trouble completing that request. Please try again."
         yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
         yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
@@ -4992,7 +5032,13 @@ def stream_atlas_turn(user_text, draft):
             # failed; report that honestly instead of inventing a final
             # answer, and still fall through to the shared tail below so
             # the already-successful context change persists.
-            err_msg = f"I hit an error talking to Claude: {pass2_error['value']}"
+            #
+            # SAFE EMPLOYEE-FACING MESSAGE: same rule as Pass 1's error
+            # path above -- the raw exception/response detail never
+            # reaches the employee or the model, only the server log.
+            log_activity("atlas", "tool_call", 0, "atlas_pass2_error", new_value=str(pass2_error["value"])[:500])
+            get_db().commit()
+            err_msg = "Atlas had trouble completing that request. Please try again."
             yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
             yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
