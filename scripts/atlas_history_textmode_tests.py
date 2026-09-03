@@ -183,8 +183,9 @@ def main():
 
         tts_call_count["n"] = 0
         pass1 = fake_response(fake_sse_lines("", tool=("set_project_context", {"project_name": "Patel Farm"})))
+        pass1b = fake_response(fake_sse_lines("", tool=None))
         pass2 = fake_response(fake_sse_lines("We're on Patel Farm now."))
-        with patch("app.requests.post", side_effect=[pass1, pass2]), \
+        with patch("app.requests.post", side_effect=[pass1, pass1b, pass2]), \
              patch("app._elevenlabs_tts_call", side_effect=_counting_tts):
             resp = ask(client, "let's talk about patel farm", interaction_mode="text")
             check("typed project-context turn: request succeeds", resp.status_code == 200)
@@ -340,8 +341,9 @@ def main():
     with appmod.app.test_client() as client:
         login(client, "__hist_usera@test.local", pw)
         pass1 = fake_response(fake_sse_lines("", tool=("set_project_context", {"project_name": "Patel Farm"})))
+        pass1b = fake_response(fake_sse_lines("", tool=None))
         pass2 = fake_response(fake_sse_lines("On it."))
-        with patch("app.requests.post", side_effect=[pass1, pass2]), patch("app._elevenlabs_tts_call", return_value=(None, None)):
+        with patch("app.requests.post", side_effect=[pass1, pass1b, pass2]), patch("app._elevenlabs_tts_call", return_value=(None, None)):
             ask(client, "let's talk about patel farm", interaction_mode="text")
         with client.session_transaction() as sess:
             token = sess.get("atlas_token")
@@ -474,7 +476,8 @@ def main():
         before_f = db.execute("SELECT role, COUNT(*) c FROM atlas_messages WHERE conversation_id=? GROUP BY role", (conv_id_incomplete,)).fetchall()
         before_f_counts = {r["role"]: r["c"] for r in before_f}
         pass1_ctx_ok = fake_response(fake_sse_lines("", tool=("set_project_context", {"project_name": "Patel Farm"})))
-        with patch("app.requests.post", side_effect=[pass1_ctx_ok, fake_error_response()]), \
+        pass1b_ctx_ok = fake_response(fake_sse_lines("", tool=None))
+        with patch("app.requests.post", side_effect=[pass1_ctx_ok, pass1b_ctx_ok, fake_error_response()]), \
              patch("app._elevenlabs_tts_call", return_value=(None, None)):
             ask(client, "context then pass2 fails", interaction_mode="text")
         with client.session_transaction() as sess:

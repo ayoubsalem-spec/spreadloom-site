@@ -101,10 +101,28 @@ def fake_error_response():
 
 def run_turn(user_text, draft, mock_responses):
     """Runs one stream_atlas_turn() call with requests.post mocked to
-    return mock_responses in order. Returns (events, mock_post)."""
+    return mock_responses in order. Returns (events, mock_post).
+
+    PROJECT INTELLIGENCE PHASE COMPATIBILITY: Pass 1B (the sequential
+    "also gather intelligence" pass, see stream_atlas_turn) is now
+    ALWAYS attempted whenever Pass 1 genuinely succeeds at
+    set_project_context -- a real architectural change, not a test
+    artifact. Tests in this file that predate that phase and only
+    supply exactly [pass1, pass2] for a SUCCESSFUL resolution would
+    otherwise hit an IndexError on Pass 1B's own API call, which they
+    were never testing in the first place (this file's own subject is
+    v7 protocol hardening, not Pass 1B). Rather than touching every one
+    of those pre-existing call sites individually, exhausting the
+    supplied mock list here safely returns a plain "no tool" response --
+    exactly what a real Pass 1B call finding nothing further to do
+    would look like -- so those tests keep verifying exactly what they
+    always verified, while atlas_project_intelligence_tests.py is the
+    file that explicitly supplies and asserts on real Pass-1B behavior."""
     def _side_effect(*args, **kwargs):
         idx = _side_effect.calls
         _side_effect.calls += 1
+        if idx >= len(mock_responses):
+            return fake_response(build_sse_lines([], stop_reason="end_turn"))
         return mock_responses[idx]
     _side_effect.calls = 0
 
@@ -181,9 +199,18 @@ def main():
         pass2_resp = fake_response(build_sse_lines(
             [("text", "Got it, we're now looking at Patel Farm Project.")],
         ))
+        # PROJECT INTELLIGENCE PHASE: a genuinely successful
+        # set_project_context resolution now always triggers a
+        # sequential Pass 1B (see stream_atlas_turn) offering
+        # get_project_intelligence -- this mock represents Pass 1B
+        # finding nothing further to do (0 tool_use blocks, ordinary
+        # end_turn), which is the correct/expected outcome for a bare
+        # "let's talk about X" with no attached question. Real calls
+        # are now [Pass 1, Pass 1B, Pass 2] in that order.
+        pass1b_no_tool_resp = fake_response(build_sse_lines([], stop_reason="end_turn"))
         draft = base_draft()
-        events, mock_post = run_turn("Let's talk about Patel Farm", draft, [pass1_resp, pass2_resp])
-        check("1. exactly 2 API calls made (Pass 1 + Pass 2)", mock_post.call_count == 2)
+        events, mock_post = run_turn("Let's talk about Patel Farm", draft, [pass1_resp, pass1b_no_tool_resp, pass2_resp])
+        check("1. exactly 3 API calls made (Pass 1 + Pass 1B + Pass 2 -- the accepted architectural cost of the sequential design)", mock_post.call_count == 3)
         check("2. session project_context now holds the canonical project_id", draft["project_context"].get("project_id") == patel_id)
         check("2. session project_context holds the canonical name (not the free-text the person said)",
               draft["project_context"].get("name") == "__NativeTest Patel Farm Project")
@@ -191,7 +218,7 @@ def main():
         check("Atlas's visible reply reflects the SUCCESSFUL resolution (from Pass 2, grounded in the real tool result)",
               "Patel Farm" in visible_text)
 
-        pass2_call_kwargs = mock_post.call_args_list[1].kwargs
+        pass2_call_kwargs = mock_post.call_args_list[2].kwargs
         pass2_messages = pass2_call_kwargs["json"]["messages"]
         check("Pass 2's messages include a real assistant tool_use block",
               any(m["role"] == "assistant" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_use" for m in pass2_messages))
@@ -480,10 +507,11 @@ def main():
             {"type": "message_stop"},
         )
         lines_idx3.append("data: [DONE]")
+        pass1b_idx3 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_idx3 = fake_response(build_sse_lines([("text", "We're on Patel Farm Project now.")]))
-        evs_idx3, mp_idx3 = run_turn("test", d_idx3, [fake_response(lines_idx3), pass2_idx3])
+        evs_idx3, mp_idx3 = run_turn("test", d_idx3, [fake_response(lines_idx3), pass1b_idx3, pass2_idx3])
         check("3. correctly-matched index: normal successful resolution occurs", d_idx3["project_context"].get("project_id") == patel_id)
-        check("3. correctly-matched index: 2 API calls made (Pass 1 + Pass 2)", mp_idx3.call_count == 2)
+        check("3. correctly-matched index: 3 API calls made (Pass 1 + Pass 1B + Pass 2)", mp_idx3.call_count == 3)
 
         # 4. Duplicate block_stop for an already-completed tool block.
         d_idx4 = base_draft()
@@ -625,10 +653,11 @@ def main():
             {"type": "message_stop"},
         )
         lines_dup6.append("data: [DONE]")
+        pass1b_dup6 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_dup6 = fake_response(build_sse_lines([("text", "We're on Patel Farm Project now.")]))
-        evs_dup6, mp_dup6 = run_turn("test", d_dup6, [fake_response(lines_dup6), pass2_dup6])
+        evs_dup6, mp_dup6 = run_turn("test", d_dup6, [fake_response(lines_dup6), pass1b_dup6, pass2_dup6])
         check("6. a normal, unique-index stream still resolves successfully", d_dup6["project_context"].get("project_id") == patel_id)
-        check("6. normal unique-index stream: 2 API calls made (Pass 1 + Pass 2)", mp_dup6.call_count == 2)
+        check("6. normal unique-index stream: 3 API calls made (Pass 1 + Pass 1B + Pass 2)", mp_dup6.call_count == 3)
 
         print()
         print("=== Terminal stop_reason gate: a complete tool block is not sufficient without stop_reason=='tool_use' ===")
@@ -669,10 +698,11 @@ def main():
 
         # 4. completed valid tool block + stop_reason=tool_use -> normal resolution.
         d_sr4 = base_draft()
+        pass1b_sr4 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_sr4 = fake_response(build_sse_lines([("text", "We're on Patel Farm Project now.")]))
-        evs_sr4, mp_sr4 = run_turn("test", d_sr4, [fake_response(complete_tool_block_lines("tool_use")), pass2_sr4])
+        evs_sr4, mp_sr4 = run_turn("test", d_sr4, [fake_response(complete_tool_block_lines("tool_use")), pass1b_sr4, pass2_sr4])
         check("4. complete tool block + stop_reason=tool_use: normal successful resolution", d_sr4["project_context"].get("project_id") == patel_id)
-        check("4. stop_reason=tool_use: 2 API calls made (Pass 1 + Pass 2)", mp_sr4.call_count == 2)
+        check("4. stop_reason=tool_use: 3 API calls made (Pass 1 + Pass 1B + Pass 2)", mp_sr4.call_count == 3)
 
         # 5. no tool_use block + normal end_turn -> ordinary two-pass chat behavior intact.
         d_sr5 = base_draft()
@@ -865,11 +895,12 @@ def main():
         # has the context.
         d_ms6 = base_draft()
         pass1_ms6 = fake_response(complete_tool_block_lines("tool_use"))
+        pass1b_ms6 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_ms6_lines = lines_without_message_stop(
             {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
             {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "We're now look"}},
         )
-        evs_ms6, mp_ms6 = run_turn("Let's talk about patel farm", d_ms6, [pass1_ms6, fake_response(pass2_ms6_lines)])
+        evs_ms6, mp_ms6 = run_turn("Let's talk about patel farm", d_ms6, [pass1_ms6, pass1b_ms6, fake_response(pass2_ms6_lines)])
         check("PASS2-6. canonical project_context REMAINS established despite Pass 2's incomplete stream", d_ms6["project_context"].get("project_id") == patel_id)
         visible_ms6 = "".join(e.get("text", "") for e in evs_ms6 if e.get("type") == "delta")
         check("PASS2-6. the visible turn fails safely (explicit error shown)", "hit an error" in visible_ms6.lower())
@@ -1049,7 +1080,8 @@ def main():
             stop_reason="tool_use"
         ))
         pass2_sse_b = fake_sse_error_response("Pass 2 overloaded")
-        evs_sse_b, mp_sse_b = run_turn("Let's talk about patel farm", d_sse_b, [pass1_sse_b, pass2_sse_b])
+        pass1b_sse_b = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        evs_sse_b, mp_sse_b = run_turn("Let's talk about patel farm", d_sse_b, [pass1_sse_b, pass1b_sse_b, pass2_sse_b])
         check("2B. Pass-2 SSE error: canonical project context REMAINS established (Pass 1's execute_tool already succeeded)",
               d_sse_b["project_context"].get("project_id") == patel_id)
         visible_sse_b = "".join(e.get("text", "") for e in evs_sse_b if e.get("type") == "delta")
@@ -1072,7 +1104,8 @@ def main():
             stop_reason="tool_use"
         ))
         pass2_err = fake_error_response()
-        events_err, mp_err = run_turn("Let's talk about patel farm", err_draft, [pass1_err, pass2_err])
+        pass1b_err = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        events_err, mp_err = run_turn("Let's talk about patel farm", err_draft, [pass1_err, pass1b_err, pass2_err])
         check("execute_tool succeeded and mutated context even though Pass 2 failed", err_draft["project_context"].get("project_id") == patel_id)
         visible_err = "".join(e.get("text", "") for e in events_err if e.get("type") == "delta")
         check("the user receives a safe, honest error message, not an invented final answer", "hit an error" in visible_err.lower())
@@ -1088,13 +1121,22 @@ def main():
         print("=== Timing measurement (MOCK-BASED -- simulated network delay, not production benchmarking) ===")
 
         def timed_turn(label, user_text, draft_in, response_specs):
+            """AUDIT NOTE (item 2, timing-measurement audit): this helper
+            deliberately uses a STRICT side_effect -- an unexpected extra
+            API call raises IndexError immediately rather than being
+            silently absorbed by a fallback response. Every call site
+            below supplies the EXACT number of responses the real
+            architecture is expected to make for that turn shape, and
+            each call site's return value is asserted with an explicit
+            `calls == N` check -- so a real bug that caused an
+            unexpected 4th/5th call would fail loudly here, not pass
+            quietly. (Contrast with run_turn's fallback further up this
+            file, which exists ONLY for older, unrelated tests that
+            never touch Pass 1B and don't assert exact call counts for
+            project-resolution turns -- see run_turn's own docstring.)"""
             responses = [fake_response(lines, delay=d) for lines, d in response_specs]
             t_start = time.perf_counter()
             first_delta_time = [None]
-
-            def _post(*a, **kw):
-                return responses[_post.i] if (_post.__setattr__("i", _post.i + 1) or True) else None
-            _post.i = -1
 
             def _side_effect(*a, **kw):
                 idx = _side_effect.calls
@@ -1113,24 +1155,37 @@ def main():
             return total, ttfb, _side_effect.calls
 
         d_t1 = base_draft()
-        timed_turn(
+        _, _, calls_t1 = timed_turn(
             "ordinary no-tool chat", "How's it going?", d_t1,
             [(build_sse_lines([], stop_reason="end_turn"), 0.03), (build_sse_lines([("text", "Doing well, thanks for asking!")]), 0.05)]
         )
+        check("timing: ordinary no-tool chat makes EXACTLY 2 API calls (explicit responses, no fallback reliance)", calls_t1 == 2)
 
         d_t2 = base_draft()
-        timed_turn(
+        # EXPLICIT 3-response sequence -- Pass 1 (set_project_context
+        # succeeds) -> Pass 1B (get_project_intelligence declared, model
+        # chooses not to call it here) -> Pass 2. No reliance on any
+        # exhausted-mock fallback: if stream_atlas_turn made an
+        # unexpected 4th call, this response list would be exhausted and
+        # the test would fail loudly (see the audit note in run_turn's
+        # docstring for why that fallback exists ONLY for unrelated,
+        # older tests that never touch Pass 1B at all).
+        _, _, calls_t2 = timed_turn(
             "project-selection turn", "Let's talk about Patel Farm", d_t2,
             [(build_sse_lines([("tool_use", "set_project_context", "t1", json.dumps({"project_name": "Patel Farm"}))], stop_reason="tool_use"), 0.03),
+             (build_sse_lines([], stop_reason="end_turn"), 0.02),
              (build_sse_lines([("text", "We're on Patel Farm Project now.")]), 0.05)]
         )
+        check("timing: project-selection turn makes EXACTLY 3 API calls (Pass 1 + Pass 1B + Pass 2 -- the accepted architectural cost), asserted explicitly not just printed",
+              calls_t2 == 3)
 
         d_t3 = base_draft()
-        timed_turn(
+        _, _, calls_t3 = timed_turn(
             "concrete-request conversational turn", "I need concrete for a slab", d_t3,
             [(build_sse_lines([], stop_reason="end_turn"), 0.03),
              (build_sse_lines([("text", 'Sure, what\'s the pour date?<state>{"mode": "concrete_request", "fields": {}, "action": "none"}</state>')]), 0.05)]
         )
+        check("timing: concrete-request conversational turn makes EXACTLY 2 API calls (no project tool involved)", calls_t3 == 2)
 
         print("  NOTE: stream_atlas_turn is the SAME function for text and voice input --")
         print("  voice pays the identical Pass-1-then-Pass-2 latency; no separate/duplicate voice code path exists.")

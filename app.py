@@ -3659,6 +3659,35 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "naming/switching a project this turn. Don't call it again on a "
         "later turn just to confirm context that's already established "
         "below.\n\n"
+        "PROJECT INTELLIGENCE rules:\n"
+        "- Once a project is established (below, or by naming one this "
+        "turn), use get_project_intelligence to answer questions about "
+        "that project's real current status -- \"what's happening with "
+        "X\", \"what needs attention\", \"what equipment is on this "
+        "project\", \"do we have concrete scheduled\", \"anything from "
+        "procurement\", \"what rentals are active\", \"what do you know "
+        "about this project\". Pick scope='overview' for general "
+        "questions, or the specific scope ('equipment', 'concrete', "
+        "'purchases', 'rentals', 'attention') for a narrow one -- never "
+        "fetch more than the question actually needs.\n"
+        "- This tool ALWAYS reflects live, current BuildIQ state. "
+        "Conversation history only records what was discussed earlier -- "
+        "it is NOT current operational truth. If the person asks a "
+        "follow-up whose answer depends on current state (equipment, "
+        "concrete, purchases, rentals, attention -- e.g. \"anything new "
+        "from procurement?\", \"is that still active?\", \"what needs "
+        "attention now?\"), call the tool again rather than answering "
+        "from what you said earlier in this same conversation -- another "
+        "employee may have changed something in BuildIQ since then.\n"
+        "- Synthesize a short, useful answer from the real data returned "
+        "-- lead with what matters, name specific records only when "
+        "there are few enough to be useful, use counts instead of lists "
+        "when there are many. If very little is recorded, say that "
+        "plainly rather than inventing a fuller picture. Never invent a "
+        "health score, risk score, percent complete, or any other metric "
+        "BuildIQ doesn't actually store.\n"
+        "- If no project is established yet, this tool has nothing to "
+        "act on -- establish one with set_project_context first.\n\n"
         + context_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
@@ -3727,7 +3756,7 @@ ATLAS_TOOLS = {}
 # This list is that deliberate decision, one tool at a time. Today it
 # contains exactly the one tool this phase requires; future phases add
 # to it explicitly, never implicitly.
-ATLAS_NATIVE_TOOLS_ALLOWED = ["set_project_context"]
+ATLAS_NATIVE_TOOLS_ALLOWED = ["set_project_context", "get_project_intelligence"]
 
 
 def register_tool(name, description, parameters, permission, atlas_permission, kind, handler, confirm=None):
@@ -4066,7 +4095,7 @@ register_tool(
 )
 
 
-def _atlas_native_tool_declarations():
+def _atlas_native_tool_declarations(only=None):
     """Builds the Anthropic `tools=[...]` declaration array for ONLY the
     tools in ATLAS_NATIVE_TOOLS_ALLOWED -- never the full ATLAS_TOOLS
     registry. This only describes shape to the model; it grants no
@@ -4074,6 +4103,14 @@ def _atlas_native_tool_declarations():
     through execute_tool() (permission checks, schema re-validation,
     session-context handling, audit logging) exactly as any other tool
     call does -- this function cannot be used to bypass any of that.
+
+    `only`: optional iterable narrowing which of the ALLOWED tools get
+    declared THIS call -- used by Pass 1B (the sequential "project
+    intelligence" detection pass, see stream_atlas_turn) to declare
+    ONLY get_project_intelligence once set_project_context has already
+    succeeded, so that pass structurally cannot request project
+    switching again. Never used to declare anything OUTSIDE
+    ATLAS_NATIVE_TOOLS_ALLOWED -- it can only narrow, never widen.
 
     SECURITY: set_project_context's real REGISTRY schema (see
     intelligence.py) also accepts an integer `project_id`, used by OTHER
@@ -4092,7 +4129,10 @@ def _atlas_native_tool_declarations():
     field from a description that still talks about "by name or id."
     Defense in depth (a model sending project_id anyway despite it never
     being declared or described) is enforced separately at the
-    execution call site.
+    execution call site -- and get_project_intelligence's native
+    declaration below follows the exact same pattern: project_id is
+    never declared to the model here even though the registry schema
+    has it (for execute_tool's session-context auto-fill to use).
     """
     NATIVE_DECLARATIONS = {
         "set_project_context": {
@@ -4111,9 +4151,34 @@ def _atlas_native_tool_declarations():
                 "required": ["project_name"],
             },
         },
+        "get_project_intelligence": {
+            "description": (
+                "Get bounded, factual, permission-filtered cross-module BuildIQ information for the CURRENTLY "
+                "ACTIVE canonical project -- project status plus, where the person is authorized to see them, "
+                "concrete requests, purchase requests, equipment currently assigned, active rentals, and factual "
+                "attention items. Always reflects live, current BuildIQ state -- never call this and then treat "
+                "an earlier answer in this conversation as still current for a later question about current "
+                "state (equipment, concrete, purchases, rentals, attention) -- call it again. Use scope to avoid "
+                "querying everything when the person asked a narrow question: 'overview' for general questions "
+                "('what's happening with X', 'what do you know about this project'), or 'equipment'/'concrete'/"
+                "'purchases'/'rentals'/'attention' for a specific one. Only usable once a project is already "
+                "established this session -- if none is, this returns nothing useful; establish one with "
+                "set_project_context first if the person just named one."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["overview", "equipment", "concrete", "purchases", "rentals", "attention"],
+                               "description": "Which part of the project's information is actually needed. Default to 'overview' for general questions."},
+                },
+                "required": [],
+            },
+        },
     }
     declarations = []
     for name in ATLAS_NATIVE_TOOLS_ALLOWED:
+        if only is not None and name not in only:
+            continue
         if name not in ATLAS_TOOLS:
             continue  # never declare a tool that isn't actually registered/executable
         decl = NATIVE_DECLARATIONS.get(name)
@@ -4760,6 +4825,117 @@ def stream_atlas_turn(user_text, draft):
         # which (since tool_result_content stays None) takes the
         # ordinary ("no tool was requested") Pass 2 branch.
 
+    # PASS 1B -- one-turn "establish project + ask about it" UX (Project
+    # Intelligence phase), WITHOUT weakening the v7 multi-tool-per-pass
+    # fail-closed invariant at all: Pass 1 above still only ever allows
+    # exactly one tool_use block, still fails closed on 2+, unchanged.
+    # This is a SEPARATE, SEQUENTIAL, single-tool pass -- only ever
+    # attempted when Pass 1 just deterministically (server-checked, not
+    # model-decided) succeeded at establishing a NEW canonical project
+    # via set_project_context. It declares ONLY get_project_intelligence
+    # -- not set_project_context -- so this pass structurally cannot
+    # request project switching again, and it operates on the SAME
+    # project_context dict Pass 1 just wrote into, via the exact same
+    # execute_tool() session-context auto-fill every other project-
+    # scoped tool already uses. No model-supplied project id is ever
+    # possible here (see _atlas_native_tool_declarations' docstring).
+    #
+    # This is a full, independent duplicate of Pass 1's parsing/
+    # validation logic (same protocol-anomaly detection, same single-
+    # assignment index tracking, same completion/stop-reason gates),
+    # not a refactor into a shared function -- deliberately, so that
+    # nothing about the original, already-hardened Pass 1 logic is
+    # touched or risked by this addition. A failure/anomaly in THIS
+    # pass degrades gracefully (no intelligence gathered this turn,
+    # simply falls through to Pass 2 with only the project-switch
+    # result) rather than invalidating the project switch that already
+    # genuinely succeeded.
+    run_pass1b = False
+    if turn_level_error is None and tool_name == "set_project_context" and tool_result_content is not None and not tool_result_is_error:
+        try:
+            run_pass1b = json.loads(tool_result_content).get("found") is True
+        except (json.JSONDecodeError, AttributeError):
+            run_pass1b = False
+
+    tool_result_content_1b = None
+    tool_result_is_error_1b = False
+    tool_use_id_1b = None
+    tool_name_1b = None
+    tool_input_1b = None
+
+    if run_pass1b:
+        tool_use_blocks_by_index_1b = {}
+        opened_block_indices_1b = set()
+        protocol_anomaly_1b = {"value": None}
+        pass1b_error = {"value": None}
+        pass1b_stop_reason = {"value": None}
+        for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(only=["get_project_intelligence"]), max_tokens=200):
+            kind = event[0]
+            if kind == "block_start":
+                _, btype, idx = event
+                if idx in opened_block_indices_1b:
+                    protocol_anomaly_1b["value"] = protocol_anomaly_1b["value"] or "duplicate_content_block_start"
+                else:
+                    opened_block_indices_1b.add(idx)
+            elif kind == "tool_use_start":
+                _, idx, name, tool_id = event
+                if idx in tool_use_blocks_by_index_1b:
+                    protocol_anomaly_1b["value"] = protocol_anomaly_1b["value"] or "duplicate_tool_use_start"
+                else:
+                    tool_use_blocks_by_index_1b[idx] = {"index": idx, "name": name, "id": tool_id, "input_raw": "", "completed": False}
+            elif kind == "tool_input_delta":
+                _, idx, frag = event
+                block = tool_use_blocks_by_index_1b.get(idx)
+                if block is not None and not block["completed"]:
+                    block["input_raw"] += frag
+                else:
+                    protocol_anomaly_1b["value"] = protocol_anomaly_1b["value"] or "orphan_tool_input_delta"
+            elif kind == "block_stop":
+                _, idx = event
+                block = tool_use_blocks_by_index_1b.get(idx)
+                if block is None:
+                    if idx not in opened_block_indices_1b:
+                        protocol_anomaly_1b["value"] = protocol_anomaly_1b["value"] or "orphan_block_stop"
+                elif block["completed"]:
+                    protocol_anomaly_1b["value"] = protocol_anomaly_1b["value"] or "duplicate_block_stop"
+                else:
+                    block["completed"] = True
+            elif kind == "error":
+                pass1b_error["value"] = event[1]
+            elif kind == "stop":
+                pass1b_stop_reason["value"] = event[1]
+
+        tool_use_blocks_1b = list(tool_use_blocks_by_index_1b.values())
+
+        if pass1b_error["value"] is None and protocol_anomaly_1b["value"] is None and len(tool_use_blocks_1b) == 1:
+            block = tool_use_blocks_1b[0]
+            candidate_name, candidate_id = block["name"], block["id"]
+            if (block["completed"] and pass1b_stop_reason["value"] == "tool_use"
+                    and candidate_name == "get_project_intelligence"):
+                try:
+                    candidate_input = json.loads(block["input_raw"]) if block["input_raw"].strip() else {}
+                except json.JSONDecodeError:
+                    candidate_input = None
+                if isinstance(candidate_input, dict) and "project_id" not in candidate_input:
+                    # Same authoritative gateway as every other tool call --
+                    # project_id comes ONLY from execute_tool's own
+                    # session_context auto-fill of the value Pass 1 just
+                    # established, never from anything in candidate_input.
+                    result_1b = execute_tool("get_project_intelligence", candidate_input, current_user, session_context=project_context)
+                    if result_1b.success or result_1b.error != "not permitted":
+                        tool_name_1b, tool_use_id_1b, tool_input_1b = candidate_name, candidate_id, candidate_input
+                        tool_result_content_1b = json.dumps(result_1b.data if result_1b.success else {"error": result_1b.error})
+                        tool_result_is_error_1b = not result_1b.success
+                    else:
+                        log_activity("atlas", "tool_call", 0, "atlas_pass1b_not_permitted", new_value="get_project_intelligence")
+                        get_db().commit()
+                # else: malformed/rejected input -- silently skipped, no
+                # intelligence gathered this turn, project switch stands.
+        # else: anomaly, wrong tool, incomplete block, wrong stop_reason,
+        # or 0/2+ tool_use blocks -- silently skipped, same reasoning:
+        # the already-successful project switch is not invalidated by a
+        # failed BONUS attempt at gathering intelligence in the same turn.
+
     if turn_level_error == "__handled_fail_safe__":
         # Already replied above with a safe, fixed message and logged
         # the reason -- fall through to the shared persistence tail
@@ -4788,6 +4964,16 @@ def stream_atlas_turn(user_text, draft):
             messages_pass2 = messages + [
                 {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": tool_input}]},
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": tool_result_content, "is_error": tool_result_is_error}]},
+            ]
+        if tool_result_content_1b is not None:
+            # Pass 1B's exchange, if it ran and produced a result,
+            # appends as a SECOND real tool_use/tool_result pair -- Pass
+            # 2's reply is grounded in BOTH the project-switch result
+            # AND the intelligence result when both genuinely happened
+            # this turn, not a paraphrase of either.
+            messages_pass2 = messages_pass2 + [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id_1b, "name": tool_name_1b, "input": tool_input_1b}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id_1b, "content": tool_result_content_1b, "is_error": tool_result_is_error_1b}]},
             ]
         pass2_error = {"value": None}
 

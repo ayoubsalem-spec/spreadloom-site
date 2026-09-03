@@ -426,6 +426,324 @@ def _tool_get_attention_items(user):
 
 
 # ---------------------------------------------------------------------------
+# Project Intelligence (cross-module read layer)
+# ---------------------------------------------------------------------------
+
+_PI_VALID_SCOPES = {"overview", "equipment", "concrete", "purchases", "rentals", "attention"}
+_PI_CONCRETE_LIMIT = 10
+_PI_PURCHASE_LIMIT = 10
+_PI_EQUIPMENT_LIMIT = 15
+_PI_RENTAL_LIMIT = 10
+_PI_ATTENTION_LIMIT = 10
+
+
+def _current_equipment_assignments(db, project_id, limit=None):
+    """THE canonical "what equipment is currently on this project" query --
+    reuses BuildIQ's own existing operational definition exactly
+    (confirmed against the real Equipment Center detail-page query at
+    the time this was written): for each asset, only its LATEST
+    already-applied usage_log row counts (move_status != 'Scheduled' --
+    a future scheduled move hasn't happened yet), ordered by
+    COALESCE(applied_at, out_date, created_at) DESC. An older row for
+    the same asset can never win over its own latest row, so an asset
+    whose latest applied move places it elsewhere can never appear here
+    -- this is enforced structurally by the correlated subquery below,
+    not by a heuristic.
+
+    DETERMINISTIC TIE-BREAK (new for this shared helper -- the existing
+    production Equipment Center query does not have this and should get
+    it in a future, separate, focused fix -- not touched here): `id DESC`
+    as the secondary sort key. `id` is sitepulse_usage_log's AUTOINCREMENT
+    primary key -- strictly unique and monotonic -- so two rows sharing
+    the exact same effective timestamp still resolve to one deterministic
+    winner (the most recently inserted), never SQLite's undefined tie
+    order.
+
+    This is "last recorded assignment/movement in BuildIQ," not GPS or
+    physical-location certainty -- BuildIQ only knows what an employee
+    actually logged.
+
+    `limit`: caps the number of DETAIL rows returned (for the bounded
+    items array). Pass None for no limit -- used by
+    _current_equipment_count below, which needs the TRUE total, not a
+    capped one.
+    """
+    sql = """SELECT sa.id, sa.name, sa.status,
+                    ul.to_location, ul.project_id, ul.job_name,
+                    COALESCE(ul.applied_at, ul.out_date, ul.created_at) AS as_of
+             FROM sitepulse_assets sa
+             JOIN sitepulse_usage_log ul ON ul.id = (
+                 SELECT id FROM sitepulse_usage_log
+                 WHERE asset_id = sa.id AND move_status != 'Scheduled'
+                 ORDER BY COALESCE(applied_at, out_date, created_at) DESC, id DESC
+                 LIMIT 1
+             )
+             WHERE ul.project_id = ?
+             ORDER BY as_of DESC"""
+    params = [project_id]
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return db.execute(sql, params).fetchall()
+
+
+def _current_equipment_count(db, project_id):
+    """THE TRUE total number of assets whose current (latest non-
+    Scheduled) assignment places them on this project -- computed with
+    COUNT(*) at the SQL level, using the EXACT SAME correlated-subquery
+    current-state semantics as _current_equipment_assignments above
+    (same latest-row-per-asset definition, same tie-break), never by
+    fetching every matching row into Python merely to len() them. This
+    is what makes the reported count truthful even when the detail
+    array itself is bounded/capped -- a 40-asset project reports
+    count=40, not count=15."""
+    row = db.execute(
+        """SELECT COUNT(*) c FROM sitepulse_assets sa
+           JOIN sitepulse_usage_log ul ON ul.id = (
+               SELECT id FROM sitepulse_usage_log
+               WHERE asset_id = sa.id AND move_status != 'Scheduled'
+               ORDER BY COALESCE(applied_at, out_date, created_at) DESC, id DESC
+               LIMIT 1
+           )
+           WHERE ul.project_id = ?""",
+        (project_id,)
+    ).fetchone()
+    return row["c"]
+
+
+def _pi_source_failure(source, project_id, exc):
+    """Logs a project-intelligence source failure server-side (never
+    silently swallowed) without ever exposing the stack trace/internal
+    DB error to the employee -- the model-facing result simply omits
+    that source, indistinguishable in shape from an unauthorized
+    source, but never indistinguishable in our own logs.
+
+    DEFENSE IN DEPTH: this function is itself guarded. If the logging/
+    commit call fails for its own reason (a second, independent DB
+    problem), that secondary failure must NEVER escape and take down
+    the rest of the project-intelligence call with it -- the whole
+    point of per-source isolation is that one broken thing doesn't
+    break everything else, and that has to hold even if the *logging*
+    of the first break is what breaks next. Falls back to a bare
+    stderr write (which cannot itself meaningfully fail) only if the
+    real logging path is unavailable."""
+    try:
+        from app import log_activity, get_db
+        log_activity("atlas", "tool_call", 0, "atlas_project_intelligence_source_failed",
+                     field=source, new_value=f"project_id={project_id}: {exc}")
+        get_db().commit()
+    except Exception as logging_exc:
+        try:
+            import sys
+            print(f"[atlas_project_intelligence] source={source} project_id={project_id} failed AND failure logging itself failed: "
+                  f"original={exc!r} logging_error={logging_exc!r}", file=sys.stderr)
+        except Exception:
+            pass  # even the stderr fallback must never propagate and take down the overall call.
+
+
+def _pi_project_core(db, project):
+    return {
+        "project_id": project["id"],
+        "name": project["name"],
+        "client": project["client"],
+        "status": project["status"],
+        "bid_due_date": project["bid_due_date"],
+        "estimated_value": project["estimated_value"],
+    }
+
+
+def _pi_linked_via(row_project_id, canonical_pid):
+    return "project_id" if row_project_id == canonical_pid else "legacy_exact_name_match"
+
+
+def _pi_concrete(db, project_id, project_name):
+    # LEGACY FALLBACK RULE (explicit precedence, exact match only, no
+    # LIKE/substring): a record with a real project_id is matched ONLY
+    # by that id, never additionally by free text. A record with
+    # project_id IS NULL may match ONLY via an EXACT equality against
+    # the canonical project's own name -- the same raw SQLite `=`
+    # semantics _find_project()'s own exact-match tier already uses,
+    # not a new normalization scheme.
+    where = "(project_id = ? OR (project_id IS NULL AND project = ?))"
+    params_base = (project_id, project_name)
+    total = db.execute(f"SELECT COUNT(*) c FROM inventory_concrete_requests WHERE {where}", params_base).fetchone()["c"]
+    open_total = db.execute(
+        f"SELECT COUNT(*) c FROM inventory_concrete_requests WHERE {where} AND status != 'Completed'", params_base
+    ).fetchone()["c"]
+    rows = db.execute(
+        f"""SELECT id, status, pour_date, project_id FROM inventory_concrete_requests WHERE {where}
+           ORDER BY (status != 'Completed') DESC, pour_date DESC LIMIT ?""",
+        params_base + (_PI_CONCRETE_LIMIT,)
+    ).fetchall()
+    return {
+        "open_count": open_total,
+        "total_count": total,
+        "truncated": total > len(rows),
+        "items": [
+            {"record_type": "concrete_request", "record_id": r["id"], "status": r["status"],
+             "relevant_date": r["pour_date"], "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id)}
+            for r in rows
+        ],
+    }
+
+
+def _pi_purchases(db, project_id, project_name):
+    where = "(project_id = ? OR (project_id IS NULL AND job_name = ?))"
+    params_base = (project_id, project_name)
+    total = db.execute(f"SELECT COUNT(*) c FROM inventory_purchase_requests WHERE {where}", params_base).fetchone()["c"]
+    open_total = db.execute(
+        f"SELECT COUNT(*) c FROM inventory_purchase_requests WHERE {where} AND status != 'Completed'", params_base
+    ).fetchone()["c"]
+    rows = db.execute(
+        f"""SELECT id, status, needed_on, project_id FROM inventory_purchase_requests WHERE {where}
+           ORDER BY (status != 'Completed') DESC, request_date DESC LIMIT ?""",
+        params_base + (_PI_PURCHASE_LIMIT,)
+    ).fetchall()
+    return {
+        "open_count": open_total,
+        "total_count": total,
+        "truncated": total > len(rows),
+        "items": [
+            {"record_type": "purchase_request", "record_id": r["id"], "status": r["status"],
+             "relevant_date": r["needed_on"], "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id)}
+            for r in rows
+        ],
+    }
+
+
+def _pi_equipment(db, project_id):
+    total = _current_equipment_count(db, project_id)
+    rows = _current_equipment_assignments(db, project_id, limit=_PI_EQUIPMENT_LIMIT)
+    return {
+        "count": total,
+        "truncated": total > len(rows),
+        "items": [
+            {"record_type": "equipment_asset", "record_id": r["id"], "name": r["name"],
+             "status": r["status"], "as_of": r["as_of"], "project_id": project_id}
+            for r in rows
+        ],
+    }
+
+
+def _pi_rentals(db, project_id, project_name):
+    where = "(project_id = ? OR (project_id IS NULL AND job_name = ?))"
+    params_base = (project_id, project_name)
+    total = db.execute(f"SELECT COUNT(*) c FROM sitepulse_rentals WHERE {where}", params_base).fetchone()["c"]
+    active_total = db.execute(
+        f"SELECT COUNT(*) c FROM sitepulse_rentals WHERE {where} AND (returned_date IS NULL OR returned_date = '')", params_base
+    ).fetchone()["c"]
+    rows = db.execute(
+        f"""SELECT id, equipment_description, due_date, returned_date, project_id FROM sitepulse_rentals WHERE {where}
+           ORDER BY (returned_date IS NULL OR returned_date = '') DESC, due_date DESC LIMIT ?""",
+        params_base + (_PI_RENTAL_LIMIT,)
+    ).fetchall()
+    return {
+        "active_count": active_total,
+        "total_count": total,
+        "truncated": total > len(rows),
+        "items": [
+            {"record_type": "rental", "record_id": r["id"], "equipment_description": r["equipment_description"],
+             "status": "active" if not r["returned_date"] else "returned",
+             "relevant_date": r["due_date"], "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id)}
+            for r in rows
+        ],
+    }
+
+
+def _tool_get_project_intelligence(user, scope=None, project_id=None):
+    """Cross-module, permission-filtered, factual project intelligence
+    for the CURRENTLY VALIDATED canonical project only. project_id here
+    always comes from execute_tool()'s existing session_context
+    injection (see execute_tool's own docstring) -- this handler never
+    trusts a model-supplied value for anything beyond what that
+    generic, already-audited injection mechanism provides; the native
+    tool declaration for this tool (see app.py) never even offers
+    project_id to the model in the first place, and a project_id
+    supplied any other way is defensively ignored below.
+
+    SCOPE: a small closed enum, never arbitrary text. The Tool Registry's
+    own enum-constrained schema validation is the OUTER protection
+    (rejects a malformed value before this handler ever runs, for any
+    caller going through execute_tool). This handler is the INNER,
+    defense-in-depth layer for any caller that reaches it directly,
+    bypassing that outer validation: omitted/None scope legitimately
+    defaults to "overview" (that's a normal, unambiguous "no narrower
+    scope requested" case), but an EXPLICITLY supplied value that isn't
+    one of the six approved scopes fails CLOSED -- it does not silently
+    broaden into "overview" (which would mean a malformed/adversarial
+    scope value ends up querying MORE than a valid one would), and no
+    optional source is queried at all in that case.
+
+    FRESHNESS: every field here is queried live, every single call --
+    nothing about project state is ever cached in project_context or
+    anywhere else that could later be served stale.
+
+    FAILURE ISOLATION: each optional source's query is individually
+    wrapped; a failure in one never destroys the others -- see
+    _pi_source_failure for what gets logged, and for how a SECOND
+    failure (in the logging itself) is also contained.
+    """
+    from app import get_db, user_has_permission
+    db = get_db()
+
+    if scope is not None and scope not in _PI_VALID_SCOPES:
+        # Explicit but invalid -- fail closed, never silently treat this
+        # as "overview" (which would be a broader query than a
+        # legitimate call would have triggered). Nothing is queried.
+        return {"found": False, "reason": "invalid_scope"}
+    if scope is None:
+        scope = "overview"
+
+    if not project_id:
+        return {"found": False, "reason": "no_active_project"}
+
+    # Re-verify the project still exists and is still real RIGHT NOW --
+    # never trust that it was valid whenever context was last set.
+    project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        return {"found": False, "reason": "not_found"}
+
+    pid = project["id"]
+    pname = project["name"]
+    result = {"found": True, "project": _pi_project_core(db, project)}
+
+    want = lambda s: scope == "overview" or scope == s
+
+    if want("concrete") and user_has_permission(user, "module:sitepulse:view"):
+        try:
+            result["concrete"] = _pi_concrete(db, pid, pname)
+        except Exception as exc:
+            _pi_source_failure("concrete", pid, exc)
+
+    if want("purchases") and user_has_permission(user, "module:sitepulse:view"):
+        try:
+            result["purchases"] = _pi_purchases(db, pid, pname)
+        except Exception as exc:
+            _pi_source_failure("purchases", pid, exc)
+
+    if want("equipment") and user_has_permission(user, "module:equipment_center:view"):
+        try:
+            result["equipment"] = _pi_equipment(db, pid)
+        except Exception as exc:
+            _pi_source_failure("equipment", pid, exc)
+
+    if want("rentals") and user_has_permission(user, "module:equipment_center:view"):
+        try:
+            result["rentals"] = _pi_rentals(db, pid, pname)
+        except Exception as exc:
+            _pi_source_failure("rentals", pid, exc)
+
+    if want("attention"):
+        try:
+            project_attention = [item for item in build_attention_items(user) if item.get("project_id") == pid]
+            result["attention"] = project_attention[:_PI_ATTENTION_LIMIT]
+        except Exception as exc:
+            _pi_source_failure("attention", pid, exc)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Registration -- called once from app.py after register_tool/get_db/
 # user_has_permission/SP_STATUS_OPTIONS/PURCHASE_STATUS_OPTIONS all exist.
 # ---------------------------------------------------------------------------
@@ -508,6 +826,24 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
         atlas_permission="atlas:view_business_data",
         kind="read",
         handler=_tool_get_attention_items,
+    )
+    register_tool(
+        name="get_project_intelligence",
+        description=(
+            "Get bounded, factual, permission-filtered cross-module intelligence for the CURRENTLY ACTIVE "
+            "canonical project (never a model-supplied one) -- project core info plus concrete/purchases/"
+            "equipment/rentals/attention, each present only if the requesting user is authorized to see it. "
+            "Every field is queried fresh from BuildIQ on every call -- never cached, never inferred, never a "
+            "fabricated score/percentage/confidence. scope narrows which sources are actually queried."
+        ),
+        parameters={
+            "scope": {"type": "string", "required": False, "enum": sorted(_PI_VALID_SCOPES)},
+            "project_id": {"type": "integer", "required": False},
+        },
+        permission="module:project_hunt:view",
+        atlas_permission="atlas:view_business_data",
+        kind="read",
+        handler=_tool_get_project_intelligence,
     )
     register_tool(
         name="set_project_context",
