@@ -1275,6 +1275,38 @@ def init_db():
             FOREIGN KEY (feature_request_id) REFERENCES feature_requests(id)
         );
 
+        -- Atlas interaction-modes + persistent history phase. Durable
+        -- truth for conversation history lives here, not in the
+        -- in-memory ATLAS_SESSIONS dict, which can vanish on any
+        -- process restart (new Railway deploy, new worker, etc).
+        -- user_id matches the existing users(id) integer primary key
+        -- convention used throughout this schema.
+        CREATE TABLE IF NOT EXISTS atlas_conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            project_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (project_id) REFERENCES tracker_projects(id)
+        );
+
+        -- Visible chat history only -- see _append_atlas_message()'s own
+        -- docstring for exactly what is and is not written here (never
+        -- raw tool protocol, hidden <state> payloads, or chain-of-
+        -- thought; only what the person actually saw or typed).
+        CREATE TABLE IF NOT EXISTS atlas_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            interaction_mode TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES atlas_conversations(id)
+        );
+
         CREATE TABLE IF NOT EXISTS inventory_concrete_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL,
             project_id INTEGER,
@@ -1470,6 +1502,13 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_purchase_project_id ON inventory_purchase_requests(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_usage_log_project_id ON sitepulse_usage_log(project_id)",
         "CREATE INDEX IF NOT EXISTS idx_rentals_project_id ON sitepulse_rentals(project_id)",
+        # Atlas history phase -- same idempotent convention as above.
+        # idx_atlas_conversations_user supports the owner-scoped recent-
+        # conversations lookup (WHERE user_id=? ORDER BY updated_at DESC);
+        # idx_atlas_messages_conversation supports the per-conversation
+        # message-ordering lookup (WHERE conversation_id=? ORDER BY id).
+        "CREATE INDEX IF NOT EXISTS idx_atlas_conversations_user ON atlas_conversations(user_id, updated_at)",
+        "CREATE INDEX IF NOT EXISTS idx_atlas_messages_conversation ON atlas_messages(conversation_id, id)",
     ]:
         try:
             db.execute(index_sql)
@@ -3538,20 +3577,22 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
     every turn. The conversation itself travels separately as a real
     messages array now, not flattened into this text.
 
-    PROJECT CONTEXT (item 6): project_context (session-scoped, see
-    ATLAS_SESSIONS[token]["project_context"]) is surfaced here as plain
-    fact, not as an instruction to use any tool -- the live conversation
-    loop does not dynamically dispatch to the Tool Registry today (only
-    the snapshot above and the concrete-request field-collection state
-    machine below actually run inside a turn); this prompt line is
-    exactly the "make it available to the prompt so the model can reason
-    consistently" connection point, nothing more. The one thing the
-    model IS asked to do here is state, in <state>, the project NAME
-    when the person establishes or changes which project they mean --
-    never an id (the model never invents an id). That name is then
-    resolved for real, server-side, via the same _find_project()-backed
-    set_project_context tool call every other project lookup uses --
-    ambiguous or unmatched names never get silently set.
+    PROJECT CONTEXT (native tool dispatch): project_context (session-
+    scoped, see ATLAS_SESSIONS[token]["project_context"]) is surfaced
+    here as plain fact -- the model's own record of "what's currently
+    established," not something it can change by writing text. As of
+    the native-tool-dispatch fix, the model IS given real, live access
+    to the Tool Registry for exactly one tool: set_project_context (see
+    ATLAS_NATIVE_TOOLS_ALLOWED and stream_atlas_turn). When the person
+    names/switches a project, the model calls that tool for real; the
+    server resolves it authoritatively via the same _find_project()-
+    backed logic every other project lookup uses (exact match, unique
+    substring, or ambiguous-never-guess) and returns the true result
+    BEFORE the model writes anything claiming success -- see
+    stream_atlas_turn's two-pass design for exactly how that ordering is
+    enforced, not just requested. No other tool is exposed to native
+    dispatch in this phase; this is a narrow, explicit foundation, not
+    general cross-module tool access.
     """
     if project_context and project_context.get("project_id"):
         context_line = f"CURRENT PROJECT CONTEXT: {project_context.get('name')} (project_id={project_context.get('project_id')}) -- assume this is the project unless the person clearly means a different one.\n\n"
@@ -3590,15 +3631,34 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "set mode back to chat.\n\n"
         "PROJECT CONTEXT rules:\n"
         "- If the person establishes or changes which project they're "
-        "talking about (e.g. \"we're working on Patel Farm\", \"switch to "
-        "the Overlook Tower job\"), put that project's name -- exactly as "
-        "they said it -- in the state block's project_name field.\n"
-        "- If you are not confident which specific project they mean (the "
-        "name could plausibly match more than one project), ask them to "
-        "clarify in your reply instead, and leave project_name null this "
-        "turn. Never guess.\n"
-        "- If the project hasn't changed this turn, leave project_name "
-        "null -- don't repeat it every turn.\n\n"
+        "talking about (e.g. \"let's talk about Patel Farm\", \"switch to "
+        "the Overlook Tower job\", \"pull up Trinity Mar Thoma Church\"), "
+        "call the set_project_context tool with that project's name -- "
+        "exactly as they said it -- as your ONLY action that turn: call "
+        "the tool immediately, before writing any reply text. The real "
+        "system canonically resolves that name for you (it may be exact, "
+        "unique, ambiguous, or not found) and tells you the result; your "
+        "reply to the person comes AFTER that, based on what the tool "
+        "actually returned -- never say you've switched to or found a "
+        "project before you know that.\n"
+        "- Do this even if the project name doesn't appear anywhere in "
+        "the business snapshot below -- that snapshot is a curated, "
+        "partial view (recent/active items only), not a full project "
+        "directory, so not recognizing a name there is not a reason to "
+        "assume it doesn't exist. The tool is the actual authority on "
+        "whether it exists.\n"
+        "- If the tool reports the project wasn't found, tell the person "
+        "clearly -- don't pretend you switched anyway.\n"
+        "- If the tool reports more than one match, tell them what you "
+        "found and ask which one they mean. Never pick one yourself.\n"
+        "- If a resolution attempt is unsuccessful (not found or "
+        "ambiguous) and a project was already active before this turn, "
+        "that existing project stays active -- say so if it's relevant, "
+        "but don't imply it was cleared.\n"
+        "- Only call set_project_context when the person is actually "
+        "naming/switching a project this turn. Don't call it again on a "
+        "later turn just to confirm context that's already established "
+        "below.\n\n"
         + context_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
@@ -3606,7 +3666,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "Respond in exactly two parts:\n"
         "1. Your natural reply.\n"
         "2. On its own line, a state block in EXACTLY this format:\n"
-        '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit", "project_name": "<name, or null if unchanged>"}</state>'
+        '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit"}</state>'
     )
 
 
@@ -3657,6 +3717,17 @@ class AtlasTool:
 
 
 ATLAS_TOOLS = {}
+
+# NATIVE CLAUDE TOOL DISPATCH -- explicit, server-controlled allowlist
+# (Atlas project-context architecture fix). This is deliberately NOT
+# "every registered ATLAS_TOOLS key" -- exposing the full registry to
+# native model tool-calling automatically would mean any future tool
+# added to the registry (for whatever purpose) silently becomes
+# model-callable in a live turn without a deliberate decision to do so.
+# This list is that deliberate decision, one tool at a time. Today it
+# contains exactly the one tool this phase requires; future phases add
+# to it explicitly, never implicitly.
+ATLAS_NATIVE_TOOLS_ALLOWED = ["set_project_context"]
 
 
 def register_tool(name, description, parameters, permission, atlas_permission, kind, handler, confirm=None):
@@ -3995,6 +4066,195 @@ register_tool(
 )
 
 
+def _atlas_native_tool_declarations():
+    """Builds the Anthropic `tools=[...]` declaration array for ONLY the
+    tools in ATLAS_NATIVE_TOOLS_ALLOWED -- never the full ATLAS_TOOLS
+    registry. This only describes shape to the model; it grants no
+    execution authority by itself. Every actual invocation still goes
+    through execute_tool() (permission checks, schema re-validation,
+    session-context handling, audit logging) exactly as any other tool
+    call does -- this function cannot be used to bypass any of that.
+
+    SECURITY: set_project_context's real REGISTRY schema (see
+    intelligence.py) also accepts an integer `project_id`, used by OTHER
+    server-side callers (e.g. an already-resolved id being re-verified)
+    -- that registry schema is left completely untouched here, since
+    those other callers legitimately need it. What's declared to the
+    MODEL is a deliberately different, native-specific view: for native
+    dispatch, project_id is never appropriate at all (it's a database
+    primary key the model has no legitimate way to know), so the
+    declaration built here is NOT a filtered copy of the registry
+    schema -- it's an explicit, separate description of exactly what
+    native dispatch actually supports: project_name only, REQUIRED, with
+    wording that never mentions project id as an accepted input. This
+    keeps the model-visible contract honest about what native dispatch
+    does (resolve a name the person said) rather than merely hiding one
+    field from a description that still talks about "by name or id."
+    Defense in depth (a model sending project_id anyway despite it never
+    being declared or described) is enforced separately at the
+    execution call site.
+    """
+    NATIVE_DECLARATIONS = {
+        "set_project_context": {
+            "description": (
+                "Establish (or switch) the canonical project this Atlas session is currently working on, by NAME. "
+                "Give the project name exactly as the person said it -- the server resolves it authoritatively "
+                "against the real project list (an exact match, or a unique substring match) and tells you the "
+                "canonical result. If more than one project matches, nothing is set and you must ask the person "
+                "which one they mean; this never guesses. Call this whenever the person establishes or changes "
+                "which project they mean (e.g. 'we're working on Patel Farm', 'switch to the Overlook Tower job') "
+                "-- not on every turn."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {"project_name": {"type": "string", "description": "The project name as the person said it."}},
+                "required": ["project_name"],
+            },
+        },
+    }
+    declarations = []
+    for name in ATLAS_NATIVE_TOOLS_ALLOWED:
+        if name not in ATLAS_TOOLS:
+            continue  # never declare a tool that isn't actually registered/executable
+        decl = NATIVE_DECLARATIONS.get(name)
+        if not decl:
+            continue
+        declarations.append({"name": name, "description": decl["description"], "input_schema": decl["input_schema"]})
+    return declarations
+
+
+def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=600):
+    """Makes ONE Claude API call and yields low-level parsed events as it
+    streams back -- this is the single place SSE-from-Anthropic parsing
+    happens, reused for both the tool-detection pass and the (optional)
+    final live pass in stream_atlas_turn, so there is exactly one
+    parsing implementation to get right and audit, not two duplicated
+    ones. This function makes no decisions about what the events MEAN
+    (visibility, TTS, tool execution) -- that is entirely the caller's
+    responsibility.
+
+    Yields tuples:
+        ("block_start", block_type, block_index)          -- a new content block began
+        ("text_delta", str)                                -- a chunk of assistant prose (unindexed -- text content is never index-sensitive downstream)
+        ("tool_use_start", block_index, tool_name, tool_use_id) -- model requested a tool call, in content block block_index
+        ("tool_input_delta", block_index, str)             -- a fragment of block_index's input JSON
+        ("block_stop", block_index)                        -- content block block_index finished (its
+                                                               text/tool-input is complete and
+                                                               final as of this event)
+        ("stop", stop_reason_or_None)                      -- terminal, always emitted last on success
+        ("error", message)                                 -- terminal, emitted instead of "stop" on failure
+
+    INDEX INTEGRITY: tool_use_start/tool_input_delta/block_stop all carry
+    Anthropic's own `index` field explicitly, rather than the caller
+    inferring "whichever tool block was most recently opened." A
+    malformed or reordered stream (e.g. a content_block_stop whose index
+    doesn't match the tool_use block it's nominally closing) must be
+    detectable by the caller as exactly that -- an index mismatch -- not
+    silently treated as "the current one finished." This function
+    itself makes no judgment about mismatches; it faithfully passes
+    through whatever index each real event actually carried, unmodified,
+    so stream_atlas_turn's matching logic has the real data to check.
+    """
+    payload = {"model": "claude-sonnet-4-6", "max_tokens": max_tokens, "system": system, "messages": messages, "stream": True}
+    if tools:
+        payload["tools"] = tools
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            json=payload, stream=True, timeout=60,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        detail = str(e)
+        resp_obj = getattr(e, "response", None)
+        if resp_obj is not None:
+            try:
+                detail = resp_obj.text[:500]
+            except Exception:
+                pass
+        yield ("error", detail)
+        return
+
+    stop_reason = None
+    message_stop_received = False
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        raw_payload = line[len("data:"):].strip()
+        if raw_payload in ("", "[DONE]"):
+            continue
+        try:
+            event = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            continue
+        etype = event.get("type")
+        if etype == "content_block_start":
+            block = event.get("content_block", {}) or {}
+            idx = event.get("index")
+            yield ("block_start", block.get("type"), idx)
+            if block.get("type") == "tool_use":
+                yield ("tool_use_start", idx, block.get("name"), block.get("id"))
+        elif etype == "content_block_delta":
+            idx = event.get("index")
+            delta = event.get("delta", {}) or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text", "")
+                if text:
+                    yield ("text_delta", text)
+            elif delta.get("type") == "input_json_delta":
+                frag = delta.get("partial_json", "")
+                if frag:
+                    yield ("tool_input_delta", idx, frag)
+        elif etype == "content_block_stop":
+            yield ("block_stop", event.get("index"))
+        elif etype == "message_delta":
+            sr = (event.get("delta", {}) or {}).get("stop_reason")
+            if sr:
+                stop_reason = sr
+        elif etype == "message_stop":
+            # THE actual, explicit protocol signal that Anthropic
+            # considers this assistant message complete. Everything
+            # before this point -- including a fully-formed tool_use
+            # block and a message_delta carrying stop_reason="tool_use"
+            # -- is still provisional until this arrives. A stream that
+            # ends (EOF, dropped connection, truncated response) after
+            # emitting message_delta but WITHOUT ever reaching this
+            # event must never be treated as a completed turn, no matter
+            # how complete its individual pieces look -- see the
+            # fallback after the loop below, which is what actually
+            # enforces that.
+            message_stop_received = True
+        elif etype == "error":
+            # Anthropic's own in-stream error event (distinct from an
+            # HTTP/request-level failure, which is caught above by the
+            # try/except around the initial POST) -- e.g. an overloaded
+            # model or a mid-stream server error. This is a TERMINAL
+            # condition: stop reading further and report it as an error,
+            # exactly like the HTTP-level failure path -- never fall
+            # through to a plain ("stop", None) as if the stream had
+            # simply ended normally with no tool use and no stop_reason,
+            # which would be silently misinterpreted downstream as an
+            # ordinary completed (if odd) turn.
+            err_detail = (event.get("error", {}) or {}).get("message") or json.dumps(event.get("error", {}))
+            yield ("error", err_detail)
+            return
+
+    if not message_stop_received:
+        # The HTTP iterator reached EOF (or the connection ended)
+        # without Anthropic ever sending message_stop -- an incomplete/
+        # truncated stream, not a legitimately finished message,
+        # regardless of what stop_reason or tool_use content happened
+        # to arrive before the cutoff. Reported as a generic, safe
+        # diagnostic -- never the raw response body/headers, which could
+        # contain sensitive request/response material -- and treated
+        # exactly like any other terminal error: the caller must not
+        # execute a tool or advance any state from an incomplete stream.
+        yield ("error", "Anthropic stream ended before message_stop")
+        return
+    yield ("stop", stop_reason)
+
+
 def stream_atlas_turn(user_text, draft):
     """Streams one turn of the assistant as an SSE generator. Yields
     'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
@@ -4095,10 +4355,23 @@ def stream_atlas_turn(user_text, draft):
     def _submit_ready_sentences():
         """Splits whatever's newly available in tts_buffer and dispatches
         each ready sentence to the executor immediately (non-blocking) --
-        does not yield anything itself."""
+        does not yield anything itself.
+
+        TEXT/VOICE MODE GATE (Atlas interaction modes phase): TTS is
+        server-authoritative, gated on draft["interaction_mode"] -- never
+        inferred from whether ElevenLabs happens to be configured, from
+        client audio-capability hints, or from anything else the client
+        claims. A typed request whose session is in "text" mode (the
+        safe default -- see interaction_mode validation in
+        assistant_ask) makes ZERO calls to _elevenlabs_tts_call: the
+        sentence-splitting bookkeeping still runs (harmless, keeps
+        tts_buffer from growing unbounded), but nothing is ever
+        submitted to the executor."""
         nonlocal tts_buffer, chunk_seq
         ready, remainder = _split_ready_sentences(tts_buffer)
         tts_buffer = remainder
+        if draft.get("interaction_mode") != "voice":
+            return
         for sentence in ready:
             future = tts_executor.submit(_elevenlabs_tts_call, sentence)
             pending_futures.append((chunk_seq, sentence, future))
@@ -4120,47 +4393,28 @@ def stream_atlas_turn(user_text, draft):
             pending_futures.pop(0)
             yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': seq, 'final': False, 'text': sentence, 'audio': audio_b64, 'audio_error': audio_err})}\n\n"
 
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"},
-            json={"model": "claude-sonnet-4-6", "max_tokens": 600, "system": system, "messages": messages, "stream": True},
-            stream=True, timeout=60,
-        )
-        resp.raise_for_status()
-        # One continuous pass over the stream, all the way to the end --
-        # breaking out early to "drain the rest" in a second loop was the
-        # bug that caused this: requests' iter_lines() buffers whatever
-        # it's already pulled off the socket inside that generator's own
-        # frame, and abandoning the generator via `break` throws away
-        # anything sitting in that buffer, up to and including the
-        # closing </state> tag. That silently truncated the state block,
-        # so the model would say "confirming submission" while the
-        # backend never actually saw action=submit and nothing was ever
-        # created -- exactly the "I don't actually have the ability to
-        # submit" contradiction on the next turn.
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data:"):
-                continue
-            payload = line[len("data:"):].strip()
-            if payload in ("", "[DONE]"):
-                continue
-            try:
-                event = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            if event.get("type") != "content_block_delta":
-                continue
-            delta_text = event.get("delta", {}).get("text", "")
+    # project_context is created ONCE here (not inside either pass below)
+    # so the exact same dict object is what gets mutated in place by
+    # execute_tool() on a successful set_project_context call, and what
+    # ends up in new_draft at the end -- single source of truth for the
+    # whole turn, matching how every other tool call already handles it.
+    project_context = dict(draft.get("project_context") or {})
+
+    def _emit_and_tts(delta_source):
+        """Applies the STATE_TAG-safe visible/TTS handling in exactly
+        ONE place, reused for both (a) the ordinary-chat path (fed a
+        single pre-buffered string once the tool-detection pass finishes
+        with no tool requested) and (b) the after-tool-result path (fed
+        live per-token deltas from the second Claude call) -- so there
+        is only one implementation of this logic to trust, not two
+        maintained in parallel. Mutates the enclosing raw_text/
+        visible_sent/tts_buffer exactly as the original single-call
+        version did."""
+        nonlocal raw_text, visible_sent, tts_buffer
+        for delta_text in delta_source:
             if not delta_text:
                 continue
             raw_text += delta_text
-
-            # Only stream out text we're sure isn't (part of) the state
-            # tag -- hold back a small trailing window until we know.
-            # Once the tag shows up, stop emitting new deltas but keep
-            # looping so the rest of the stream (the full state JSON and
-            # its closing tag) still gets read and accumulated.
             tag_idx = raw_text.find(STATE_TAG)
             if tag_idx != -1:
                 safe_upto = tag_idx
@@ -4174,28 +4428,392 @@ def stream_atlas_turn(user_text, draft):
                     tts_buffer += new_chunk
                     _submit_ready_sentences()
                     yield from _drain_completed_chunks(block=False)
-    except requests.exceptions.RequestException as e:
-        # requests' default str(e) for an HTTPError is just the generic
-        # status line ("400 Client Error: Bad Request for url: ...") --
-        # it throws away the actual JSON error body Anthropic sends back,
-        # which is where the real, actionable reason lives (e.g. "model:
-        # not_found_error", an account/key access issue, or a malformed
-        # request). Surface that body when we have it instead of just
-        # the generic status line, so a 400 is actually diagnosable from
-        # the chat transcript rather than needing server log access.
-        detail = str(e)
-        resp_obj = getattr(e, "response", None)
-        if resp_obj is not None:
+
+    def _fail_safe_reply(text):
+        """Sends a fixed, safe message as the ENTIRE visible turn (used
+        for permission-denied / malformed-tool-input / unapproved-tool /
+        multiple-tool-use / project_id-rejected / protocol-anomaly /
+        stop-reason-mismatch cases) without making any further Claude
+        call -- the safest, most bounded response for a case that's
+        already gone wrong.
+
+        FLUSH FIX: _emit_and_tts deliberately withholds the trailing
+        len(STATE_TAG) characters of whatever text it's given, in case a
+        real <state> tag is about to begin -- correct for a live model
+        stream, where more content may still follow. But a fail-safe
+        reply is a fixed, complete string that nothing is ever going to
+        follow (no Pass 2, no state block, no further deltas of any
+        kind) -- so that held-back tail must be explicitly flushed here,
+        or the last few characters of every single fail-safe message are
+        silently never shown to the user at all."""
+        nonlocal raw_text, visible_sent, tts_buffer
+        yield from _emit_and_tts(iter([text]))
+        if len(raw_text) > len(visible_sent):
+            remainder = raw_text[len(visible_sent):]
+            yield f"data: {json.dumps({'type': 'delta', 'text': remainder})}\n\n"
+            visible_sent = raw_text
+            tts_buffer += remainder
+            _submit_ready_sentences()
+            yield from _drain_completed_chunks(block=False)
+
+    # PASS 1 -- tool-DETECTION ONLY, never the visible response.
+    #
+    # ARCHITECTURE NOTE (corrected): an earlier version of this gated on
+    # which content block arrived first (text vs tool_use), reasoning
+    # that Anthropic's tool_choice=auto response would put a tool call
+    # before any text when one was going to happen. That is NOT a
+    # protocol guarantee -- Claude is free to emit conversational
+    # preamble text before a tool_use block under auto tool choice (e.g.
+    # "Sure, let me switch us to Patel Farm." followed by the actual
+    # tool call), and relying on block order would have let exactly that
+    # kind of ungrounded, pre-resolution claim leak to the user. There is
+    # also no tool_choice setting that forces "tool-first when a tool IS
+    # used, but tools stay fully optional otherwise" -- forcing tool use
+    # (tool_choice=any or a specific tool) would break every ordinary
+    # chat turn instead.
+    #
+    # The actual fix: Pass 1's text is NEVER shown to the user under ANY
+    # circumstances, tool-shaped or not -- so block ordering stops being
+    # a security question entirely. Pass 1 exists ONLY to determine
+    # whether/which tool the model wants to call, using a capped
+    # max_tokens (it only ever needs to produce a short tool call, never
+    # a full reply) to keep this extra round-trip cheap. The actual
+    # user-visible answer is ALWAYS generated in Pass 2 below, which
+    # ALWAYS omits `tools` entirely -- structurally incapable of
+    # producing a tool_use no matter what the model does -- so Pass 2 is
+    # unconditionally safe to stream live from its very first token,
+    # whether or not a tool was used this turn. This trades one extra
+    # small/cheap API call on EVERY turn (previously only tool-using
+    # turns paid a second-call cost) for an architectural, not
+    # probabilistic, zero-leak guarantee. That tradeoff is deliberate.
+    #
+    # MULTIPLE TOOL_USE BLOCKS: every tool_use block anywhere in Pass 1
+    # is collected (not just the first) so the exact count is known
+    # before any decision is made. More than one -- regardless of names,
+    # order, or approval status -- fails CLOSED: nothing is executed, no
+    # partial project_context mutation, a controlled generic message is
+    # returned, and enough detail is logged server-side to diagnose it
+    # without ever exposing raw model/tool protocol to the user.
+    # tool_use_blocks_by_index: dict keyed by Anthropic's own content-
+    # block index, NOT a list built from "whichever block was most
+    # recently opened." This is the actual fix for the index-integrity
+    # defect: an input_json_delta or block_stop is only ever applied to
+    # the tool block that was ACTUALLY opened at that exact index --
+    # never inferred from ordering/recency. A block_stop whose index
+    # doesn't match any currently-open tool block (wrong index, already-
+    # completed block, or no block ever opened at that index at all) is
+    # an orphan/malformed-protocol event and is recorded as such rather
+    # than silently applied to some other block.
+    tool_use_blocks_by_index = {}
+    # SINGLE-ASSIGNMENT INDEX TRACKING: every content-block index may be
+    # opened by content_block_start AT MOST ONCE for the duration of a
+    # single Pass-1 response -- Anthropic's protocol never legitimately
+    # reuses an index within one message. Tracking a set of indices that
+    # have ALREADY been opened (regardless of block type, and regardless
+    # of whether that block later completed) is what lets a reused index
+    # be caught even in the case that would otherwise slip past the
+    # existing "len(tool_use_blocks) > 1" gate: two DIFFERENT tool_use
+    # blocks opened at the SAME index don't produce two dict entries --
+    # the second would silently overwrite the first in a naive
+    # implementation -- so a count-based check alone can't see it. This
+    # set is the actual defense: any second block_start (or tool_use_start,
+    # checked again defensively below) at an index already in this set
+    # is flagged, and the new block's own start/deltas/stop are never
+    # allowed to overwrite or extend whatever was already recorded there.
+    opened_block_indices = set()
+    protocol_anomaly = {"value": None}  # e.g. "orphan_block_stop", "orphan_tool_input_delta", "duplicate_block_stop", "duplicate_content_block_start", "duplicate_tool_use_start"
+    pass1_error = {"value": None}
+    pass1_stop_reason = {"value": None}
+    for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(), max_tokens=200):
+        kind = event[0]
+        if kind == "block_start":
+            _, btype, idx = event
+            if idx in opened_block_indices:
+                # This index already had a content_block_start earlier
+                # in THIS SAME response -- reused/duplicate index,
+                # regardless of block type or whether the earlier block
+                # at this index ever completed. Flagged; this event does
+                # not get to claim or reset anything at this index.
+                protocol_anomaly["value"] = protocol_anomaly["value"] or "duplicate_content_block_start"
+            else:
+                opened_block_indices.add(idx)
+        elif kind == "tool_use_start":
+            _, idx, name, tool_id = event
+            if idx in tool_use_blocks_by_index:
+                # Defensive, independent check (in addition to the
+                # block_start-level one above): never overwrite an
+                # already-recorded tool block at this index, and never
+                # let a second tool_use_start's later input_json_delta
+                # events extend a "replacement" entry either -- since no
+                # new entry is created here, tool_input_delta's own
+                # lookup-by-index below will correctly find the
+                # ORIGINAL (first) block, already completed or not, and
+                # nothing from the duplicate call ever gets appended to it.
+                protocol_anomaly["value"] = protocol_anomaly["value"] or "duplicate_tool_use_start"
+            else:
+                tool_use_blocks_by_index[idx] = {"index": idx, "name": name, "id": tool_id, "input_raw": "", "completed": False}
+        elif kind == "tool_input_delta":
+            _, idx, frag = event
+            block = tool_use_blocks_by_index.get(idx)
+            if block is not None and not block["completed"]:
+                block["input_raw"] += frag
+            else:
+                # A delta for an index with no open tool block (never
+                # started, or already closed) -- orphan/malformed
+                # protocol condition. Recorded, not silently dropped or
+                # applied anywhere else.
+                protocol_anomaly["value"] = protocol_anomaly["value"] or "orphan_tool_input_delta"
+        elif kind == "block_stop":
+            _, idx = event
+            block = tool_use_blocks_by_index.get(idx)
+            if block is None:
+                if idx not in opened_block_indices:
+                    # A stop for an index that was never opened by ANY
+                    # content_block_start at all (tool_use or text) --
+                    # this is exactly the "deliberately wrong index"
+                    # malformed-stream shape: a real tool block opened
+                    # at index 0, but the stop event claims index 1,
+                    # which never started anything. Flagged, and -- just
+                    # as importantly -- this lookup-by-index means it
+                    # was NEVER applied to index 0's real tool block
+                    # either, so that block simply never gets marked
+                    # completed no matter what this stray event claims.
+                    protocol_anomaly["value"] = protocol_anomaly["value"] or "orphan_block_stop"
+                # else: a legitimate stop for a real (non-tool, e.g.
+                # text) block that actually opened at this index -- fine.
+            elif block["completed"]:
+                # THIS index's tool block already received its
+                # block_stop once -- a second one is a duplicate/
+                # malformed-protocol event, never re-applied.
+                protocol_anomaly["value"] = protocol_anomaly["value"] or "duplicate_block_stop"
+            else:
+                # THE real, explicit, INDEX-MATCHED content_block_stop
+                # for THIS specific tool block is what marks it
+                # complete -- not merely "its accumulated input happens
+                # to parse as valid JSON," and not "whichever tool block
+                # was most recently opened." A block_stop carrying a
+                # different index than the block it's nominally closing
+                # can never mark THIS block complete, because it will
+                # simply never reach this branch for THIS block's dict
+                # (it looks up by the stop event's OWN index, which
+                # must exactly equal this block's own stored index by
+                # construction of the dict key itself).
+                block["completed"] = True
+        elif kind == "error":
+            pass1_error["value"] = event[1]
+        elif kind == "stop":
+            # THE terminal stop_reason for the WHOLE Pass-1 assistant
+            # message -- captured explicitly now (was previously
+            # ignored entirely). A tool block being individually
+            # complete (real content_block_stop, valid JSON, right
+            # index) is necessary but NOT sufficient: the message as a
+            # whole must have actually terminated BECAUSE the model
+            # invoked a tool (stop_reason == "tool_use"), not merely
+            # happen to contain one somewhere before truncating for an
+            # unrelated reason (max_tokens cutting off LATER content,
+            # a stop_sequence, or any other terminal condition). This
+            # is the actual gate checked below, in addition to --  not
+            # instead of -- the per-block completion check.
+            pass1_stop_reason["value"] = event[1]
+        # text_delta: deliberately ignored -- see the note above; none
+        # of Pass 1's prose is ever used.
+
+    tool_use_blocks = list(tool_use_blocks_by_index.values())
+
+    turn_level_error = pass1_error["value"]
+    tool_result_content = None
+    tool_result_is_error = False
+    tool_use_id = None
+    tool_name = None
+    tool_input = None
+
+    if turn_level_error is None and protocol_anomaly["value"] is not None:
+        # Any detected protocol anomaly (orphan block_stop, orphan
+        # tool_input_delta, duplicate block_stop) fails the ENTIRE turn
+        # closed, regardless of what tool_use_blocks otherwise looks
+        # like -- a stream that produced ANY malformed/out-of-order tool
+        # protocol event isn't trustworthy enough to act on even if some
+        # other block coincidentally looks complete.
+        log_activity("atlas", "tool_call", 0, "atlas_tool_protocol_anomaly", new_value=protocol_anomaly["value"])
+        get_db().commit()
+        yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+        turn_level_error = "__handled_fail_safe__"
+    elif turn_level_error is None and len(tool_use_blocks) > 1:
+        names = [b["name"] for b in tool_use_blocks]
+        log_activity("atlas", "tool_call", 0, "atlas_multiple_native_tool_use_blocks", new_value=json.dumps(names))
+        get_db().commit()
+        yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+        turn_level_error = "__handled_fail_safe__"  # sentinel: already replied, skip the generic error tail below
+    elif turn_level_error is None and len(tool_use_blocks) == 1:
+        block = tool_use_blocks[0]
+        tool_name, tool_use_id = block["name"], block["id"]
+        if not block["completed"]:
+            # NEVER execute a tool_use block that never received its own
+            # content_block_stop -- e.g. truncated by hitting max_tokens
+            # mid-argument. Parsing the accumulated input_raw as valid
+            # JSON is NOT sufficient proof the block actually completed
+            # (a truncation could coincidentally land on a JSON-parseable
+            # boundary); only the real, explicit protocol event proves
+            # completion, and that's the only thing checked here.
+            log_activity("atlas", "tool_call", 0, "atlas_incomplete_native_tool_use_block", field=str(tool_name), new_value=block["input_raw"][:200])
+            get_db().commit()
+            yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+            turn_level_error = "__handled_fail_safe__"
+        elif pass1_stop_reason["value"] != "tool_use":
+            # A tool block being individually complete (real
+            # content_block_stop, valid JSON, correct index) is
+            # necessary but NOT sufficient -- the WHOLE assistant
+            # message must have actually terminated BECAUSE the model
+            # invoked the tool. stop_reason == "tool_use" is Anthropic's
+            # own signal of that; anything else (max_tokens, end_turn,
+            # stop_sequence, missing/None, or any other value) means the
+            # tool block merely happened to finish before the message
+            # ended for some UNRELATED reason -- e.g. later content in
+            # the same response got truncated by max_tokens after the
+            # tool block itself had already closed. Never execute in
+            # that case, no matter how complete and well-formed the
+            # tool block itself looks in isolation.
+            log_activity("atlas", "tool_call", 0, "atlas_tool_block_without_tool_use_stop_reason", field=str(tool_name), new_value=str(pass1_stop_reason["value"]))
+            get_db().commit()
+            yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+            turn_level_error = "__handled_fail_safe__"
+        elif tool_name not in ATLAS_NATIVE_TOOLS_ALLOWED:
+            # Structurally shouldn't happen -- Claude only ever requests
+            # tools we declared -- but treated as a hard, non-executed
+            # stop if it somehow did, rather than trusting a model-
+            # supplied tool name for anything.
+            log_activity("atlas", "tool_call", 0, "atlas_unapproved_native_tool_request", new_value=str(tool_name))
+            get_db().commit()
+            yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+            turn_level_error = "__handled_fail_safe__"
+        else:
+            tool_input_parsed = None
             try:
-                detail = resp_obj.text[:500]
-            except Exception:
-                pass
-        err_msg = f"I hit an error talking to Claude: {detail}"
+                tool_input_parsed = json.loads(block["input_raw"]) if block["input_raw"].strip() else {}
+                if not isinstance(tool_input_parsed, dict):
+                    raise ValueError("tool input was not a JSON object")
+            except (json.JSONDecodeError, ValueError):
+                # Never execute from partial/malformed JSON -- input is
+                # only ever used once it parses as a complete object.
+                log_activity("atlas", "tool_call", 0, "atlas_malformed_native_tool_input", field=str(tool_name), new_value=block["input_raw"][:200])
+                get_db().commit()
+                yield from _fail_safe_reply("Sorry, I couldn't quite parse that -- could you tell me again which project you mean?")
+                turn_level_error = "__handled_fail_safe__"
+
+            if turn_level_error is None and tool_input_parsed is not None and "project_id" in tool_input_parsed:
+                # REJECTED, not silently stripped -- project_id is
+                # deliberately excluded from the native declaration (see
+                # _atlas_native_tool_declarations); a model sending it
+                # anyway is a schema violation worth surfacing in logs
+                # as such, not quietly sanitizing away where it would be
+                # harder to notice something unexpected happened.
+                # Canonical project_id must always come from
+                # _find_project()'s own resolution, never a model-
+                # supplied value.
+                log_activity("atlas", "tool_call", 0, "atlas_rejected_native_project_id", new_value=json.dumps(tool_input_parsed)[:200])
+                get_db().commit()
+                yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+                turn_level_error = "__handled_fail_safe__"
+            elif turn_level_error is None and tool_input_parsed is not None:
+                tool_input = tool_input_parsed
+                # THE authoritative resolution -- exactly the same
+                # execute_tool() gateway every other tool call goes
+                # through: permission checks, schema re-validation,
+                # _find_project()'s exact/unique-substring/ambiguous
+                # logic, session-context write-back, audit logging.
+                # Nothing here duplicates or bypasses any of that.
+                result = execute_tool(tool_name, tool_input, current_user, session_context=project_context)
+                if not result.success and result.error == "not permitted":
+                    yield from _fail_safe_reply("You don't have permission to look up projects right now.")
+                    turn_level_error = "__handled_fail_safe__"
+                else:
+                    # Real Anthropic tool protocol -- an assistant
+                    # tool_use content block followed by a user
+                    # tool_result content block, not a summary folded
+                    # into the system prompt. Pass 2's reply is
+                    # therefore grounded in the actual structured
+                    # result, not a paraphrase of it.
+                    tool_result_content = json.dumps(result.data if result.success else {"error": result.error})
+                    tool_result_is_error = not result.success
+    elif turn_level_error is None:
+        # ZERO tool_use blocks this pass -- CASE A of the stop-reason/
+        # tool-count consistency matrix. This is only a legitimate
+        # "the model chose not to use a tool" decision when the message
+        # actually terminated normally (stop_reason == "end_turn"). Any
+        # other terminal reason -- most importantly max_tokens -- means
+        # Pass 1 may have been cut off BEFORE it ever reached a tool
+        # call it was going to make; proceeding to an ordinary, tools-
+        # omitted Pass 2 in that case would recreate the exact original
+        # failure this whole architecture exists to fix (Atlas
+        # answering from the partial snapshot instead of ever
+        # attempting authoritative resolution). Zero tool blocks is
+        # therefore NOT automatically the safe/ordinary case -- it must
+        # be proven safe by the stop reason, the same as the one-tool-
+        # block case is proven safe by requiring stop_reason=="tool_use".
+        if pass1_stop_reason["value"] != "end_turn":
+            log_activity("atlas", "tool_call", 0, "atlas_zero_tool_blocks_unexpected_stop_reason", new_value=str(pass1_stop_reason["value"]))
+            get_db().commit()
+            yield from _fail_safe_reply("Sorry, I ran into an unexpected issue with that -- could you try again?")
+            turn_level_error = "__handled_fail_safe__"
+        # else: a genuinely ordinary, cleanly-completed no-tool turn --
+        # falls through to the shared tail below exactly as before,
+        # which (since tool_result_content stays None) takes the
+        # ordinary ("no tool was requested") Pass 2 branch.
+
+    if turn_level_error == "__handled_fail_safe__":
+        # Already replied above with a safe, fixed message and logged
+        # the reason -- fall through to the shared persistence tail
+        # below exactly like every other path (project_context may or
+        # may not have changed; whatever it is, it's correct as-is).
+        pass
+    elif turn_level_error is not None:
+        err_msg = f"I hit an error talking to Claude: {turn_level_error}"
         yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
         yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
         tts_executor.shutdown(wait=False, cancel_futures=True)
+        draft["project_context"] = project_context
         return
+    else:
+        # PASS 2 -- the real, ALWAYS-live-streamed visible response.
+        # Deliberately omits `tools` entirely on every turn, tool-using
+        # or not: this call structurally CANNOT request a tool use no
+        # matter what the model tries, which is both what bounds the
+        # whole loop to at most two API calls (an architectural
+        # impossibility of a third, not a counter that could be
+        # miscounted) and what makes it unconditionally safe to stream
+        # live from the first token.
+        messages_pass2 = messages
+        if tool_result_content is not None:
+            messages_pass2 = messages + [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": tool_input}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": tool_result_content, "is_error": tool_result_is_error}]},
+            ]
+        pass2_error = {"value": None}
+
+        def _pass2_delta_source():
+            for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=None):
+                if ev[0] == "text_delta":
+                    yield ev[1]
+                elif ev[0] == "error":
+                    pass2_error["value"] = ev[1]
+
+        yield from _emit_and_tts(_pass2_delta_source())
+        if pass2_error["value"] is not None:
+            # execute_tool() above may have already legitimately
+            # mutated project_context -- that stands regardless of this
+            # call's outcome. Only the user-visible reply for THIS turn
+            # failed; report that honestly instead of inventing a final
+            # answer, and still fall through to the shared tail below so
+            # the already-successful context change persists.
+            err_msg = f"I hit an error talking to Claude: {pass2_error['value']}"
+            yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
+            yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+            tts_executor.shutdown(wait=False, cancel_futures=True)
+            draft["project_context"] = project_context
+            return
+
 
     spoken, state = _parse_assistant_reply(raw_text)
     if not visible_sent and spoken:
@@ -4208,23 +4826,6 @@ def stream_atlas_turn(user_text, draft):
     mode = state.get("mode", "chat")
     fields = state.get("fields", {}) if mode == "concrete_request" else {}
     action = state.get("action", "none")
-
-    # PROJECT CONTEXT (item 6): carry the session's established project
-    # context forward turn-to-turn (it's session-scoped, not turn-scoped
-    # -- new_draft otherwise replaces the whole draft each turn). If the
-    # model named a project this turn, resolve it for real through the
-    # exact same execute_tool("set_project_context", ...) gateway every
-    # other tool call goes through -- permission-checked, logged, and
-    # backed by _find_project()'s existing exact/unique-substring/
-    # ambiguous logic. The model's stated name is only ever a hint to
-    # resolve; an ambiguous or unmatched name leaves project_context
-    # unchanged rather than guessing, and this is enforced here in code,
-    # not just by the prompt asking nicely.
-    project_context = dict(draft.get("project_context") or {})
-    model_project_name = state.get("project_name")
-    if model_project_name and isinstance(model_project_name, str) and model_project_name.strip():
-        execute_tool("set_project_context", {"project_name": model_project_name.strip()},
-                     current_user, session_context=project_context)
 
     new_history = history + [
         {"role": "user", "content": user_text},
@@ -4278,16 +4879,32 @@ def stream_atlas_turn(user_text, draft):
             new_draft["pending_submit"] = None
 
     _submit_ready_sentences()
-    if tts_buffer.strip():
+    if tts_buffer.strip() and draft.get("interaction_mode") == "voice":
         # Whatever's left over (even a fragment with no terminal
         # punctuation) is the tail of the reply -- there's no more text
         # coming to complete it, so submit it for synthesis as-is.
+        # Gated the same way as _submit_ready_sentences above -- text
+        # mode never reaches ElevenLabs, even for this final fragment.
         future = tts_executor.submit(_elevenlabs_tts_call, tts_buffer.strip())
         pending_futures.append((chunk_seq, tts_buffer.strip(), future))
         chunk_seq += 1
         tts_buffer = ""
     yield from _drain_completed_chunks(block=True)
     tts_executor.shutdown(wait=False)
+
+    # PRESERVE session-level keys that stream_atlas_turn itself doesn't
+    # own or know the meaning of (conversation_id, interaction_mode --
+    # both set/read entirely by assistant_ask) across this replace.
+    # new_draft only ever sets the turn-mechanics keys stream_atlas_turn
+    # actually manages; without this, draft.clear() below would
+    # silently erase conversation_id/interaction_mode every single
+    # turn, which is exactly what happened before this was added -- the
+    # symptom was every "turn" after the first silently starting a
+    # BRAND NEW conversation instead of continuing the same one, since
+    # conversation_id kept getting wiped back to absent/None.
+    for _preserved_key in ("conversation_id", "interaction_mode"):
+        if _preserved_key in draft and _preserved_key not in new_draft:
+            new_draft[_preserved_key] = draft[_preserved_key]
 
     draft.clear()
     draft.update(new_draft)
@@ -4296,6 +4913,121 @@ def stream_atlas_turn(user_text, draft):
     # purely for older-client backward compatibility -- all real audio
     # for this turn was already delivered via audio_chunk events above.
     yield f"data: {json.dumps({'type': 'done', 'mode': new_draft.get('mode'), 'submitted_id': submitted_id, 'audio': None, 'audio_error': None, 'pending_write_token': pending_write_token})}\n\n"
+
+
+def _default_conversation_title(project_name=None, first_message=None):
+    """Deterministic title, no extra AI call. Canonical project name
+    wins if a project is already established; otherwise a clean
+    truncation of the first thing the person actually typed/said.
+    Defense in depth: strips anything from a literal '<state>' onward
+    even though first_message is always the raw USER-typed question
+    (never a model reply, so it should never legitimately contain a
+    <state> block at all) -- titles are rendered directly in the
+    sidebar, so this costs nothing and closes off that possibility
+    entirely regardless of how first_message is sourced in the future."""
+    if project_name:
+        return project_name[:80]
+    text = (first_message or "").strip().replace("\n", " ")
+    state_idx = text.find("<state>")
+    if state_idx != -1:
+        text = text[:state_idx].strip()
+    if not text:
+        return "New conversation"
+    return (text[:57] + "...") if len(text) > 60 else text
+
+
+def _create_atlas_conversation(user_id, title, project_id=None):
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+    cur = db.execute(
+        "INSERT INTO atlas_conversations (user_id, title, project_id, created_at, updated_at) VALUES (?,?,?,?,?)",
+        (user_id, title, project_id, now, now)
+    )
+    db.commit()
+    return cur.lastrowid
+
+
+def _append_atlas_message(conversation_id, role, content, interaction_mode):
+    """Appends ONE visible chat message -- what the person actually
+    typed/said (role='user') or actually saw as Atlas's spoken reply
+    (role='assistant'). Deliberately never given: raw native tool
+    protocol (tool_use/tool_result blocks), the hidden <state>...</state>
+    control payload, or any chain-of-thought -- callers only ever pass
+    the already-parsed, already-visible text (the same `spoken` value
+    used for the SSE delta events and history[] entries), never
+    `raw_text` itself."""
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+    db.execute(
+        "INSERT INTO atlas_messages (conversation_id, role, content, interaction_mode, created_at) VALUES (?,?,?,?,?)",
+        (conversation_id, role, content, interaction_mode, now)
+    )
+    db.execute("UPDATE atlas_conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+    db.commit()
+
+
+def _append_atlas_message_owned(conversation_id, user, role, content, interaction_mode):
+    """The ONLY safe entry point for persisting a message once a
+    conversation_id is already in hand from session state (as opposed
+    to one just created by _create_atlas_conversation, where ownership
+    is fixed at creation and therefore trivially correct). Defense in
+    depth: re-validates ownership via _get_owned_conversation itself,
+    right here at the persistence boundary, rather than trusting that
+    "the route already checked earlier" -- a security-sensitive
+    database write should not depend on caller discipline elsewhere.
+    Returns True if the message was actually appended, False if
+    conversation_id did not resolve to a conversation owned by `user`
+    (in which case NOTHING is written -- no message, no
+    updated_at bump)."""
+    if not _get_owned_conversation(conversation_id, user):
+        return False
+    _append_atlas_message(conversation_id, role, content, interaction_mode)
+    return True
+
+
+def _get_owned_conversation(conversation_id, user):
+    """THE ownership boundary for every conversation-history operation.
+    Returns the conversation row only if it exists AND belongs to the
+    given (server-side authenticated) user -- never trusts any client-
+    supplied user_id for this check, only current_user from the real
+    session. Returns None for both "doesn't exist" and "exists but
+    belongs to someone else" -- deliberately indistinguishable outside
+    this function, so a caller can never leak which is which to the
+    person making the request (a 404-shaped response either way, not a
+    403 that would confirm existence)."""
+    db = get_db()
+    try:
+        conversation_id = int(conversation_id)
+    except (TypeError, ValueError):
+        return None
+    return db.execute(
+        "SELECT * FROM atlas_conversations WHERE id = ? AND user_id = ?",
+        (conversation_id, user.id)
+    ).fetchone()
+
+
+def _restore_project_context_safely(conversation_row):
+    """Project-context restoration on reopening a conversation. NEVER
+    trusts stale project identity just because it resolved successfully
+    at some point in the past -- re-validates against the CURRENT
+    database state and the CURRENT user's CURRENT permissions every
+    time, exactly like every other project-context path in this
+    codebase. If the project was deleted, or the current user no longer
+    has the required permission, returns an EMPTY context (the
+    conversation still opens and its historical messages are still
+    fully visible -- only the ACTIVE, forward-looking project_context is
+    withheld) rather than silently restoring something that might no
+    longer be valid or accessible."""
+    project_id = conversation_row["project_id"] if conversation_row else None
+    if not project_id:
+        return {}
+    db = get_db()
+    project = db.execute("SELECT id, name FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        return {}  # deleted since this conversation last used it
+    if not (user_has_permission(current_user, "module:project_hunt:view") and user_has_permission(current_user, "atlas:view_business_data")):
+        return {}  # permission changed since this conversation last used it
+    return {"project_id": project["id"], "name": project["name"]}
 
 
 @app.route("/assistant")
@@ -4412,31 +5144,251 @@ def assistant_ask():
                 # Whisper not configured -- fall back to ElevenLabs.
                 question, transcribe_error = transcribe_via_elevenlabs(audio_bytes, mime_type)
             question = (question or "").strip()
+        raw_mode = request.form.get("interaction_mode")
     else:
-        question = (request.get_json(silent=True) or {}).get("question", "").strip()
+        body = request.get_json(silent=True) or {}
+        question = (body.get("question", "") or "").strip()
+        raw_mode = body.get("interaction_mode")
 
     token = session.get("atlas_token")
     if not token:
         token = secrets.token_hex(16)
         session["atlas_token"] = token
-    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}})
+    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "interaction_mode": "text"})
+
+    # PERSISTENT HISTORY: a conversation_id may already be attached to
+    # this in-memory session (set by /assistant/conversations/new or by
+    # reopening a past conversation via GET /assistant/conversations/<id>).
+    # If not, this is a brand-new session's first real question -- lazily
+    # create the conversation row now, not when the page merely loads,
+    # so idly opening Atlas never creates empty conversation rows.
+    # Ownership is fixed at creation to the real authenticated user; it
+    # is never re-derived from anything client-supplied afterward.
+    #
+    # SECURITY (ownership revalidation): an EXISTING conversation_id
+    # coming from session state is NOT trusted on faith just because
+    # it's already there -- it is re-validated against current_user via
+    # the same _get_owned_conversation() boundary every other
+    # conversation operation uses, on every single request, before it
+    # is used for anything. This closes the exact gap a stale/
+    # tampered/corrupted in-memory session association could otherwise
+    # exploit: without this check, a conversation_id that used to be
+    # valid (or was ever manipulated to point at someone else's
+    # conversation) would let this request silently append into,
+    # restore project context from, or otherwise act against a
+    # conversation this user does not own. On failure: no message is
+    # ever appended, no project context is restored/used, no Atlas turn
+    # runs at all, and no replacement conversation is silently created
+    # in this same request (that would mask what is very likely a real
+    # session-integrity problem rather than surfacing it) -- the
+    # invalid association is cleared from the session and the person
+    # gets a safe, generic failure. The response is indistinguishable
+    # from any other generic failure, so it never confirms or denies
+    # that the id belongs to a real, different conversation.
+    conversation_id = draft.get("conversation_id")
+    conversation_ownership_invalid = False
+    if conversation_id is not None:
+        if not _get_owned_conversation(conversation_id, current_user):
+            conversation_ownership_invalid = True
+            draft["conversation_id"] = None
+            conversation_id = None
+    is_first_message_in_conversation = False
+    if not conversation_ownership_invalid and conversation_id is None and question:
+        conversation_id = _create_atlas_conversation(current_user.id, _default_conversation_title(first_message=question))
+        draft["conversation_id"] = conversation_id
+        is_first_message_in_conversation = True
+
+    # INTERACTION MODE (Atlas text/voice separation phase): server-
+    # authoritative, PER-REQUEST, explicit -- never inferred from
+    # whether audio bytes happen to be attached, whether ElevenLabs is
+    # configured, or any other client-side signal, and -- critically --
+    # NEVER inherited from whatever the session's LAST turn happened to
+    # be. Voice must be positively re-established on every single
+    # request that wants it; the safe default for anything else
+    # (omitted, malformed, unrecognized, or simply absent) is always
+    # "text," even if this exact session was in voice mode one turn
+    # ago. Retaining a stale "voice" value across turns is exactly the
+    # cost/privacy bug this phase exists to close: a user who used
+    # Voice Mode and then types a normal message must get a silent,
+    # zero-TTS reply, full stop -- there is no fallback path here that
+    # can ever resolve to "voice" without this exact request saying so.
+    draft["interaction_mode"] = "voice" if raw_mode == "voice" else "text"
 
     def generate():
         yield f"data: {json.dumps({'type': 'question', 'text': question, 'transcribe_error': transcribe_error})}\n\n"
         if transcribe_error:
             yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return
+        if conversation_ownership_invalid:
+            # FAIL CLOSED, entirely -- no Atlas turn runs, nothing is
+            # appended, no project context is restored/used, and no
+            # replacement conversation is silently created in this same
+            # request (that would mask what may be a real session-
+            # integrity problem). The message is generic and identical
+            # in shape to any other failure -- it never confirms or
+            # denies that the id belongs to a real, different
+            # conversation. draft["conversation_id"] was already cleared
+            # above, so the session can recover cleanly via New Chat or
+            # simply asking again (which will lazily create a fresh,
+            # correctly-owned conversation next time).
+            safe_msg = "Sorry, I couldn't continue that conversation -- please start a new chat."
+            yield f"data: {json.dumps({'type': 'delta', 'text': safe_msg})}\n\n"
+            if draft.get("interaction_mode") == "voice":
+                audio_b64, audio_err = _elevenlabs_tts_call(safe_msg)
+            else:
+                audio_b64, audio_err = None, None
+            yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': safe_msg, 'audio': audio_b64, 'audio_error': audio_err})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+            return
         if not question:
             no_question_msg = "I didn't catch a question."
             yield f"data: {json.dumps({'type': 'delta', 'text': no_question_msg})}\n\n"
-            audio_b64, audio_err = _elevenlabs_tts_call(no_question_msg)
+            if draft.get("interaction_mode") == "voice":
+                audio_b64, audio_err = _elevenlabs_tts_call(no_question_msg)
+            else:
+                audio_b64, audio_err = None, None
             yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': no_question_msg, 'audio': audio_b64, 'audio_error': audio_err})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return
+
+        # FAILED-TURN PERSISTENCE POLICY:
+        #   USER message -> persisted immediately, unconditionally, the
+        #     moment we know a conversation exists for it. The person
+        #     genuinely did submit this; that fact doesn't become untrue
+        #     if generation later fails, and losing it would make a
+        #     failed turn look like it never happened at all.
+        #   ASSISTANT message -> persisted ONLY after stream_atlas_turn
+        #     has genuinely completed a real, visible reply (proven by
+        #     draft["history"] actually growing by the assistant's own
+        #     entry -- never assumed). A hard API-level error, an
+        #     incomplete/truncated Pass 2 stream, or any other failure
+        #     path returns EARLY inside stream_atlas_turn before
+        #     touching history at all -- so nothing here can ever
+        #     mistake a partial/failed response for a completed one, and
+        #     nothing here ever writes raw_text, <state>, or tool
+        #     protocol -- only the same already-parsed `spoken` value
+        #     used for the real delta events and history[] entries.
+        # This also makes retries safe by construction: each request is
+        # persisted independently exactly once for whatever it actually
+        # produced, so retrying after a failure adds new rows, never
+        # rewrites or duplicates old ones.
+        if conversation_id is not None:
+            _append_atlas_message_owned(conversation_id, current_user, "user", question, draft.get("interaction_mode", "text"))
+
+        history_len_before_turn = len(draft.get("history", []))
         for chunk in stream_atlas_turn(question, draft):
             yield chunk
 
+        if conversation_id is not None and len(draft.get("history", [])) > history_len_before_turn:
+            assistant_entry = draft.get("history", [])[-1]
+            _append_atlas_message_owned(conversation_id, current_user, assistant_entry.get("role", "assistant"), assistant_entry.get("content", ""), draft.get("interaction_mode", "text"))
+            if is_first_message_in_conversation:
+                project_ctx = draft.get("project_context") or {}
+                title = _default_conversation_title(project_name=project_ctx.get("name"), first_message=question)
+                db = get_db()
+                # Defense in depth -- owner-scoped even though ownership
+                # was already validated above for this request: a
+                # security-sensitive write should not depend solely on
+                # "the route checked it earlier."
+                db.execute("UPDATE atlas_conversations SET title = ?, project_id = ? WHERE id = ? AND user_id = ?",
+                           (title, project_ctx.get("project_id"), conversation_id, current_user.id))
+                db.commit()
+            elif draft.get("project_context", {}).get("project_id"):
+                # A project may have been established/switched on a
+                # LATER turn, not just the first -- keep the
+                # conversation's stored project_id current so reopening
+                # it later restores the right context.
+                db = get_db()
+                db.execute("UPDATE atlas_conversations SET project_id = ? WHERE id = ? AND user_id = ?",
+                           (draft["project_context"]["project_id"], conversation_id, current_user.id))
+                db.commit()
+
     return Response(stream_with_context(generate()), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/assistant/conversations", methods=["GET"])
+@login_required
+def assistant_conversations_list():
+    if not is_atlas_allowed():
+        return {"error": "not authorized"}, 403
+    db = get_db()
+    rows = db.execute(
+        """SELECT c.id, c.title, c.updated_at, c.project_id, p.name AS project_name
+           FROM atlas_conversations c LEFT JOIN tracker_projects p ON p.id = c.project_id
+           WHERE c.user_id = ? AND c.archived_at IS NULL
+           ORDER BY c.updated_at DESC LIMIT 50""",
+        (current_user.id,)
+    ).fetchall()
+    return {"conversations": [
+        {"id": r["id"], "title": r["title"], "updated_at": r["updated_at"], "project_name": r["project_name"]}
+        for r in rows
+    ]}
+
+
+@app.route("/assistant/conversations/new", methods=["POST"])
+@login_required
+def assistant_conversations_new():
+    if not is_atlas_allowed():
+        return {"error": "not authorized"}, 403
+    token = session.get("atlas_token")
+    if not token:
+        token = secrets.token_hex(16)
+        session["atlas_token"] = token
+    # A brand-new conversation starts with NO inherited project context
+    # unless the person explicitly re-selects/resolves one in the new
+    # conversation -- matching the explicit requirement that New Chat
+    # never silently carries context forward.
+    ATLAS_SESSIONS[token] = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "interaction_mode": "text", "conversation_id": None}
+    return {"ok": True}
+
+
+@app.route("/assistant/conversations/<conversation_id>", methods=["GET"])
+@login_required
+def assistant_conversation_open(conversation_id):
+    if not is_atlas_allowed():
+        return {"error": "not authorized"}, 403
+    # OWNERSHIP ENFORCEMENT: the only authority for "does this
+    # conversation belong to the requester" is _get_owned_conversation,
+    # which checks against current_user (the real, server-side
+    # authenticated identity) -- never anything from the URL/request
+    # beyond the id itself. A conversation that doesn't exist and a
+    # conversation that belongs to someone else are BOTH reported
+    # identically (404), so a person can never learn from the response
+    # whether a given id belongs to another real user.
+    conversation = _get_owned_conversation(conversation_id, current_user)
+    if not conversation:
+        return {"error": "not found"}, 404
+
+    db = get_db()
+    messages = db.execute(
+        "SELECT role, content, interaction_mode, created_at FROM atlas_messages WHERE conversation_id = ? ORDER BY id",
+        (conversation["id"],)
+    ).fetchall()
+
+    # PROJECT CONTEXT RESTORATION: re-validated fresh every time, never
+    # trusted just because it was valid when this conversation was last
+    # used -- see _restore_project_context_safely's own docstring.
+    restored_context = _restore_project_context_safely(conversation)
+
+    token = session.get("atlas_token")
+    if not token:
+        token = secrets.token_hex(16)
+        session["atlas_token"] = token
+    ATLAS_SESSIONS[token] = {
+        "mode": "chat", "fields": {}, "pending_submit": None, "pending_write": None,
+        "interaction_mode": "text",
+        "conversation_id": conversation["id"],
+        "project_context": restored_context,
+        "history": [{"role": m["role"], "content": m["content"]} for m in messages][-20:],
+    }
+
+    return {
+        "id": conversation["id"],
+        "title": conversation["title"],
+        "messages": [{"role": m["role"], "content": m["content"], "created_at": m["created_at"]} for m in messages],
+        "project_context": restored_context,
+        "context_needs_reselection": bool(conversation["project_id"]) and not restored_context,
+    }
 
 
 @app.route("/assistant/reset", methods=["POST"])

@@ -53,37 +53,74 @@ def check(label, condition):
     print(("  OK  " if condition else "FAIL  ") + label)
 
 
-def fake_claude_stream(reply_text):
-    """Builds a MagicMock standing in for requests.post's return value,
+def fake_claude_stream(reply_text, index=0):
+    """Builds a MagicMock standing in for ONE requests.post return value,
     whose .iter_lines() yields real-shaped Anthropic streaming lines
-    (content_block_delta events, one per character run) followed by a
-    terminal [DONE] -- matches what stream_atlas_turn actually parses.
-    Splitting into several small deltas (not one big one) is deliberate:
-    it's what actually exercises the sentence-buffering/audio_chunk
-    logic mid-stream instead of only at the very end.
-    """
+    (content_block_start/delta/stop, one text block, index-tagged)
+    followed by message_delta/message_stop/[DONE] -- matches what
+    _stream_claude_completion actually parses. Splitting into several
+    small deltas (not one big one) is deliberate: it's what actually
+    exercises the sentence-buffering/audio_chunk logic mid-stream
+    instead of only at the very end."""
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
     lines = []
+    lines.append("data: " + json.dumps({"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}}))
     # Emit in small chunks of ~12 chars to simulate real token-by-token streaming.
     for i in range(0, len(reply_text), 12):
         piece = reply_text[i:i + 12]
-        lines.append("data: " + json.dumps({"type": "content_block_delta", "delta": {"text": piece}}))
+        lines.append("data: " + json.dumps({"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": piece}}))
+    lines.append("data: " + json.dumps({"type": "content_block_stop", "index": index}))
+    lines.append("data: " + json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}))
+    lines.append("data: " + json.dumps({"type": "message_stop"}))
     lines.append("data: [DONE]")
     resp.iter_lines = MagicMock(return_value=iter(lines))
     return resp
 
 
+def fake_no_tool_pass1():
+    """Pass 1 (tool-detection) response for a turn that uses no tool --
+    every test in this file is a plain chat/concrete-request flow with
+    no project-context tool call, so Pass 1 always resolves to
+    stop_reason=end_turn with zero tool_use blocks, and Pass 1's own
+    (unused) text is irrelevant -- kept empty."""
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    lines = [
+        "data: " + json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        "data: " + json.dumps({"type": "message_stop"}),
+        "data: [DONE]",
+    ]
+    resp.iter_lines = MagicMock(return_value=iter(lines))
+    return resp
+
+
 def run_turn(user_text, draft, reply_text):
-    """Runs one full stream_atlas_turn() call against a faked Claude
-    response, returns the list of parsed SSE events. Caller is
+    """Runs one full stream_atlas_turn() call against faked Claude
+    responses, returns the list of parsed SSE events. Caller is
     responsible for already being inside a Flask request context (via
     test_request_context, optionally with a logged-in user via
     login_user) -- this function does NOT push its own, since nesting a
     second context here would give current_user a fresh, logged-out
     session, breaking the write-confirmation tests in section 4 that
-    rely on an already-authenticated current_user."""
-    with patch("app.requests.post", return_value=fake_claude_stream(reply_text)):
+    rely on an already-authenticated current_user.
+
+    NATIVE TOOL DISPATCH UPDATE: stream_atlas_turn now always makes TWO
+    Claude calls per turn (Pass 1: tool-detection, Pass 2: the real
+    live-streamed reply) -- see the project-context architecture fix.
+    None of this file's tests exercise project-context tool use, so
+    Pass 1 is always mocked as a plain no-tool response and Pass 2
+    carries the actual reply_text being tested, preserving every
+    existing assertion below unchanged."""
+    responses = [fake_no_tool_pass1(), fake_claude_stream(reply_text)]
+
+    def _side_effect(*args, **kwargs):
+        idx = _side_effect.calls
+        _side_effect.calls += 1
+        return responses[idx]
+    _side_effect.calls = 0
+
+    with patch("app.requests.post", side_effect=_side_effect):
         events = []
         for line in appmod.stream_atlas_turn(user_text, draft):
             payload = line[len("data: "):].strip()
@@ -129,7 +166,7 @@ def main():
 
     print()
     print("=== 3. stream_atlas_turn: audio_chunk events arrive progressively, not just once at the end ===")
-    draft = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None}
+    draft = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "interaction_mode": "voice"}
     reply = 'This is the first sentence. This is the second one. And a third to be sure.<state>{"mode": "chat", "fields": {}, "action": "none"}</state>'
     with appmod.app.test_request_context('/'):
         events = run_turn("hi", draft, reply)

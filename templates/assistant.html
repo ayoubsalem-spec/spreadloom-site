@@ -63,6 +63,20 @@
     .voice-diag-log { max-height: 130px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
     .voice-diag-copy-btn { margin-top: 8px; font-family: 'IBM Plex Mono', monospace; font-size: 10px; padding: 5px 10px; border-radius: 6px; border: 1px solid #F87171; background: transparent; color: #FCA5A5; cursor: pointer; }
     .voice-diag-copy-btn:active { opacity: 0.7; }
+
+    /* Atlas conversation history sidebar (interaction-modes/history
+       phase) -- purely additive, self-contained styling/JS; does not
+       modify any existing voice/VAD/TTS rule or function below. */
+    .atlas-history-toggle { font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--text-dim); background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:6px 12px; cursor:pointer; }
+    .atlas-history-panel { display:none; background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:16px; max-height:280px; overflow-y:auto; }
+    .atlas-history-panel.open { display:block; }
+    .atlas-history-new-btn { width:100%; text-align:left; font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13px; color:var(--brass); background:none; border:none; border-bottom:1px solid var(--line); padding:0 0 10px; margin-bottom:10px; cursor:pointer; }
+    .atlas-history-item { display:flex; flex-direction:column; gap:2px; padding:8px 6px; border-radius:6px; cursor:pointer; }
+    .atlas-history-item:hover { background:var(--surface-2); }
+    .atlas-history-item-title { font-size:12.5px; color:var(--text); }
+    .atlas-history-item-meta { font-size:10.5px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace; }
+    .atlas-history-empty { font-size:12px; color:var(--text-faint); padding:6px; }
+    @media (max-width:600px) { .atlas-history-panel { max-height:220px; } }
 </style>
 
 <div class="atlas-shell">
@@ -72,8 +86,17 @@
             <h1><span class="atlas-live-dot"></span>Atlas</h1>
             <p class="sub" style="margin-top:2px;">Ask about the business, or submit a concrete request &mdash; type, tap the mic, or start a hands-free voice session.</p>
         </div>
-        <span id="reset-btn" class="atlas-reset-link" style="display:none;">Start Over</span>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <button id="atlas-history-toggle-btn" class="atlas-history-toggle" type="button">Chats</button>
+            <span id="reset-btn" class="atlas-reset-link" style="display:none;">Start Over</span>
+        </div>
     </div>
+
+    <div id="atlas-history-panel" class="atlas-history-panel">
+        <button id="atlas-history-new-btn" class="atlas-history-new-btn" type="button">+ New Chat</button>
+        <div id="atlas-history-list"></div>
+    </div>
+
 
     <div class="atlas-voice-bar">
         <button id="voice-start-btn" class="atlas-voice-btn">&#127908; Start Voice</button>
@@ -568,7 +591,7 @@
             return fetch('{{ url_for("assistant_ask") }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-                body: JSON.stringify({ question: question }),
+                body: JSON.stringify({ question: question, interaction_mode: 'text' }),
                 signal: mySignal
             });
         }, true);
@@ -577,6 +600,7 @@
     function askServerWithAudio(blob) {
         var formData = new FormData();
         formData.append('audio', blob, 'atlas.webm');
+        formData.append('interaction_mode', 'voice');
         streamFromServer(function (mySignal) {
             return fetch('{{ url_for("assistant_ask") }}', {
                 method: 'POST',
@@ -1334,6 +1358,92 @@
             setStatus('Started over.');
         });
     });
+})();
+</script>
+
+<script>
+// Atlas conversation-history sidebar (interaction-modes/history phase).
+// Deliberately a SEPARATE, self-contained IIFE -- reads csrfToken/
+// addMessage from the surrounding page but does not touch, wrap, or
+// depend on any voice/VAD state machine above.
+(function () {
+    var toggleBtn = document.getElementById('atlas-history-toggle-btn');
+    var panel = document.getElementById('atlas-history-panel');
+    var listEl = document.getElementById('atlas-history-list');
+    var newChatBtn = document.getElementById('atlas-history-new-btn');
+    var csrfToken = document.querySelector('meta[name="csrf-token"]') ?
+        document.querySelector('meta[name="csrf-token"]').content :
+        (window.csrfToken || '');
+
+    function loadConversations() {
+        fetch('{{ url_for("assistant_conversations_list") }}')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var conversations = data.conversations || [];
+                if (!conversations.length) {
+                    listEl.innerHTML = '<div class="atlas-history-empty">No previous conversations yet.</div>';
+                    return;
+                }
+                listEl.innerHTML = '';
+                conversations.forEach(function (c) {
+                    var item = document.createElement('div');
+                    item.className = 'atlas-history-item';
+                    var titleEl = document.createElement('div');
+                    titleEl.className = 'atlas-history-item-title';
+                    titleEl.textContent = c.title;
+                    var metaEl = document.createElement('div');
+                    metaEl.className = 'atlas-history-item-meta';
+                    metaEl.textContent = (c.project_name ? c.project_name + ' \u00b7 ' : '') + c.updated_at;
+                    item.appendChild(titleEl);
+                    item.appendChild(metaEl);
+                    item.addEventListener('click', function () { openConversation(c.id); });
+                    listEl.appendChild(item);
+                });
+            });
+    }
+
+    function openConversation(id) {
+        fetch('{{ url_for("assistant_conversation_open", conversation_id=0) }}'.replace('/0', '/' + encodeURIComponent(id)))
+            .then(function (r) {
+                if (!r.ok) throw new Error('not found');
+                return r.json();
+            })
+            .then(function (data) {
+                var chatLog = document.getElementById('chat-log') || document.getElementById('atlas-messages');
+                if (chatLog) chatLog.innerHTML = '';
+                (data.messages || []).forEach(function (m) {
+                    if (typeof addMessage === 'function') addMessage(m.role, m.content);
+                });
+                if (data.context_needs_reselection && typeof setStatus === 'function') {
+                    setStatus('This conversation\'s project is no longer available -- please select a project again if needed.');
+                }
+                panel.classList.remove('open');
+            })
+            .catch(function () {
+                if (typeof setStatus === 'function') setStatus('Could not open that conversation.');
+            });
+    }
+
+    if (toggleBtn) {
+        toggleBtn.addEventListener('click', function () {
+            var opening = !panel.classList.contains('open');
+            panel.classList.toggle('open');
+            if (opening) loadConversations();
+        });
+    }
+    if (newChatBtn) {
+        newChatBtn.addEventListener('click', function () {
+            fetch('{{ url_for("assistant_conversations_new") }}', {
+                method: 'POST',
+                headers: { 'X-CSRFToken': csrfToken }
+            }).then(function () {
+                var chatLog = document.getElementById('chat-log') || document.getElementById('atlas-messages');
+                if (chatLog) chatLog.innerHTML = '';
+                panel.classList.remove('open');
+                if (typeof setStatus === 'function') setStatus('Started a new conversation.');
+            });
+        });
+    }
 })();
 </script>
 {% endblock %}
