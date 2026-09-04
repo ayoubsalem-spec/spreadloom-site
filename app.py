@@ -5029,6 +5029,78 @@ def stream_atlas_turn(user_text, draft):
 
         tool_use_blocks_1b = list(tool_use_blocks_by_index_1b.values())
 
+        # PASS1B_GATE diagnostic (TEST-only, ATLAS_TURN_DIAGNOSTICS gated
+        # like every other trace call -- see _atlas_trace). This is a
+        # STRICTLY READ-ONLY, PARALLEL evaluation of the exact same
+        # runtime state (tool_use_blocks_1b, pass1b_error,
+        # protocol_anomaly_1b, pass1b_stop_reason) the real dispatch gate
+        # immediately below reads -- it does not feed into, replace, or
+        # alter that gate in any way, and cannot disagree with it since
+        # it applies the identical conditions to the identical data.
+        # Added purely to answer "which of the six conditions rejected
+        # this real call" without guessing -- nothing about actual
+        # dispatch behavior changes because of this block.
+        _g_blocks = len(tool_use_blocks_1b)
+        _g_error = pass1b_error["value"] is not None
+        _g_protocol_anomaly = protocol_anomaly_1b["value"] is not None
+        if _g_blocks == 1:
+            _g_block = tool_use_blocks_1b[0]
+            _g_completed = bool(_g_block["completed"])
+            _g_name_allowed = _g_block["name"] == "get_project_intelligence"
+            _g_stop_reason_tool_use = pass1b_stop_reason["value"] == "tool_use"
+            try:
+                _g_candidate_input = json.loads(_g_block["input_raw"]) if _g_block["input_raw"].strip() else {}
+                _g_input_valid = isinstance(_g_candidate_input, dict)
+            except json.JSONDecodeError:
+                _g_candidate_input = None
+                _g_input_valid = False
+            _g_project_id_absent = _g_input_valid and "project_id" not in _g_candidate_input
+        else:
+            # Not meaningfully evaluable without exactly one block --
+            # fixed safe False values; reject_reason=block_count is what
+            # actually explains the rejection in this case, not these.
+            _g_completed = False
+            _g_name_allowed = False
+            _g_stop_reason_tool_use = False
+            _g_input_valid = False
+            _g_project_id_absent = False
+
+        _g_dispatch = (not _g_error and not _g_protocol_anomaly and _g_blocks == 1 and _g_completed
+                        and _g_stop_reason_tool_use and _g_name_allowed and _g_input_valid and _g_project_id_absent)
+
+        if _g_error:
+            _g_reject_reason = "error"
+        elif _g_protocol_anomaly:
+            _g_reject_reason = "protocol_anomaly"
+        elif _g_blocks != 1:
+            _g_reject_reason = "block_count"
+        elif not _g_completed:
+            _g_reject_reason = "incomplete"
+        elif not _g_stop_reason_tool_use:
+            _g_reject_reason = "stop_reason"
+        elif not _g_name_allowed:
+            _g_reject_reason = "wrong_tool"
+        elif not _g_input_valid:
+            _g_reject_reason = "invalid_input"
+        elif not _g_project_id_absent:
+            _g_reject_reason = "project_id_present"
+        else:
+            _g_reject_reason = "none"
+
+        _atlas_trace(
+            "PASS1B_GATE",
+            blocks=_g_blocks,
+            error=str(_g_error).lower(),
+            protocol_anomaly=str(_g_protocol_anomaly).lower(),
+            completed=str(_g_completed).lower(),
+            name_allowed=str(_g_name_allowed).lower(),
+            stop_reason_tool_use=str(_g_stop_reason_tool_use).lower(),
+            input_valid=str(_g_input_valid).lower(),
+            project_id_absent=str(_g_project_id_absent).lower(),
+            dispatch=str(_g_dispatch).lower(),
+            reject_reason=_g_reject_reason,
+        )
+
         if pass1b_error["value"] is None and protocol_anomaly_1b["value"] is None and len(tool_use_blocks_1b) == 1:
             block = tool_use_blocks_1b[0]
             candidate_name, candidate_id = block["name"], block["id"]

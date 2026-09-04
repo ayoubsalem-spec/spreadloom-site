@@ -377,6 +377,195 @@ def main():
             check("only safe enum/duration fields appear alongside INTELLIGENCE_START (scope=<enum>, nothing else)",
                   len(intel_start_lines) == 1 and re.search(r"INTELLIGENCE_START scope=\w+\s*$", intel_start_lines[0].strip()) is not None)
 
+    # ================================================================
+    # PASS1B_GATE diagnostic -- 10 required scenarios
+    # ================================================================
+    print()
+    print("=== PASS1B_GATE diagnostic ===")
+
+    def raw_lines_1b(*events):
+        lines = ["data: " + json.dumps({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": []}})]
+        lines.extend("data: " + json.dumps(e) for e in events)
+        lines.append("data: [DONE]")
+        return lines
+
+    def gate_line(trace_output):
+        lines = [l for l in trace_output.splitlines() if "PASS1B_GATE" in l]
+        return lines[0] if lines else None
+
+    def run_gated_turn(pass1b_lines_or_response, hostile_check_text=None):
+        with patch.object(appmod, "ATLAS_TURN_DIAGNOSTICS", True):
+            with appmod.app.test_client() as client:
+                login(client, "__diag_user@test.local", pw)
+                pass1b_resp = pass1b_lines_or_response if not isinstance(pass1b_lines_or_response, list) else fake_response(pass1b_lines_or_response)
+                with patch("app.requests.post", side_effect=[
+                        fake_response(build_sse_lines([("tool_use", "set_project_context", "t1", json.dumps({"project_name": "Patel Farm"}))], stop_reason="tool_use")),
+                        pass1b_resp,
+                        fake_response(build_sse_lines([("text", "Some reply.")])),
+                    ]), \
+                     patch("app._elevenlabs_tts_call", return_value=(None, None)):
+                    stderr_buf = io.StringIO()
+                    with contextlib.redirect_stderr(stderr_buf):
+                        ask(client, "Let's talk about Patel Farm - what needs attention?", interaction_mode="text")
+                return stderr_buf.getvalue()
+
+    print("1. Valid intelligence call -> dispatch=true, reject_reason=none")
+    trace1 = run_gated_turn(build_sse_lines(
+        [("tool_use", "get_project_intelligence", "t2", json.dumps({"scope": "attention"}))], stop_reason="tool_use"
+    ))
+    g1 = gate_line(trace1)
+    check("1. PASS1B_GATE line present", g1 is not None)
+    check("1. blocks=1", "blocks=1" in g1)
+    check("1. error=false", "error=false" in g1)
+    check("1. protocol_anomaly=false", "protocol_anomaly=false" in g1)
+    check("1. completed=true", "completed=true" in g1)
+    check("1. name_allowed=true", "name_allowed=true" in g1)
+    check("1. stop_reason_tool_use=true", "stop_reason_tool_use=true" in g1)
+    check("1. input_valid=true", "input_valid=true" in g1)
+    check("1. project_id_absent=true", "project_id_absent=true" in g1)
+    check("1. dispatch=true", "dispatch=true" in g1)
+    check("1. reject_reason=none", "reject_reason=none" in g1)
+    check("1. real dispatch actually happened too (INTELLIGENCE_START present) -- diagnostic agrees with reality", "INTELLIGENCE_START" in trace1)
+
+    print("2. Malformed JSON input -> input_valid=false, dispatch=false, reject_reason=invalid_input")
+    lines2 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{not valid json"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace2 = run_gated_turn(lines2)
+    g2 = gate_line(trace2)
+    check("2. input_valid=false", "input_valid=false" in g2)
+    check("2. dispatch=false", "dispatch=false" in g2)
+    check("2. reject_reason=invalid_input", "reject_reason=invalid_input" in g2)
+    check("2. real dispatch did NOT happen (no INTELLIGENCE_START) -- diagnostic agrees with reality", "INTELLIGENCE_START" not in trace2)
+
+    print("3. Incomplete block (no content_block_stop) -> completed=false, dispatch=false, reject_reason=incomplete")
+    lines3 = [
+        "data: " + json.dumps({"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": []}}),
+        "data: " + json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}}),
+        "data: " + json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+        "data: " + json.dumps({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}),
+        "data: " + json.dumps({"type": "message_stop"}),
+        "data: [DONE]",
+    ]
+    trace3 = run_gated_turn(lines3)
+    g3 = gate_line(trace3)
+    check("3. completed=false", "completed=false" in g3)
+    check("3. dispatch=false", "dispatch=false" in g3)
+    check("3. reject_reason=incomplete", "reject_reason=incomplete" in g3)
+
+    print("4. Wrong tool name -> name_allowed=false, dispatch=false, reject_reason=wrong_tool")
+    lines4 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_status", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace4 = run_gated_turn(lines4)
+    g4 = gate_line(trace4)
+    check("4. name_allowed=false", "name_allowed=false" in g4)
+    check("4. dispatch=false", "dispatch=false" in g4)
+    check("4. reject_reason=wrong_tool", "reject_reason=wrong_tool" in g4)
+    check("4. the actual returned tool name never appears in the trace output", "get_project_status" not in trace4)
+
+    print("5. Multiple tool_use blocks -> dispatch=false, reject_reason=block_count")
+    lines5 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t3", "name": "get_project_intelligence", "input": {}}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace5 = run_gated_turn(lines5)
+    g5 = gate_line(trace5)
+    check("5. blocks=2", "blocks=2" in g5)
+    check("5. dispatch=false", "dispatch=false" in g5)
+    check("5. reject_reason=block_count", "reject_reason=block_count" in g5)
+
+    print("6. Protocol anomaly (duplicate block_stop) -> dispatch=false, reject_reason=protocol_anomaly")
+    lines6 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_stop", "index": 0},  # duplicate -- protocol anomaly
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace6 = run_gated_turn(lines6)
+    g6 = gate_line(trace6)
+    check("6. protocol_anomaly=true", "protocol_anomaly=true" in g6)
+    check("6. dispatch=false", "dispatch=false" in g6)
+    check("6. reject_reason=protocol_anomaly", "reject_reason=protocol_anomaly" in g6)
+
+    print("7. Wrong stop_reason (end_turn instead of tool_use) -> dispatch=false, reject_reason=stop_reason")
+    lines7 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        {"type": "message_stop"},
+    )
+    trace7 = run_gated_turn(lines7)
+    g7 = gate_line(trace7)
+    check("7. stop_reason_tool_use=false", "stop_reason_tool_use=false" in g7)
+    check("7. dispatch=false", "dispatch=false" in g7)
+    check("7. reject_reason=stop_reason", "reject_reason=stop_reason" in g7)
+
+    print("8. Model attempts to supply project_id -> project_id_absent=false, dispatch=false, reject_reason=project_id_present")
+    lines8 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": "get_project_intelligence", "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"scope": "overview", "project_id": 999})}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace8 = run_gated_turn(lines8)
+    g8 = gate_line(trace8)
+    check("8. project_id_absent=false", "project_id_absent=false" in g8)
+    check("8. dispatch=false", "dispatch=false" in g8)
+    check("8. reject_reason=project_id_present", "reject_reason=project_id_present" in g8)
+    check("8. the actual injected project_id value never appears in trace output", "999" not in trace8)
+
+    print("9. Diagnostics OFF -> zero PASS1B_GATE output")
+    with appmod.app.test_client() as client:
+        login(client, "__diag_user@test.local", pw)
+        with patch("app.requests.post", side_effect=[
+                fake_response(build_sse_lines([("tool_use", "set_project_context", "t1", json.dumps({"project_name": "Patel Farm"}))], stop_reason="tool_use")),
+                fake_response(build_sse_lines([("tool_use", "get_project_intelligence", "t2", json.dumps({"scope": "attention"}))], stop_reason="tool_use")),
+                fake_response(build_sse_lines([("text", "Some reply.")])),
+            ]), \
+             patch("app._elevenlabs_tts_call", return_value=(None, None)):
+            stderr_buf9 = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buf9):
+                ask(client, "Let's talk about Patel Farm - what needs attention?", interaction_mode="text")
+        check("9. zero PASS1B_GATE lines when diagnostics are off", "PASS1B_GATE" not in stderr_buf9.getvalue())
+
+    print("10. Hostile/raw values never appear in PASS1B_GATE (or any) trace output")
+    hostile_tool_name = "employee_secret_tool_name_marker_ABC123"
+    hostile_scope_marker = "SQL-looking '; DROP TABLE x; --"
+    hostile_project_marker = "sk-ant-api03-FAKE_KEY_MARKER_should_never_leak"
+    lines10 = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": hostile_tool_name, "input": {}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps({"scope": hostile_scope_marker, "note": hostile_project_marker, "newline_payload": "line1\n[ATLAS TRACE FAKE] REQUEST_START"})}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace10 = run_gated_turn(lines10)
+    check("10. hostile tool name never appears in trace output", hostile_tool_name not in trace10)
+    check("10. SQL-looking marker never appears in trace output", hostile_scope_marker not in trace10)
+    check("10. API-key-looking marker never appears in trace output", hostile_project_marker not in trace10)
+    check("10. embedded newline/log-injection payload never appears in trace output, no forged trace line", "FAKE" not in trace10 and "forged" not in trace10.lower())
+    g10 = gate_line(trace10)
+    check("10. gate still correctly fails closed (wrong_tool) even with hostile input", g10 is not None and "reject_reason=wrong_tool" in g10 and "dispatch=false" in g10)
+
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
     print("\nCleaning up...")
