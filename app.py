@@ -4252,6 +4252,37 @@ def _atlas_trace_safe_scope(raw_scope):
     return raw_scope if raw_scope in ALLOWED_DIAG_SCOPES else "invalid"
 
 
+ATLAS_BUILD = "TEST-v5.4-pass1b-runtime-evidence"
+_ATLAS_BUILD_INFO_CACHE = {"value": None}
+
+
+def _atlas_build_info():
+    """Diagnostic-only build/deployment identity -- a fixed build label
+    plus SHA-256 hashes of the actual source files currently loaded on
+    THIS running process, computed lazily (only when diagnostics are
+    actually enabled, never on every request) and cached in-process
+    (the source files don't change during a process's lifetime, so
+    hashing them once is sufficient and avoids repeated disk I/O).
+    Exists purely to let a reviewer confirm/rule out version or
+    deployment skew between an approved package and what's actually
+    running -- never exposes filesystem paths beyond the plain source
+    filenames themselves, and (like every other diagnostic) is only
+    ever surfaced when ATLAS_TURN_DIAGNOSTICS is enabled."""
+    if _ATLAS_BUILD_INFO_CACHE["value"] is not None:
+        return _ATLAS_BUILD_INFO_CACHE["value"]
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    hashes = {}
+    for fname in ("app.py", "intelligence.py", os.path.join("templates", "assistant.html")):
+        try:
+            with open(os.path.join(base_dir, fname), "rb") as f:
+                hashes[os.path.basename(fname)] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            hashes[os.path.basename(fname)] = "unavailable"
+    info = {"build": ATLAS_BUILD, **hashes}
+    _ATLAS_BUILD_INFO_CACHE["value"] = info
+    return info
+
+
 def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=600, label=None):
     """Makes ONE Claude API call and yields low-level parsed events as it
     streams back -- this is the single place SSE-from-Anthropic parsing
@@ -4991,7 +5022,22 @@ def stream_atlas_turn(user_text, draft):
         protocol_anomaly_1b = {"value": None}
         pass1b_error = {"value": None}
         pass1b_stop_reason = {"value": None}
-        for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(only=["get_project_intelligence"]), max_tokens=200, label="PASS1B"):
+        _pass1b_declared_tools = _atlas_native_tool_declarations(only=["get_project_intelligence"])
+        # PASS1B_REQUEST diagnostic (TEST-only): safe, closed/factual
+        # metadata about the OUTGOING declaration set actually being
+        # sent this call -- never the raw declarations themselves
+        # (names/descriptions/schemas). Answers "did we actually only
+        # offer get_project_intelligence to Anthropic this call" without
+        # ever printing what else, if anything, was offered.
+        _declared_names_1b = [d.get("name") for d in _pass1b_declared_tools]
+        _atlas_trace(
+            "PASS1B_REQUEST",
+            declared_tool_count=len(_pass1b_declared_tools),
+            expected_tool_declared=str("get_project_intelligence" in _declared_names_1b).lower(),
+            unexpected_tool_declared=str(any(n != "get_project_intelligence" for n in _declared_names_1b)).lower(),
+            tool_choice_mode="auto",  # no tool_choice is ever set anywhere in this codebase -- Anthropic's default applies
+        )
+        for event in _stream_claude_completion(api_key, system, messages, tools=_pass1b_declared_tools, max_tokens=200, label="PASS1B"):
             kind = event[0]
             if kind == "block_start":
                 _, btype, idx = event
@@ -5029,77 +5075,93 @@ def stream_atlas_turn(user_text, draft):
 
         tool_use_blocks_1b = list(tool_use_blocks_by_index_1b.values())
 
-        # PASS1B_GATE diagnostic (TEST-only, ATLAS_TURN_DIAGNOSTICS gated
-        # like every other trace call -- see _atlas_trace). This is a
-        # STRICTLY READ-ONLY, PARALLEL evaluation of the exact same
-        # runtime state (tool_use_blocks_1b, pass1b_error,
-        # protocol_anomaly_1b, pass1b_stop_reason) the real dispatch gate
-        # immediately below reads -- it does not feed into, replace, or
-        # alter that gate in any way, and cannot disagree with it since
-        # it applies the identical conditions to the identical data.
-        # Added purely to answer "which of the six conditions rejected
-        # this real call" without guessing -- nothing about actual
-        # dispatch behavior changes because of this block.
-        _g_blocks = len(tool_use_blocks_1b)
-        _g_error = pass1b_error["value"] is not None
+        # PASS1B_GATE / PASS1B_DISPATCH_SKIPPED diagnostics (TEST-only,
+        # ATLAS_TURN_DIAGNOSTICS gated -- see _atlas_trace). STRICTLY
+        # READ-ONLY, PARALLEL evaluation of the exact same runtime state
+        # (tool_use_blocks_1b, pass1b_error, protocol_anomaly_1b,
+        # pass1b_stop_reason) the real dispatch gate immediately below
+        # reads -- does not feed into, replace, or alter that gate in
+        # any way, and cannot disagree with it since it applies the
+        # identical conditions to the identical data. Field/enum shape
+        # per the runtime-evidence-gathering pass approved after the
+        # TEST-v5.3 "name_allowed=false" observation -- narrower and
+        # more explicit than the prior PASS1B_GATE shape (counts instead
+        # of a single combined block-boolean, an explicit stop_reason
+        # enum instead of a single boolean, project_id_supplied instead
+        # of project_id_absent) specifically to distinguish "zero
+        # blocks" from "one incomplete block" from "one complete block
+        # with the wrong name," none of which the prior shape could
+        # tell apart.
+        _g_tool_use_count = len(tool_use_blocks_1b)
+        _g_completed_tool_count = sum(1 for b in tool_use_blocks_1b if b["completed"])
+        _g_pass1b_error = pass1b_error["value"] is not None
         _g_protocol_anomaly = protocol_anomaly_1b["value"] is not None
-        if _g_blocks == 1:
+        _raw_stop_reason_1b = pass1b_stop_reason["value"]
+        if _raw_stop_reason_1b is None:
+            _g_stop_reason = "missing"
+        elif _raw_stop_reason_1b in ("tool_use", "end_turn", "max_tokens"):
+            _g_stop_reason = _raw_stop_reason_1b
+        else:
+            _g_stop_reason = "other"
+
+        if _g_tool_use_count == 1:
             _g_block = tool_use_blocks_1b[0]
             _g_completed = bool(_g_block["completed"])
             _g_name_allowed = _g_block["name"] == "get_project_intelligence"
-            _g_stop_reason_tool_use = pass1b_stop_reason["value"] == "tool_use"
             try:
                 _g_candidate_input = json.loads(_g_block["input_raw"]) if _g_block["input_raw"].strip() else {}
-                _g_input_valid = isinstance(_g_candidate_input, dict)
+                _g_json_valid = isinstance(_g_candidate_input, dict)
             except json.JSONDecodeError:
                 _g_candidate_input = None
-                _g_input_valid = False
-            _g_project_id_absent = _g_input_valid and "project_id" not in _g_candidate_input
+                _g_json_valid = False
+            _g_project_id_supplied = (not _g_json_valid) or ("project_id" in _g_candidate_input)
         else:
             # Not meaningfully evaluable without exactly one block --
-            # fixed safe False values; reject_reason=block_count is what
-            # actually explains the rejection in this case, not these.
+            # fixed safe values; the skip reason below is what actually
+            # explains the rejection in this case, not these.
             _g_completed = False
             _g_name_allowed = False
-            _g_stop_reason_tool_use = False
-            _g_input_valid = False
-            _g_project_id_absent = False
+            _g_json_valid = False
+            _g_project_id_supplied = False
 
-        _g_dispatch = (not _g_error and not _g_protocol_anomaly and _g_blocks == 1 and _g_completed
-                        and _g_stop_reason_tool_use and _g_name_allowed and _g_input_valid and _g_project_id_absent)
-
-        if _g_error:
-            _g_reject_reason = "error"
-        elif _g_protocol_anomaly:
-            _g_reject_reason = "protocol_anomaly"
-        elif _g_blocks != 1:
-            _g_reject_reason = "block_count"
-        elif not _g_completed:
-            _g_reject_reason = "incomplete"
-        elif not _g_stop_reason_tool_use:
-            _g_reject_reason = "stop_reason"
-        elif not _g_name_allowed:
-            _g_reject_reason = "wrong_tool"
-        elif not _g_input_valid:
-            _g_reject_reason = "invalid_input"
-        elif not _g_project_id_absent:
-            _g_reject_reason = "project_id_present"
-        else:
-            _g_reject_reason = "none"
+        _g_dispatch = (not _g_pass1b_error and not _g_protocol_anomaly and _g_tool_use_count == 1 and _g_completed
+                        and _g_stop_reason == "tool_use" and _g_name_allowed and _g_json_valid and not _g_project_id_supplied)
 
         _atlas_trace(
             "PASS1B_GATE",
-            blocks=_g_blocks,
-            error=str(_g_error).lower(),
+            tool_use_count=_g_tool_use_count,
+            completed_tool_count=_g_completed_tool_count,
+            stop_reason=_g_stop_reason,
             protocol_anomaly=str(_g_protocol_anomaly).lower(),
-            completed=str(_g_completed).lower(),
+            pass1b_error=str(_g_pass1b_error).lower(),
             name_allowed=str(_g_name_allowed).lower(),
-            stop_reason_tool_use=str(_g_stop_reason_tool_use).lower(),
-            input_valid=str(_g_input_valid).lower(),
-            project_id_absent=str(_g_project_id_absent).lower(),
+            json_valid=str(_g_json_valid).lower(),
+            project_id_supplied=str(_g_project_id_supplied).lower(),
             dispatch=str(_g_dispatch).lower(),
-            reject_reason=_g_reject_reason,
         )
+
+        if not _g_dispatch:
+            # Deterministic precedence -- first matching condition wins,
+            # same order the real gate itself short-circuits in.
+            if _g_pass1b_error:
+                _g_skip_reason = "pass1b_error"
+            elif _g_protocol_anomaly:
+                _g_skip_reason = "protocol_anomaly"
+            elif _g_tool_use_count != 1:
+                _g_skip_reason = "wrong_tool_count"
+            elif not _g_completed:
+                _g_skip_reason = "incomplete_tool"
+            elif _g_stop_reason != "tool_use":
+                _g_skip_reason = "wrong_stop_reason"
+            elif not _g_name_allowed:
+                _g_skip_reason = "name_not_allowed"
+            elif not _g_json_valid:
+                _g_skip_reason = "invalid_json"
+            elif _g_project_id_supplied:
+                _g_skip_reason = "project_id_supplied"
+            else:
+                _g_skip_reason = "other"
+            _atlas_trace("PASS1B_DISPATCH_SKIPPED", reason=_g_skip_reason)
 
         if pass1b_error["value"] is None and protocol_anomaly_1b["value"] is None and len(tool_use_blocks_1b) == 1:
             block = tool_use_blocks_1b[0]
@@ -5551,6 +5613,8 @@ def assistant_ask():
         g.atlas_trace_id = atlas_trace_id
     _request_trace_start = time.perf_counter()
     _atlas_trace("REQUEST_START")
+    if ATLAS_TURN_DIAGNOSTICS:
+        _atlas_trace("ATLAS_BUILD_INFO", **_atlas_build_info())
 
     transcribe_error = None
     if request.content_type and "multipart/form-data" in request.content_type:
