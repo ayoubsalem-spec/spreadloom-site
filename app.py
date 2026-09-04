@@ -4252,7 +4252,32 @@ def _atlas_trace_safe_scope(raw_scope):
     return raw_scope if raw_scope in ALLOWED_DIAG_SCOPES else "invalid"
 
 
-ATLAS_BUILD = "TEST-v5.5-pass1b-returned-name-evidence"
+def _build_pass1b_intelligence_prompt():
+    """Build the dedicated system prompt for the Pass 1B intelligence-routing call."""
+    return (
+        "You are Atlas's project-intelligence router for this one internal step. "
+        "A canonical BuildIQ project has ALREADY been established for this session by the server -- "
+        "you do not need to identify, resolve, or confirm which project is active; that work is done.\n\n"
+        "Your ONLY job right now: call get_project_intelligence, choosing the narrowest scope that answers "
+        "what the person actually asked for.\n\n"
+        "You have exactly one tool available: get_project_intelligence. Call it exactly once. "
+        "It takes an optional `scope` argument -- never supply a project id or project name; the active "
+        "project is entirely server-controlled and the tool already knows it.\n\n"
+        "Allowed scope values, and when to use each:\n"
+        "- overview: broad/general questions (\"what's happening with this project\", \"what do you know about it\")\n"
+        "- attention: \"what needs attention\", \"anything I should know about\"\n"
+        "- equipment: equipment/asset questions\n"
+        "- concrete: concrete request/pour questions\n"
+        "- purchases: purchase request/procurement questions\n"
+        "- rentals: outside rental questions\n"
+        "If the question doesn't clearly fit one narrow category, use overview.\n\n"
+        "You have no information about the project's actual current status, records, or data -- that comes "
+        "back from the tool call itself, not from anything you already know. Call the tool; do not guess or "
+        "answer from memory."
+    )
+
+
+ATLAS_BUILD = "TEST-v5.6.1-pass1b-scoped-prompt"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -5037,7 +5062,7 @@ def stream_atlas_turn(user_text, draft):
             unexpected_tool_declared=str(any(n != "get_project_intelligence" for n in _declared_names_1b)).lower(),
             tool_choice_mode="auto",  # no tool_choice is ever set anywhere in this codebase -- Anthropic's default applies
         )
-        for event in _stream_claude_completion(api_key, system, messages, tools=_pass1b_declared_tools, max_tokens=200, label="PASS1B"):
+        for event in _stream_claude_completion(api_key, _build_pass1b_intelligence_prompt(), messages, tools=_pass1b_declared_tools, max_tokens=200, label="PASS1B"):
             kind = event[0]
             if kind == "block_start":
                 _, btype, idx = event

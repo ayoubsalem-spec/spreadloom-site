@@ -670,7 +670,7 @@ def main():
     ))
     build_line = find_line(trace_g, "ATLAS_BUILD_INFO")
     check("G. ATLAS_BUILD_INFO line present when diagnostics are on", build_line is not None)
-    check("G. carries the fixed build label", "build=TEST-v5.5-pass1b-returned-name-evidence" in build_line)
+    check("G. carries the fixed build label", "build=TEST-v5.6.1-pass1b-scoped-prompt" in build_line)
     check("G. carries an app.py SHA-256 hash (64 hex chars)", re.search(r"app\.py=[0-9a-f]{64}", build_line) is not None)
     check("G. carries an intelligence.py SHA-256 hash", re.search(r"intelligence\.py=[0-9a-f]{64}", build_line) is not None)
     check("G. carries an assistant.html SHA-256 hash", re.search(r"assistant\.html=[0-9a-f]{64}", build_line) is not None)

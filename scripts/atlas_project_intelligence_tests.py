@@ -826,6 +826,76 @@ def main():
               done_hang2 is not None and done_hang2.get("pending_write_token") is None)
 
         print()
+        print("=== Pass 1B dedicated system prompt (scoped-prompt fix) ===")
+        pass1b_prompt = appmod._build_pass1b_intelligence_prompt()
+        forbidden_tool_names = [
+            "set_project_context", "get_project_status", "list_bids_needing_attention", "list_bids_due_soon",
+            "list_upcoming_concrete_pours", "find_equipment", "list_rentals_due", "list_open_purchase_requests",
+            "get_attention_items", "create_concrete_request",
+        ]
+        for forbidden in forbidden_tool_names:
+            check(f"1/2a. RETURNED PROMPT never mentions '{forbidden}' (what Anthropic actually receives)", forbidden not in pass1b_prompt)
+
+        # 5. Distinguish (a) the returned prompt string (what Anthropic
+        # actually receives) from (b) the function's own SOURCE CODE
+        # (docstring/comments included) -- a stale explanatory docstring
+        # naming a forbidden tool would pass (a) while still being a
+        # real source-level isolation violation, exactly the gap the
+        # independent reviewer found in the original v5.6 package. This
+        # inspects the actual function source via `inspect.getsource`,
+        # not just its return value.
+        import inspect
+        pass1b_source = inspect.getsource(appmod._build_pass1b_intelligence_prompt)
+        for forbidden in forbidden_tool_names:
+            check(f"1/2b. FUNCTION SOURCE (including docstring/comments) never mentions '{forbidden}'", forbidden not in pass1b_source)
+        check("1/2b. the function's docstring is short and generic, not a large explanatory essay naming other tools",
+              len(inspect.getdoc(appmod._build_pass1b_intelligence_prompt) or "") < 120)
+        check("3. Pass1B prompt DOES mention get_project_intelligence (the one tool it's actually for)",
+              "get_project_intelligence" in pass1b_prompt)
+        check("Pass1B prompt states project_id is server-controlled, never model-supplied",
+              "project id" in pass1b_prompt.lower() and "server" in pass1b_prompt.lower())
+        check("Pass1B prompt states canonical project context is already established server-side",
+              "already been established" in pass1b_prompt.lower())
+        check("Pass1B prompt requires exactly one tool call", "exactly once" in pass1b_prompt)
+        check("Pass1B prompt does not include fabricated factual project data (no stored project name/records baked in)",
+              "Patel" not in pass1b_prompt and "__PITest" not in pass1b_prompt)
+
+        # 4-9: scope-guidance mappings present in the prompt text itself.
+        check("4. prompt maps attention-type questions to scope=attention", "attention: " in pass1b_prompt and '"what needs attention"' in pass1b_prompt)
+        check("5. prompt maps broad project-status questions to scope=overview", "overview: " in pass1b_prompt and "what's happening with this project" in pass1b_prompt)
+        check("6. prompt maps equipment questions to scope=equipment", "equipment: " in pass1b_prompt)
+        check("7. prompt maps concrete questions to scope=concrete", "concrete: " in pass1b_prompt)
+        check("8. prompt maps purchase questions to scope=purchases", "purchases: " in pass1b_prompt)
+        check("9. prompt maps rental questions to scope=rentals", "rentals: " in pass1b_prompt)
+
+        print()
+        print("=== Pass 1B call site actually uses the dedicated prompt; Pass1/Pass2 still use the shared one ===")
+        shared_system_prompt_holder = {}
+
+        def _capture_system_side_effect(*a, **kw):
+            idx = _capture_system_side_effect.calls
+            _capture_system_side_effect.calls += 1
+            shared_system_prompt_holder[idx] = kw["json"].get("system")
+            responses = [
+                set_project_pass("Patel Farm"),
+                intelligence_pass("attention"),
+                text_pass("One item needs attention."),
+            ]
+            return responses[idx]
+        _capture_system_side_effect.calls = 0
+        d_prompt_check = base_draft()
+        with patch("app.requests.post", side_effect=_capture_system_side_effect):
+            list(appmod.stream_atlas_turn("Let's talk about Patel Farm - what needs attention?", d_prompt_check))
+        check("Pass 1's system prompt is the SHARED Atlas prompt (mentions set_project_context)",
+              "set_project_context" in shared_system_prompt_holder[0])
+        check("Pass 1B's system prompt is the DEDICATED prompt (does NOT mention set_project_context)",
+              shared_system_prompt_holder[1] == pass1b_prompt and "set_project_context" not in shared_system_prompt_holder[1])
+        check("Pass 2's system prompt is the SHARED Atlas prompt again (mentions set_project_context)",
+              "set_project_context" in shared_system_prompt_holder[2])
+        check("Pass 1B's dedicated prompt is DIFFERENT from Pass 1/Pass 2's shared prompt",
+              shared_system_prompt_holder[1] != shared_system_prompt_holder[0])
+
+        print()
         print("=== get_project_status remains untouched ===")
         check("get_project_status is NOT in ATLAS_NATIVE_TOOLS_ALLOWED", "get_project_status" not in appmod.ATLAS_NATIVE_TOOLS_ALLOWED)
         check("get_project_intelligence IS in ATLAS_NATIVE_TOOLS_ALLOWED", "get_project_intelligence" in appmod.ATLAS_NATIVE_TOOLS_ALLOWED)
