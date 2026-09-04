@@ -462,6 +462,102 @@ def main():
     check("C. no PASS1B_DISPATCH_SKIPPED emitted on a successful dispatch", "PASS1B_DISPATCH_SKIPPED" not in trace_c)
     check("C. real dispatch actually happened too (INTELLIGENCE_START present) -- diagnostic agrees with reality", "INTELLIGENCE_START" in trace_c)
 
+    print("C2. Returned-name diagnostics -- exact match case")
+    trace_c2 = run_gated_turn(build_sse_lines(
+        [("tool_use", "get_project_intelligence", "t2", json.dumps({"scope": "attention"}))], stop_reason="tool_use"
+    ))
+    g_c2 = find_line(trace_c2, "PASS1B_GATE")
+    expected_hash = hashlib.sha256(b"get_project_intelligence").hexdigest()
+    check("C2. returned_name_length matches the real literal's length (24)", "returned_name_length=24" in g_c2)
+    check("C2. returned_name_matches_expected_exact=true", "returned_name_matches_expected_exact=true" in g_c2)
+    check("C2. returned_name_matches_expected_stripped=true", "returned_name_matches_expected_stripped=true" in g_c2)
+    check("C2. returned_name_matches_expected_casefold=true", "returned_name_matches_expected_casefold=true" in g_c2)
+    check("C2. returned_name_ascii=true", "returned_name_ascii=true" in g_c2)
+    check("C2. returned_name_sha256 equals expected_name_sha256 (exact match case)", f"returned_name_sha256={expected_hash}" in g_c2)
+    check("C2. expected_name_sha256 is the fixed, correct hash of the real literal", f"expected_name_sha256={expected_hash}" in g_c2)
+
+    def gate_for_name(raw_name):
+        lines = raw_lines_1b(
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "name": raw_name, "input": {}}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+            {"type": "message_stop"},
+        )
+        trace = run_gated_turn(lines)
+        return find_line(trace, "PASS1B_GATE"), trace
+
+    print("Returned-name diagnostics -- leading/trailing whitespace case")
+    g_ws, trace_ws = gate_for_name("  get_project_intelligence  ")
+    check("whitespace case: exact=false", "returned_name_matches_expected_exact=false" in g_ws)
+    check("whitespace case: stripped=true", "returned_name_matches_expected_stripped=true" in g_ws)
+    check("whitespace case: casefold=true", "returned_name_matches_expected_casefold=true" in g_ws)
+    check("whitespace case: name_allowed still false (real gate does no stripping, unaffected by this diagnostic)", "name_allowed=false" in g_ws)
+    check("whitespace case: the raw padded name never appears in trace output", "  get_project_intelligence  " not in trace_ws)
+
+    print("Returned-name diagnostics -- case-only mismatch")
+    g_case, trace_case = gate_for_name("Get_Project_Intelligence")
+    check("case mismatch: exact=false", "returned_name_matches_expected_exact=false" in g_case)
+    check("case mismatch: stripped=false", "returned_name_matches_expected_stripped=false" in g_case)
+    check("case mismatch: casefold=true", "returned_name_matches_expected_casefold=true" in g_case)
+    check("case mismatch: name_allowed still false", "name_allowed=false" in g_case)
+    check("case mismatch: raw mixed-case name never appears in trace output", "Get_Project_Intelligence" not in trace_case)
+
+    print("Returned-name diagnostics -- non-ASCII/invisible-character case")
+    g_unicode, trace_unicode = gate_for_name("get_project_intelligence\u200b")  # trailing zero-width space
+    check("non-ASCII case: exact=false", "returned_name_matches_expected_exact=false" in g_unicode)
+    check("non-ASCII case: stripped=false (zero-width space is not whitespace .strip() removes)", "returned_name_matches_expected_stripped=false" in g_unicode)
+    check("non-ASCII case: ascii=false", "returned_name_ascii=false" in g_unicode)
+    check("non-ASCII case: name_allowed still false", "name_allowed=false" in g_unicode)
+    check("non-ASCII case: hash differs from the expected hash (proves the invisible character is captured, without revealing it)",
+          f"returned_name_sha256={expected_hash}" not in g_unicode)
+
+    print("Returned-name diagnostics -- completely different ASCII string")
+    g_diff, trace_diff = gate_for_name("some_completely_different_tool")
+    check("different string: exact=false", "returned_name_matches_expected_exact=false" in g_diff)
+    check("different string: stripped=false", "returned_name_matches_expected_stripped=false" in g_diff)
+    check("different string: casefold=false", "returned_name_matches_expected_casefold=false" in g_diff)
+    check("different string: ascii=true", "returned_name_ascii=true" in g_diff)
+    check("different string: length matches that string's real length (30)", "returned_name_length=30" in g_diff)
+    check("different string: raw name never appears in trace output", "some_completely_different_tool" not in trace_diff)
+
+    print("Returned-name diagnostics -- missing/non-string name (defensive path)")
+    lines_missing = raw_lines_1b(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "t2", "input": {}}},  # no "name" key at all
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    )
+    trace_missing = run_gated_turn(lines_missing)
+    g_missing = find_line(trace_missing, "PASS1B_GATE")
+    check("missing name: diagnostics do not crash -- PASS1B_GATE line still present", g_missing is not None)
+    check("missing name: returned_name_length=0", "returned_name_length=0" in g_missing)
+    check("missing name: returned_name_matches_expected_exact=false", "returned_name_matches_expected_exact=false" in g_missing)
+    check("missing name: returned_name_matches_expected_stripped=false", "returned_name_matches_expected_stripped=false" in g_missing)
+    check("missing name: returned_name_matches_expected_casefold=false", "returned_name_matches_expected_casefold=false" in g_missing)
+    check("missing name: returned_name_ascii=false", "returned_name_ascii=false" in g_missing)
+    check("missing name: returned_name_sha256=not_a_string (fixed safe sentinel, not a crash, not a fabricated hash)", "returned_name_sha256=not_a_string" in g_missing)
+    check("missing name: name_allowed=false, dispatch=false, no crash anywhere downstream", "name_allowed=false" in g_missing and "dispatch=false" in g_missing)
+    check("missing name: REQUEST_END still reached (whole request didn't crash)", "REQUEST_END" in trace_missing)
+
+    print("Returned-name diagnostics -- diagnostics OFF emits none of these fields")
+    with appmod.app.test_client() as client:
+        login(client, "__diag_user@test.local", pw)
+        with patch("app.requests.post", side_effect=[
+                fake_response(build_sse_lines([("tool_use", "set_project_context", "t1", json.dumps({"project_name": "Patel Farm"}))], stop_reason="tool_use")),
+                fake_response(build_sse_lines([("tool_use", "get_project_intelligence", "t2", json.dumps({"scope": "attention"}))], stop_reason="tool_use")),
+                fake_response(build_sse_lines([("text", "Some reply.")])),
+            ]), \
+             patch("app._elevenlabs_tts_call", return_value=(None, None)):
+            stderr_buf_off = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buf_off):
+                ask(client, "Let's talk about Patel Farm - what needs attention?", interaction_mode="text")
+        trace_off = stderr_buf_off.getvalue()
+        check("diagnostics off: zero returned_name_* fields anywhere", "returned_name_" not in trace_off)
+        check("diagnostics off: zero expected_name_sha256 anywhere", "expected_name_sha256" not in trace_off)
+        check("diagnostics off: zero trace output overall", len(parse_trace_lines(trace_off)) == 0)
+
     print("D. Each fail-closed condition independently yields dispatch=false + correct skip reason")
 
     scenarios = {}
@@ -574,7 +670,7 @@ def main():
     ))
     build_line = find_line(trace_g, "ATLAS_BUILD_INFO")
     check("G. ATLAS_BUILD_INFO line present when diagnostics are on", build_line is not None)
-    check("G. carries the fixed build label", "build=TEST-v5.4-pass1b-runtime-evidence" in build_line)
+    check("G. carries the fixed build label", "build=TEST-v5.5-pass1b-returned-name-evidence" in build_line)
     check("G. carries an app.py SHA-256 hash (64 hex chars)", re.search(r"app\.py=[0-9a-f]{64}", build_line) is not None)
     check("G. carries an intelligence.py SHA-256 hash", re.search(r"intelligence\.py=[0-9a-f]{64}", build_line) is not None)
     check("G. carries an assistant.html SHA-256 hash", re.search(r"assistant\.html=[0-9a-f]{64}", build_line) is not None)

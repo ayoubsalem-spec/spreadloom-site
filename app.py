@@ -4252,7 +4252,7 @@ def _atlas_trace_safe_scope(raw_scope):
     return raw_scope if raw_scope in ALLOWED_DIAG_SCOPES else "invalid"
 
 
-ATLAS_BUILD = "TEST-v5.4-pass1b-runtime-evidence"
+ATLAS_BUILD = "TEST-v5.5-pass1b-returned-name-evidence"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -5115,6 +5115,40 @@ def stream_atlas_turn(user_text, draft):
                 _g_candidate_input = None
                 _g_json_valid = False
             _g_project_id_supplied = (not _g_json_valid) or ("project_id" in _g_candidate_input)
+
+            # RETURNED-NAME DIAGNOSTICS (runtime-evidence pass, approved
+            # after the name_allowed=false finding): computed from the
+            # EXACT SAME value used above for _g_name_allowed
+            # (_g_block["name"]) -- never a separately re-derived or
+            # re-parsed copy, so this cannot disagree with what the real
+            # gate actually compared. The comparison the real gate
+            # performs is untouched and remains exactly:
+            #     candidate_name == "get_project_intelligence"
+            # These fields exist ONLY to characterize, without ever
+            # revealing, whatever string actually arrived -- never used
+            # to normalize, retry, or influence dispatch in any way.
+            _g_returned_name = _g_block["name"]
+            if isinstance(_g_returned_name, str):
+                _g_name_length = len(_g_returned_name)
+                _g_name_exact = _g_returned_name == "get_project_intelligence"
+                _g_name_stripped = _g_returned_name.strip() == "get_project_intelligence"
+                _g_name_casefold = _g_returned_name.strip().casefold() == "get_project_intelligence".casefold()
+                _g_name_ascii = _g_returned_name.isascii()
+                _g_name_sha256 = hashlib.sha256(_g_returned_name.encode("utf-8", errors="replace")).hexdigest()
+            else:
+                # Missing/non-string name (should be structurally
+                # impossible given _stream_claude_completion always
+                # passes block.get("name") through, but handled safely
+                # and explicitly rather than assumed away): every
+                # comparison-shaped field is a fixed, safe False; length
+                # 0; a fixed sentinel hash that can never collide with a
+                # real SHA-256 of actual content.
+                _g_name_length = 0
+                _g_name_exact = False
+                _g_name_stripped = False
+                _g_name_casefold = False
+                _g_name_ascii = False
+                _g_name_sha256 = "not_a_string"
         else:
             # Not meaningfully evaluable without exactly one block --
             # fixed safe values; the skip reason below is what actually
@@ -5123,6 +5157,12 @@ def stream_atlas_turn(user_text, draft):
             _g_name_allowed = False
             _g_json_valid = False
             _g_project_id_supplied = False
+            _g_name_length = 0
+            _g_name_exact = False
+            _g_name_stripped = False
+            _g_name_casefold = False
+            _g_name_ascii = False
+            _g_name_sha256 = "not_applicable"
 
         _g_dispatch = (not _g_pass1b_error and not _g_protocol_anomaly and _g_tool_use_count == 1 and _g_completed
                         and _g_stop_reason == "tool_use" and _g_name_allowed and _g_json_valid and not _g_project_id_supplied)
@@ -5138,6 +5178,13 @@ def stream_atlas_turn(user_text, draft):
             json_valid=str(_g_json_valid).lower(),
             project_id_supplied=str(_g_project_id_supplied).lower(),
             dispatch=str(_g_dispatch).lower(),
+            returned_name_length=_g_name_length,
+            returned_name_matches_expected_exact=str(_g_name_exact).lower(),
+            returned_name_matches_expected_stripped=str(_g_name_stripped).lower(),
+            returned_name_matches_expected_casefold=str(_g_name_casefold).lower(),
+            returned_name_ascii=str(_g_name_ascii).lower(),
+            returned_name_sha256=_g_name_sha256,
+            expected_name_sha256=hashlib.sha256(b"get_project_intelligence").hexdigest(),
         )
 
         if not _g_dispatch:
