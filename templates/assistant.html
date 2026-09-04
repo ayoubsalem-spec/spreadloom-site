@@ -796,11 +796,27 @@
                 } else if (evt.type === 'done') {
                     terminalDoneReceived = true; // a REAL Atlas 'done' arrived -- pump()'s EOF-recovery path must not also fire for this turn
                     stopDiagTimer();
+                    removeTyping(); // UNCONDITIONAL, idempotent -- see comment below for why this must never depend on a delta having arrived first
                     setStatus('');
                     sendBtn.disabled = false;
                     turnInFlight = false;
                     if (evt.audio_error) addMessage('error', 'Atlas voice unavailable, using free voice instead: ' + evt.audio_error);
                     resetBtn.style.display = (evt.mode === 'concrete_request') ? 'inline-block' : 'none';
+                    if (!assistantBubble) {
+                        // EMPTY SUCCESSFUL COMPLETION FIX: the 'delta' handler
+                        // is the ONLY other place that ever created a visible
+                        // reply bubble -- if Pass 2 legitimately completed
+                        // (stop_reason=end_turn, a real 'done' event) but
+                        // produced zero text deltas, that handler never ran
+                        // at all, and without this the employee would see
+                        // NOTHING (previously: also a permanently-stuck
+                        // typing indicator, now fixed above) even though the
+                        // backend genuinely finished successfully. This is a
+                        // fixed, safe, generic message -- never the raw
+                        // upstream/model/tool detail, which has no place in
+                        // an employee-facing chat message.
+                        addMessage('assistant', "Atlas completed the request but didn't return a response. Please try again.");
+                    }
                     if (evt.pending_write_token) confirmPendingWrite(evt.pending_write_token);
                     if (!voiceSessionActive) return;
                     if (audioQueue.length === 0 && !playbackActive) {
