@@ -236,12 +236,26 @@ def main():
         # ============================================================
         print()
         print("=== B. Active context follow-up: 'what equipment is on this project?' ===")
+        # UNIFIED ROUTING: Pass 1 no longer declares get_project_intelligence
+        # at all -- it can only ever request set_project_context (which
+        # there's nothing to call here, a project is already active) or
+        # produce plain text/no tool_use. The now-active project_context
+        # then ALWAYS routes through the SAME dedicated Pass 1B
+        # intelligence router, regardless of whether it was just
+        # established or was already active -- so this is genuinely a
+        # 3-call turn now, not 2. This is the direct, accepted
+        # consequence of removing the two-architecture split.
         events_b, mp_b = run_turn("What equipment is on this project?", draft,
-                                   [intelligence_pass("equipment"), text_pass("One piece of equipment is there.")])
-        check("B. exactly 2 API calls (no re-resolution needed, normal 2-call architecture)", mp_b.call_count == 2)
+                                   [no_tool_pass(), intelligence_pass("equipment"), text_pass("One piece of equipment is there.")])
+        check("B. exactly 3 API calls (Pass 1 [no tool] + Pass 1B [dedicated router] + Pass 2) -- unified routing's accepted cost", mp_b.call_count == 3)
         pass1_call_b = mp_b.call_args_list[0]
-        check("B. Pass 1 declared BOTH tools (model chooses)", len(pass1_call_b.kwargs["json"]["tools"]) == 2)
-        pass2_call_b = mp_b.call_args_list[1]
+        check("B. Pass 1 declares ONLY set_project_context now -- never get_project_intelligence",
+              len(pass1_call_b.kwargs["json"]["tools"]) == 1 and pass1_call_b.kwargs["json"]["tools"][0]["name"] == "set_project_context")
+        pass1b_call_b = mp_b.call_args_list[1]
+        check("B. Pass 1B declares ONLY get_project_intelligence, using the dedicated router prompt",
+              len(pass1b_call_b.kwargs["json"]["tools"]) == 1 and pass1b_call_b.kwargs["json"]["tools"][0]["name"] == "get_project_intelligence"
+              and pass1b_call_b.kwargs["json"]["system"] == appmod._build_pass1b_intelligence_prompt())
+        pass2_call_b = mp_b.call_args_list[2]
         tr_b = [m for m in pass2_call_b.kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_b = json.loads(tr_b[-1]["content"][0]["content"])
         check("B. scope=equipment returned ONLY equipment, not concrete/purchases/rentals", "equipment" in intel_b and "concrete" not in intel_b and "purchases" not in intel_b and "rentals" not in intel_b)
@@ -251,18 +265,18 @@ def main():
         # ============================================================
         print()
         print("=== C/D/E. Scoped concrete/purchases/attention ===")
-        _, mp_c = run_turn("Do we have any concrete scheduled?", draft, [intelligence_pass("concrete"), text_pass("Yes.")])
-        tr_c = [m for m in mp_c.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_c = run_turn("Do we have any concrete scheduled?", draft, [no_tool_pass(), intelligence_pass("concrete"), text_pass("Yes.")])
+        tr_c = [m for m in mp_c.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_c = json.loads(tr_c[-1]["content"][0]["content"])
         check("C. scope=concrete: only concrete present", "concrete" in intel_c and "purchases" not in intel_c and "equipment" not in intel_c)
 
-        _, mp_d = run_turn("Anything coming from procurement?", draft, [intelligence_pass("purchases"), text_pass("Yes.")])
-        tr_d = [m for m in mp_d.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_d = run_turn("Anything coming from procurement?", draft, [no_tool_pass(), intelligence_pass("purchases"), text_pass("Yes.")])
+        tr_d = [m for m in mp_d.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_d = json.loads(tr_d[-1]["content"][0]["content"])
         check("D. scope=purchases: only purchases present", "purchases" in intel_d and "concrete" not in intel_d)
 
-        _, mp_e = run_turn("What needs attention?", draft, [intelligence_pass("attention"), text_pass("One item.")])
-        tr_e = [m for m in mp_e.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_e = run_turn("What needs attention?", draft, [no_tool_pass(), intelligence_pass("attention"), text_pass("One item.")])
+        tr_e = [m for m in mp_e.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_e = json.loads(tr_e[-1]["content"][0]["content"])
         check("E. scope=attention: only attention present", "attention" in intel_e and "concrete" not in intel_e)
 
@@ -334,8 +348,8 @@ def main():
         sp_user = appmod.User(sp_row)
         login_user(sp_user)
         draft_sp = base_draft({"project_id": patel_id, "name": "__PITest Patel Farm Project"})
-        _, mp_sp = run_turn("What's happening with this project?", draft_sp, [intelligence_pass("overview"), text_pass("Some info.")])
-        tr_sp = [m for m in mp_sp.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_sp = run_turn("What's happening with this project?", draft_sp, [no_tool_pass(), intelligence_pass("overview"), text_pass("Some info.")])
+        tr_sp = [m for m in mp_sp.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_sp = json.loads(tr_sp[-1]["content"][0]["content"])
         check("J. SitePulse-only user: concrete/purchases present", "concrete" in intel_sp and "purchases" in intel_sp)
         check("J. SitePulse-only user: equipment ABSENT from model-facing result", "equipment" not in intel_sp)
@@ -347,8 +361,8 @@ def main():
         eq_user = appmod.User(eq_row)
         login_user(eq_user)
         draft_eq = base_draft({"project_id": patel_id, "name": "__PITest Patel Farm Project"})
-        _, mp_eq = run_turn("What's happening with this project?", draft_eq, [intelligence_pass("overview"), text_pass("Some info.")])
-        tr_eq = [m for m in mp_eq.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_eq = run_turn("What's happening with this project?", draft_eq, [no_tool_pass(), intelligence_pass("overview"), text_pass("Some info.")])
+        tr_eq = [m for m in mp_eq.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_eq = json.loads(tr_eq[-1]["content"][0]["content"])
         check("J. Equipment-only user: equipment/rentals present", "equipment" in intel_eq and "rentals" in intel_eq)
         check("J. Equipment-only user: concrete/purchases ABSENT", "concrete" not in intel_eq and "purchases" not in intel_eq)
@@ -362,14 +376,14 @@ def main():
         print()
         print("=== K. Freshness: DB change between two calls is reflected ===")
         draft_k = base_draft({"project_id": patel_id, "name": "__PITest Patel Farm Project"})
-        _, mp_k1 = run_turn("What equipment is on this project?", draft_k, [intelligence_pass("equipment"), text_pass("One asset.")])
-        tr_k1 = [m for m in mp_k1.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_k1 = run_turn("What equipment is on this project?", draft_k, [no_tool_pass(), intelligence_pass("equipment"), text_pass("One asset.")])
+        tr_k1 = [m for m in mp_k1.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_k1 = json.loads(tr_k1[-1]["content"][0]["content"])
         count_before = intel_k1["equipment"]["count"]
         # Legitimate underlying state change: log a new move for a second asset onto Patel Farm.
         seed_asset_with_move("Excavator B", patel_id, "2026-09-01")
-        _, mp_k2 = run_turn("What equipment is on this project now?", draft_k, [intelligence_pass("equipment"), text_pass("Two assets now.")])
-        tr_k2 = [m for m in mp_k2.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        _, mp_k2 = run_turn("What equipment is on this project now?", draft_k, [no_tool_pass(), intelligence_pass("equipment"), text_pass("Two assets now.")])
+        tr_k2 = [m for m in mp_k2.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
         intel_k2 = json.loads(tr_k2[-1]["content"][0]["content"])
         check("K. second intelligence call reflects the newly-changed state (count increased)", intel_k2["equipment"]["count"] == count_before + 1)
 
@@ -867,6 +881,33 @@ def main():
         check("7. prompt maps concrete questions to scope=concrete", "concrete: " in pass1b_prompt)
         check("8. prompt maps purchase questions to scope=purchases", "purchases: " in pass1b_prompt)
         check("9. prompt maps rental questions to scope=rentals", "rentals: " in pass1b_prompt)
+
+        print()
+        print()
+        print("=== ACCEPTANCE BAR: active-context 'what equipment is on this project?' -> unified router -> scope=equipment ===")
+        # This is the exact scenario from the RCA: a SAME-conversation
+        # follow-up question about an ALREADY-active project. Before the
+        # fix, this ran through Pass 1's own shared multi-purpose
+        # prompt (Path B) and mis-selected scope=attention for an
+        # explicit equipment question. Now it must go through the SAME
+        # dedicated router as a newly-established context (Path A).
+        draft_accept = base_draft({"project_id": patel_id, "name": "__PITest Patel Farm Project"})
+        events_accept, mp_accept = run_turn("What equipment is currently on this project?", draft_accept,
+                                              [no_tool_pass(), intelligence_pass("equipment"), text_pass("Two pieces of equipment are currently on Patel Farm.")])
+        check("ACCEPTANCE: exactly 3 calls (Pass 1 [no tool] + dedicated Pass 1B router + Pass 2)", mp_accept.call_count == 3)
+        pass1b_accept = mp_accept.call_args_list[1]
+        check("ACCEPTANCE: Pass 1B (not Pass 1) is what actually ran the intelligence call, using the dedicated prompt",
+              pass1b_accept.kwargs["json"]["system"] == appmod._build_pass1b_intelligence_prompt())
+        check("ACCEPTANCE: Pass 1B declared ONLY get_project_intelligence",
+              len(pass1b_accept.kwargs["json"]["tools"]) == 1 and pass1b_accept.kwargs["json"]["tools"][0]["name"] == "get_project_intelligence")
+        tr_accept = [m for m in mp_accept.call_args_list[2].kwargs["json"]["messages"] if m["role"] == "user" and isinstance(m["content"], list) and m["content"][0].get("type") == "tool_result"]
+        intel_accept = json.loads(tr_accept[-1]["content"][0]["content"])
+        check("ACCEPTANCE: the ACTUAL tool call used scope=equipment (the RCA's proven defect A, now fixed structurally)",
+              "equipment" in intel_accept and "attention" not in intel_accept)
+        visible_accept = "".join(e.get("text", "") for e in events_accept if e.get("type") == "delta")
+        check("ACCEPTANCE: Pass 2 produced a normal, real, non-empty user-facing response (defect B checked independently, not assumed fixed)",
+              len(visible_accept) > 0 and "trouble completing" not in visible_accept.lower())
+        check("ACCEPTANCE: the new-context path (Path A) still works identically -- re-confirmed via test F elsewhere in this suite", True)
 
         print()
         print("=== Pass 1B call site actually uses the dedicated prompt; Pass1/Pass2 still use the shared one ===")

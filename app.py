@@ -4277,7 +4277,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v5.6.1-pass1b-scoped-prompt"
+ATLAS_BUILD = "TEST-v5.7-unified-intelligence-routing"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -4757,7 +4757,7 @@ def stream_atlas_turn(user_text, draft):
     protocol_anomaly = {"value": None}  # e.g. "orphan_block_stop", "orphan_tool_input_delta", "duplicate_block_stop", "duplicate_content_block_start", "duplicate_tool_use_start"
     pass1_error = {"value": None}
     pass1_stop_reason = {"value": None}
-    for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(), max_tokens=200, label="PASS1"):
+    for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=200, label="PASS1"):
         kind = event[0]
         if kind == "block_start":
             _, btype, idx = event
@@ -5003,20 +5003,20 @@ def stream_atlas_turn(user_text, draft):
         # which (since tool_result_content stays None) takes the
         # ordinary ("no tool was requested") Pass 2 branch.
 
-    # PASS 1B -- one-turn "establish project + ask about it" UX (Project
-    # Intelligence phase), WITHOUT weakening the v7 multi-tool-per-pass
-    # fail-closed invariant at all: Pass 1 above still only ever allows
-    # exactly one tool_use block, still fails closed on 2+, unchanged.
-    # This is a SEPARATE, SEQUENTIAL, single-tool pass -- only ever
-    # attempted when Pass 1 just deterministically (server-checked, not
-    # model-decided) succeeded at establishing a NEW canonical project
-    # via set_project_context. It declares ONLY get_project_intelligence
-    # -- not set_project_context -- so this pass structurally cannot
-    # request project switching again, and it operates on the SAME
-    # project_context dict Pass 1 just wrote into, via the exact same
-    # execute_tool() session-context auto-fill every other project-
-    # scoped tool already uses. No model-supplied project id is ever
-    # possible here (see _atlas_native_tool_declarations' docstring).
+    # PASS 1B -- dedicated Project Intelligence router (see the unified-
+    # routing comment just below for the current trigger condition).
+    # WITHOUT weakening the v7 multi-tool-per-pass fail-closed invariant
+    # at all: Pass 1 above still only ever allows exactly one tool_use
+    # block, still fails closed on 2+, unchanged. This is a SEPARATE,
+    # SEQUENTIAL, single-tool pass. It declares ONLY
+    # get_project_intelligence -- not set_project_context -- so this
+    # pass structurally cannot request project switching, and it
+    # operates on the SAME project_context dict Pass 1 may have just
+    # written into (or that was already active before this turn), via
+    # the exact same execute_tool() session-context auto-fill every
+    # other project-scoped tool already uses. No model-supplied project
+    # id is ever possible here (see _atlas_native_tool_declarations'
+    # docstring).
     #
     # This is a full, independent duplicate of Pass 1's parsing/
     # validation logic (same protocol-anomaly detection, same single-
@@ -5025,15 +5025,33 @@ def stream_atlas_turn(user_text, draft):
     # nothing about the original, already-hardened Pass 1 logic is
     # touched or risked by this addition. A failure/anomaly in THIS
     # pass degrades gracefully (no intelligence gathered this turn,
-    # simply falls through to Pass 2 with only the project-switch
-    # result) rather than invalidating the project switch that already
-    # genuinely succeeded.
+    # simply falls through to Pass 2 with whatever Pass 1 itself
+    # produced) rather than invalidating anything Pass 1 already
+    # genuinely accomplished.
+    # UNIFIED PROJECT INTELLIGENCE ROUTING (approved after the active-
+    # context RCA): Project Intelligence must ALWAYS flow through this
+    # SAME dedicated router, regardless of whether canonical project
+    # context was just established this exact turn or was already
+    # active before this turn even started -- never through Pass 1's
+    # own tool selection (Pass 1 no longer even declares
+    # get_project_intelligence -- see its tools= above, now scoped to
+    # only set_project_context). This directly removes the two-
+    # architecture split the RCA found: Path A (new context) and the
+    # former Path B (already-active context, previously handled inside
+    # Pass 1's own multi-purpose shared prompt) are now the exact same
+    # code path.
+    #
+    # `project_context` is the SAME dict object execute_tool() mutates
+    # in place on a successful set_project_context call above -- so a
+    # single check of its current project_id, taken AFTER Pass 1 has
+    # run, correctly and uniformly covers both cases: freshly
+    # established this turn, or already active from before (project_id
+    # was never touched this turn because Pass 1 had nothing to change,
+    # or a same-turn set_project_context attempt was ambiguous/failed
+    # and left the still-valid prior context standing).
     run_pass1b = False
-    if turn_level_error is None and tool_name == "set_project_context" and tool_result_content is not None and not tool_result_is_error:
-        try:
-            run_pass1b = json.loads(tool_result_content).get("found") is True
-        except (json.JSONDecodeError, AttributeError):
-            run_pass1b = False
+    if turn_level_error is None and project_context.get("project_id"):
+        run_pass1b = True
 
     tool_result_content_1b = None
     tool_result_is_error_1b = False

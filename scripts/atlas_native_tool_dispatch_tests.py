@@ -231,8 +231,8 @@ def main():
         check("Pass 2 omits `tools` entirely (structurally cannot request another tool call)",
               "tools" not in pass2_call_kwargs["json"])
         pass1_call_kwargs = mock_post.call_args_list[0].kwargs
-        check("Pass 1 declares ONLY the allowed native tool(s)",
-              [t["name"] for t in pass1_call_kwargs["json"]["tools"]] == appmod.ATLAS_NATIVE_TOOLS_ALLOWED)
+        check("Pass 1 declares ONLY set_project_context now (unified routing: get_project_intelligence never offered to Pass 1 directly)",
+              [t["name"] for t in pass1_call_kwargs["json"]["tools"]] == ["set_project_context"])
         check("Pass 1's declared tool schema does NOT expose project_id to the model",
               "project_id" not in pass1_call_kwargs["json"]["tools"][0]["input_schema"]["properties"])
         check("Pass 1 uses a capped max_tokens (cheap detection call)", pass1_call_kwargs["json"]["max_tokens"] <= 200)
@@ -256,12 +256,18 @@ def main():
         print()
         print("=== 3. Follow-up turn retains established context ===")
         pass1_resp2 = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        # UNIFIED ROUTING: a project is already active from the earlier
+        # turn in this test, so the dedicated Pass 1B intelligence
+        # router always runs too now -- this ordinary "tell me more"
+        # message doesn't warrant a tool call, so it correctly produces
+        # no tool_use, exactly like Pass 1's own no-tool completion.
+        pass1b_resp2 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_resp2 = fake_response(build_sse_lines([("text", "Sure, tell me more about what?")]))
-        events2, mock_post2 = run_turn("Tell me more.", draft, [pass1_resp2, pass2_resp2])
+        events2, mock_post2 = run_turn("Tell me more.", draft, [pass1_resp2, pass1b_resp2, pass2_resp2])
         check("3. project_context is unchanged/retained across the follow-up turn", draft["project_context"].get("project_id") == patel_id)
         check("7. Pass 1's system prompt still carries the established project context on a no-tool turn",
               "Patel Farm Project" in mock_post2.call_args_list[0].kwargs["json"]["system"])
-        check("7. Pass 2's system prompt also carries it", "Patel Farm Project" in mock_post2.call_args_list[1].kwargs["json"]["system"])
+        check("7. Pass 2's system prompt also carries it", "Patel Farm Project" in mock_post2.call_args_list[2].kwargs["json"]["system"])
 
         print()
         print("=== 4. Session isolation (also covers reset-during-turn safety) ===")
@@ -293,7 +299,12 @@ def main():
             stop_reason="tool_use"
         ))
         pass2_resp5 = fake_response(build_sse_lines([("text", "I found more than one project matching Patel -- did you mean Patel Farm Project or Patel Renovation?")]))
-        events6, _ = run_turn("Switch to Patel", draft, [pass1_resp5, pass2_resp5])
+        # UNIFIED ROUTING: Overlook Tower is still active (this switch
+        # attempt was ambiguous and never changed it), so Pass 1B always
+        # runs too now -- correctly finds nothing to do for this
+        # clarification-only turn.
+        pass1b_resp5 = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        events6, _ = run_turn("Switch to Patel", draft, [pass1_resp5, pass1b_resp5, pass2_resp5])
         check("6. ambiguous resolution does NOT set a new project_id", draft["project_context"].get("project_id") == context_before_ambiguous.get("project_id"))
         check("8. the PREVIOUS valid context (Overlook Tower) remains active, not nulled/cleared", draft["project_context"] == context_before_ambiguous)
         visible6 = "".join(e.get("text", "") for e in events6 if e.get("type") == "delta")
@@ -307,7 +318,8 @@ def main():
             stop_reason="tool_use"
         ))
         pass2_resp6 = fake_response(build_sse_lines([("text", "I couldn't find a project called Totally Fake Project XYZ.")]))
-        events7, _ = run_turn("Let's talk about Totally Fake Project XYZ", draft, [pass1_resp6, pass2_resp6])
+        pass1b_resp6 = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        events7, _ = run_turn("Let's talk about Totally Fake Project XYZ", draft, [pass1_resp6, pass1b_resp6, pass2_resp6])
         check("unknown project: context unchanged (previous valid project stays active)", draft["project_context"] == context_before_unknown)
         visible7 = "".join(e.get("text", "") for e in events7 if e.get("type") == "delta")
         check("unknown project: Atlas tells the user it couldn't find it, doesn't pretend success",
@@ -1013,11 +1025,17 @@ def main():
         submit_reply = 'Submitting now.<state>{"mode": "concrete_request", "fields": %s, "action": "submit"}</state>' % json.dumps(complete_fields)
         concrete_draft["pending_write"] = None
         pass1_concrete1 = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        # UNIFIED ROUTING: concrete_draft already has an active project
+        # (patel_id) from the moment it's created above, so Pass 1B
+        # always runs too now -- correctly finds nothing to do for this
+        # write-confirmation turn (no intelligence question here).
+        pass1b_concrete1 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_concrete1 = fake_response(build_sse_lines([("text", submit_reply)]))
-        run_turn("yes submit it", concrete_draft, [pass1_concrete1, pass2_concrete1])
+        run_turn("yes submit it", concrete_draft, [pass1_concrete1, pass1b_concrete1, pass2_concrete1])
         pass1_concrete2 = fake_response(build_sse_lines([], stop_reason="end_turn"))
+        pass1b_concrete2 = fake_response(build_sse_lines([], stop_reason="end_turn"))
         pass2_concrete2 = fake_response(build_sse_lines([("text", submit_reply)]))
-        events_confirm, _ = run_turn("yes, submit it", concrete_draft, [pass1_concrete2, pass2_concrete2])
+        events_confirm, _ = run_turn("yes, submit it", concrete_draft, [pass1_concrete2, pass1b_concrete2, pass2_concrete2])
         done_event = next(e for e in events_confirm if e.get("type") == "done")
         write_token = done_event.get("pending_write_token")
         check("18. two-turn write confirmation still works with native dispatch present", bool(write_token))

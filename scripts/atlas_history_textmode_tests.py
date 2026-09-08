@@ -126,8 +126,34 @@ def ordinary_turn_responses(reply_text):
     built once and shared, so Pass 1 alone drains it, leaving Pass 2
     with nothing and silently producing an empty visible reply. This
     helper is the correct two-response shape for an ordinary (no
-    project-context tool use) turn, for use with side_effect=[...]."""
-    return [fake_response(fake_sse_lines("", tool=None)), fake_response(fake_sse_lines(reply_text))]
+    project-context tool use) turn, for use with side_effect=[...].
+
+    UNIFIED PROJECT INTELLIGENCE ROUTING compatibility: if this
+    session's project context is ALREADY active (established by an
+    earlier turn in the same test), a third call (the dedicated
+    Pass 1B intelligence router, which now always runs whenever a
+    project is active -- see stream_atlas_turn) is also made. This
+    helper's callers here are testing UNRELATED things (interaction
+    mode, persistence, ownership, etc.), not intelligence routing
+    itself -- so rather than editing every one of the many call sites
+    that happen to run on a session with pre-existing context, this
+    returns a CALLABLE (not a plain list) that gracefully supplies a
+    safe "no tool needed" response for that extra call if and when it
+    happens, exactly mirroring what a real Pass 1B call correctly does
+    when the ordinary message it's given doesn't warrant intelligence.
+    Tests that specifically care about exact call counts for
+    intelligence routing live in atlas_project_intelligence_tests.py,
+    which supplies fully explicit responses instead of this helper."""
+    responses = [fake_response(fake_sse_lines("", tool=None)), fake_response(fake_sse_lines(reply_text))]
+
+    def _side_effect(*a, **kw):
+        idx = _side_effect.calls
+        _side_effect.calls += 1
+        if idx >= len(responses):
+            return fake_response(fake_sse_lines("", tool=None))
+        return responses[idx]
+    _side_effect.calls = 0
+    return _side_effect
 
 
 def main():
@@ -206,7 +232,11 @@ def main():
         check("omitted interaction_mode defaults safely to text: ZERO TTS calls", tts_call_count["n"] == 0)
 
         tts_call_count["n"] = 0
-        with patch("app.requests.post", side_effect=ordinary_turn_responses("Here is a voice reply.")), \
+        with patch("app.requests.post", side_effect=[
+                fake_response(fake_sse_lines("", tool=None)),
+                fake_response(fake_sse_lines("", tool=None)),  # Pass 1B (project already active from an earlier test in this session) -- no intelligence needed for this ordinary message
+                fake_response(fake_sse_lines("Here is a voice reply.")),
+            ]), \
              patch("app._elevenlabs_tts_call", side_effect=_counting_tts):
             resp = ask(client, "voice question", interaction_mode="voice")
             check("voice mode turn: request succeeds", resp.status_code == 200)
