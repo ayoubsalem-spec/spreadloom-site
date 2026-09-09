@@ -1,0 +1,37 @@
+{% extends "sitepulse/base.html" %}
+{% block content %}
+<h1>Rental Swap Coordination</h1>
+<p class="sub">Open outside-rental exchanges awaiting vendor coordination. This is the same rental lifecycle data owned by Equipment Center -- not a separate record.</p>
+<div class="card" style="padding:0; overflow-x:auto;">
+    <table>
+        <tr><th>Project</th><th>Vendor</th><th>Outgoing Equipment</th><th>Status</th><th>Requested</th><th>Actions</th></tr>
+        {% for s in swaps %}
+        <tr>
+            <td>{{ s['job_name'] or '—' }}</td>
+            <td>{{ s['vendor'] }}</td>
+            <td>{{ s['outgoing_equipment_description'] }}</td>
+            <td>{{ s['status'] }}</td>
+            <td>{{ s['requested_at'][:10] if s['requested_at'] else '—' }}</td>
+            <td>
+                {% if s['status'] == 'Requested' and has_place_order_access %}
+                <form method="POST" action="{{ url_for('sitepulse_rental_swap_vendor_contacted', rental_id=s['rental_id'], swap_id=s['id']) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-sm">Vendor Contacted</button>
+                </form>
+                {% elif s['status'] == 'Vendor Contacted' and has_place_order_access %}
+                <form method="POST" action="{{ url_for('sitepulse_rental_swap_scheduled', rental_id=s['rental_id'], swap_id=s['id']) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="date" name="scheduled_date" required style="width:130px;">
+                    <button type="submit" class="btn btn-sm">Mark Scheduled</button>
+                </form>
+                {% elif s['status'] == 'Scheduled' %}
+                <span class="sub">Awaiting replacement receipt in Equipment Center</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6" class="sub">No open rental swaps.</td></tr>
+        {% endfor %}
+    </table>
+</div>
+{% endblock %}

@@ -32,6 +32,7 @@ import markdown as md_lib
 import bleach
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
@@ -1118,6 +1119,32 @@ def init_db():
             returned_date TEXT, notes TEXT, created_at TEXT, updated_at TEXT
         );
 
+        -- Outside Rental swap/exchange lifecycle. ADDITIVE only -- the
+        -- parent sitepulse_rentals row remains the ONE continuing
+        -- rental relationship and its derived-state architecture
+        -- (Active/Overdue/Returned computed from returned_date/due_date)
+        -- is deliberately UNCHANGED; this table exists specifically so
+        -- swap workflow state never needs a second, competing
+        -- representation on the parent row. Each row is one exchange
+        -- event; an unlimited chain of swaps for the same rental_id
+        -- reconstructs the full "original -> swap 1 -> swap 2 -> ..."
+        -- history even after the parent's equipment_description has
+        -- been updated to the latest replacement on completion.
+        CREATE TABLE IF NOT EXISTS sitepulse_rental_swaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rental_id INTEGER NOT NULL,
+            outgoing_equipment_description TEXT NOT NULL,
+            incoming_equipment_description TEXT,
+            reason TEXT,
+            requested_by TEXT, requested_at TEXT NOT NULL,
+            vendor_contacted_by TEXT, vendor_contacted_at TEXT,
+            scheduled_by TEXT, scheduled_date TEXT,
+            completed_by TEXT, completed_at TEXT,
+            status TEXT DEFAULT 'Requested',
+            created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (rental_id) REFERENCES sitepulse_rentals (id)
+        );
+
         -- Site Inventory: concrete requests + material inventory, split out
         -- of SitePulse into their own section per today's direction.
         CREATE TABLE IF NOT EXISTS inventory_materials (
@@ -1429,6 +1456,23 @@ def init_db():
         "ALTER TABLE inventory_concrete_requests ADD COLUMN pump_type TEXT",
         "ALTER TABLE inventory_concrete_requests ADD COLUMN concrete_arrival_time TEXT",
         "ALTER TABLE inventory_concrete_requests ADD COLUMN full_reminder_sent_at TEXT",
+        # Concurrency correction: the day-before reminder now has TWO
+        # possible callers (the Railway scheduled command and the
+        # legacy GET /inventory/concrete page-load backup) that can run
+        # against the same SQLite file concurrently -- a plain SELECT
+        # then later UPDATE full_reminder_sent_at left a real race
+        # window where both could see "not yet sent" and both send.
+        # reminder_claimed_at is a SEPARATE, narrowly-scoped, temporary
+        # pre-send claim marker -- deliberately NOT reused from
+        # full_reminder_sent_at, which semantically means "successfully
+        # sent" and must never be set before the send actually
+        # succeeds. A claim is atomically acquired (single UPDATE ...
+        # WHERE, see process_due_concrete_reminders) before any
+        # WhatsApp call, cleared immediately on failure so a later run
+        # can retry right away, and safely reclaimable by ANY run after
+        # a fixed staleness timeout if the claiming process died before
+        # it could clear or finalize the claim.
+        "ALTER TABLE inventory_concrete_requests ADD COLUMN reminder_claimed_at TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
         # Phase 1: project identity columns (see project_link_review above).
@@ -1510,6 +1554,7 @@ def init_db():
         # message-ordering lookup (WHERE conversation_id=? ORDER BY id).
         "CREATE INDEX IF NOT EXISTS idx_atlas_conversations_user ON atlas_conversations(user_id, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_atlas_messages_conversation ON atlas_messages(conversation_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_rental_swaps_rental ON sitepulse_rental_swaps(rental_id, id)",
     ]:
         try:
             db.execute(index_sql)
@@ -2431,10 +2476,12 @@ def sitepulse_rentals_list():
         except (ValueError, TypeError):
             rd["running_cost"] = None
             rd["days_out"] = None
+        rd["open_swap"] = _open_rental_swap(db, rd["id"])
         rentals.append(rd)
 
     total_cost = round(sum(r["running_cost"] for r in rentals if r["running_cost"]), 2)
-    return render_template("sitepulse/rentals.html", rentals=rentals, show=show, total_running_cost=total_cost)
+    return render_template("sitepulse/rentals.html", rentals=rentals, show=show, total_running_cost=total_cost,
+                            has_place_order_access=_authorized("action:sitepulse:place_order"))
 
 
 @app.route("/sitepulse/rentals/new", methods=["GET", "POST"])
@@ -2486,6 +2533,29 @@ def sitepulse_update_rental(rental_id):
     return redirect(url_for("sitepulse_rentals_list"))
 
 
+def _rental_notify(text, chat_id=None):
+    """RELEASE-BLOCKER FIX (Outside Rental lifecycle notifications only):
+    send_whatsapp_group_message() already never raises for ordinary
+    network failures (it catches requests.RequestException internally
+    and returns (False, detail) -- see its own docstring), but that
+    catch is narrowly scoped to that one exception type. Any OTHER
+    exception (a bug, an unexpected type) would still escape and turn
+    a successfully-committed lifecycle transition into an HTTP 500 for
+    the employee, even though nothing about their actual request
+    failed. This wraps ONLY the six new rental-lifecycle call sites
+    (Swap Requested, Vendor Contacted, Swap Scheduled, Complete
+    Exchange, Return, Reopen) -- send_whatsapp_group_message() itself,
+    and every other, unrelated call site elsewhere in the app, are
+    completely untouched. Uses the exact same safe, credential-free
+    print-based logging convention already established inside
+    send_whatsapp_group_message() itself -- no new logging mechanism,
+    no retry, no queue."""
+    try:
+        send_whatsapp_group_message(text, chat_id=chat_id)
+    except Exception as e:
+        print(f"[whatsapp] rental lifecycle notification failed (non-fatal, lifecycle transition already committed): {e}")
+
+
 @app.route("/sitepulse/rentals/<int:rental_id>/return", methods=["POST"])
 @login_required
 def sitepulse_return_rental(rental_id):
@@ -2493,13 +2563,369 @@ def sitepulse_return_rental(rental_id):
         flash("You don't have permission to make changes in Equipment Center.", "error")
         return redirect(url_for("sitepulse_dashboard"))
     db = get_db()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    if not r:
+        flash("Rental not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    # FAIL CLOSED: returning a rental while a swap is still unresolved
+    # would leave the lifecycle ambiguous (is the outgoing or incoming
+    # equipment actually being returned?) -- block it rather than
+    # silently allowing an inconsistent state. The employee must
+    # resolve (Complete Exchange) the open swap first.
+    open_swap = db.execute(
+        "SELECT id FROM sitepulse_rental_swaps WHERE rental_id = ? AND status != 'Completed' ORDER BY id DESC LIMIT 1",
+        (rental_id,)
+    ).fetchone()
+    if open_swap:
+        flash("This rental has an unresolved swap/exchange -- complete or resolve it before returning.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
     returned_date = request.form.get("returned_date") or date.today().isoformat()
     db.execute("UPDATE sitepulse_rentals SET returned_date=?, updated_at=? WHERE id=?",
                (returned_date, datetime.utcnow().isoformat(), rental_id))
     log_activity("sitepulse", "rental", rental_id, "returned", field="returned_date", new_value=returned_date)
     db.commit()
+    _rental_notify(
+        f"📦 Rental returned\n"
+        f"Equipment: {r['equipment_description']}\n"
+        f"Project: {r['job_name'] or '—'}\n"
+        f"Returned by: {current_user.name or current_user.email}",
+        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
     flash("Rental marked returned.")
     return redirect(url_for("sitepulse_rentals_list"))
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/reopen", methods=["POST"])
+@login_required
+def sitepulse_reopen_rental(rental_id):
+    """Controlled reopen -- requires an explicit reason, fully audited
+    (who/when/reason/previous state/new state), and simply CLEARS
+    returned_date so the existing derived-state architecture
+    (Active/Overdue computed from due_date) takes back over naturally --
+    no separate "reopened" status is introduced, preserving the single
+    source of truth for rental state that the CTO decision requires.
+    The fact that it was previously returned and later reopened remains
+    permanently visible in activity_log -- this route never deletes or
+    overwrites that history, only the current returned_date fact."""
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db = get_db()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    if not r:
+        flash("Rental not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    if not r["returned_date"]:
+        flash("This rental is not returned -- nothing to reopen.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    reason = (request.form.get("reason") or "").strip()
+    if not reason:
+        flash("A reason is required to reopen a returned rental.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    previous_returned_date = r["returned_date"]
+    db.execute("UPDATE sitepulse_rentals SET returned_date=NULL, updated_at=? WHERE id=?",
+               (datetime.utcnow().isoformat(), rental_id))
+    log_activity("sitepulse", "rental", rental_id, "reopened", field="returned_date",
+                 old_value=previous_returned_date, new_value=f"reopened: {reason}")
+    db.commit()
+    _rental_notify(
+        f"♻️ Rental reopened\n"
+        f"Equipment: {r['equipment_description']}\n"
+        f"Reason: {reason}\n"
+        f"Reopened by: {current_user.name or current_user.email}",
+        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
+    flash("Rental reopened.")
+    return redirect(url_for("sitepulse_rentals_list"))
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/edit", methods=["GET", "POST"])
+@login_required
+def sitepulse_edit_rental(rental_id):
+    """ACTIVE rentals: normal fields editable, every meaningful change
+    audited field-by-field. RETURNED rentals: read-only -- must be
+    explicitly Reopened first (CTO decision #7). A rental having a past
+    swap does NOT lock normal fields -- swap history itself lives
+    entirely in sitepulse_rental_swaps and is never touched by this
+    route, so editing the parent rental can never silently rewrite
+    swap history."""
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db = get_db()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    if not r:
+        flash("Rental not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    if r["returned_date"]:
+        flash("This rental has been returned -- reopen it before editing.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    if request.method == "POST":
+        new_values = {
+            "vendor": request.form["vendor"], "equipment_description": request.form["equipment_description"],
+            "job_name": request.form.get("job_name", ""), "rate_amount": request.form.get("rate_amount", ""),
+            "rate_period": request.form.get("rate_period", "Daily"), "rented_date": request.form["rented_date"],
+            "due_date": request.form.get("due_date", ""), "notes": request.form.get("notes", ""),
+        }
+        changed_fields = [k for k, v in new_values.items() if (r[k] or "") != (v or "")]
+        db.execute(
+            """UPDATE sitepulse_rentals SET vendor=?, equipment_description=?, job_name=?, rate_amount=?,
+               rate_period=?, rented_date=?, due_date=?, notes=?, updated_at=? WHERE id=?""",
+            (new_values["vendor"], new_values["equipment_description"], new_values["job_name"],
+             new_values["rate_amount"], new_values["rate_period"], new_values["rented_date"],
+             new_values["due_date"], new_values["notes"], datetime.utcnow().isoformat(), rental_id)
+        )
+        for field in changed_fields:
+            log_activity("sitepulse", "rental", rental_id, "updated", field=field,
+                         old_value=r[field], new_value=new_values[field])
+        db.commit()
+        flash("Rental updated.")
+        return redirect(url_for("sitepulse_rentals_list"))
+    return render_template("sitepulse/edit_rental.html", r=r)
+
+
+def _open_rental_swap(db, rental_id):
+    """The single unresolved (non-Completed) swap for a rental, if any
+    -- the authoritative check every swap-workflow transition route
+    below uses, server-side, independent of anything the UI shows or
+    hides."""
+    return db.execute(
+        "SELECT * FROM sitepulse_rental_swaps WHERE rental_id = ? AND status != 'Completed' ORDER BY id DESC LIMIT 1",
+        (rental_id,)
+    ).fetchone()
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/swap/request", methods=["POST"])
+@login_required
+def sitepulse_rental_swap_request(rental_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db = get_db()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    if not r:
+        flash("Rental not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    # FAIL CLOSED transitions, explicit -- never trusted to UI alone.
+    if r["returned_date"]:
+        flash("This rental has been returned -- cannot request a swap.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    if _open_rental_swap(db, rental_id):
+        flash("This rental already has an unresolved swap/exchange in progress.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    now = datetime.utcnow().isoformat()
+    requester = current_user.name or current_user.email
+    reason = (request.form.get("reason") or "").strip()
+    cur = db.execute(
+        """INSERT INTO sitepulse_rental_swaps (rental_id, outgoing_equipment_description, reason,
+           requested_by, requested_at, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'Requested', ?, ?)""",
+        (rental_id, r["equipment_description"], reason, requester, now, now, now)
+    )
+    log_activity("sitepulse", "rental_swap", cur.lastrowid, "requested",
+                 asset_id=None, field="status", new_value="Requested", old_value=None)
+    db.commit()
+    _rental_notify(
+        f"🔁 Swap/exchange requested\n"
+        f"Project: {r['job_name'] or '—'}\n"
+        f"Outgoing equipment: {r['equipment_description']}\n"
+        f"Reason: {reason or '—'}\n"
+        f"Requested by: {requester}",
+        chat_id=ULTRAMSG_GROUP_CHAT_ID
+    )
+    flash("Swap/exchange requested -- Procurement has been notified.")
+    return redirect(url_for("sitepulse_rentals_list"))
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/vendor-contacted", methods=["POST"])
+@login_required
+def sitepulse_rental_swap_vendor_contacted(rental_id, swap_id):
+    if not _authorized("action:sitepulse:place_order"):
+        flash("You don't have permission to coordinate rental vendors.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db = get_db()
+    swap = db.execute("SELECT * FROM sitepulse_rental_swaps WHERE id = ? AND rental_id = ?", (swap_id, rental_id)).fetchone()
+    if not swap:
+        flash("Swap record not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    if swap["status"] != "Requested":
+        flash(f"Cannot mark Vendor Contacted -- this swap is currently '{swap['status']}'.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    now = datetime.utcnow().isoformat()
+    contacter = current_user.name or current_user.email
+    db.execute(
+        "UPDATE sitepulse_rental_swaps SET status='Vendor Contacted', vendor_contacted_at=?, vendor_contacted_by=?, updated_at=? WHERE id=?",
+        (now, contacter, now, swap_id)
+    )
+    log_activity("sitepulse", "rental_swap", swap_id, "vendor_contacted", field="status",
+                 old_value="Requested", new_value="Vendor Contacted")
+    db.commit()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    _rental_notify(
+        f"☎️ Vendor contacted for rental swap\n"
+        f"Equipment: {swap['outgoing_equipment_description']}\n"
+        f"Project: {r['job_name'] if r else '—'}\n"
+        f"By: {contacter}",
+        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
+    flash("Marked Vendor Contacted.")
+    return redirect(url_for("sitepulse_rentals_list"))
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/scheduled", methods=["POST"])
+@login_required
+def sitepulse_rental_swap_scheduled(rental_id, swap_id):
+    if not _authorized("action:sitepulse:place_order"):
+        flash("You don't have permission to coordinate rental vendors.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db = get_db()
+    swap = db.execute("SELECT * FROM sitepulse_rental_swaps WHERE id = ? AND rental_id = ?", (swap_id, rental_id)).fetchone()
+    if not swap:
+        flash("Swap record not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    # FAIL CLOSED: cannot schedule before vendor coordination happened.
+    if swap["status"] != "Vendor Contacted":
+        flash(f"Cannot schedule -- vendor must be contacted first (current status: '{swap['status']}').", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    scheduled_date = (request.form.get("scheduled_date") or "").strip()
+    if not scheduled_date:
+        flash("A scheduled date is required.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    now = datetime.utcnow().isoformat()
+    scheduler = current_user.name or current_user.email
+    db.execute(
+        "UPDATE sitepulse_rental_swaps SET status='Scheduled', scheduled_date=?, scheduled_by=?, updated_at=? WHERE id=?",
+        (scheduled_date, scheduler, now, swap_id)
+    )
+    log_activity("sitepulse", "rental_swap", swap_id, "scheduled", field="status",
+                 old_value="Vendor Contacted", new_value="Scheduled")
+    db.commit()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    _rental_notify(
+        f"📅 Swap scheduled\n"
+        f"Equipment: {swap['outgoing_equipment_description']}\n"
+        f"Project: {r['job_name'] if r else '—'}\n"
+        f"Scheduled date: {scheduled_date}\n"
+        f"By: {scheduler}",
+        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
+    flash("Swap scheduled.")
+    return redirect(url_for("sitepulse_rentals_list"))
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/complete", methods=["POST"])
+@login_required
+def sitepulse_rental_swap_complete(rental_id, swap_id):
+    if not _authorized("action:equipment_center:manage"):
+        flash("You don't have permission to make changes in Equipment Center.", "error")
+        return redirect(url_for("sitepulse_dashboard"))
+    db = get_db()
+    swap = db.execute("SELECT * FROM sitepulse_rental_swaps WHERE id = ? AND rental_id = ?", (swap_id, rental_id)).fetchone()
+    if not swap:
+        flash("Swap record not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    # FAIL CLOSED: cannot complete an already-completed swap, and
+    # (per the approved workflow) completion follows scheduling.
+    if swap["status"] == "Completed":
+        flash("This swap has already been completed.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    if swap["status"] != "Scheduled":
+        flash(f"Cannot complete -- this swap must be Scheduled first (current status: '{swap['status']}').", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    incoming = (request.form.get("incoming_equipment_description") or "").strip()
+    if not incoming:
+        flash("The replacement equipment description is required to complete the exchange.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    now = datetime.utcnow().isoformat()
+    completer = current_user.name or current_user.email
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    if not r:
+        flash("Rental not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    # The parent rental's CURRENT equipment_description updates to the
+    # replacement -- but the outgoing/incoming pair on THIS swap row is
+    # never touched again after this, permanently preserving the exact
+    # chain (original -> swap 1 -> swap 2 -> ...) regardless of how many
+    # further swaps happen later.
+    db.execute(
+        "UPDATE sitepulse_rental_swaps SET status='Completed', incoming_equipment_description=?, completed_at=?, completed_by=?, updated_at=? WHERE id=?",
+        (incoming, now, completer, now, swap_id)
+    )
+    db.execute("UPDATE sitepulse_rentals SET equipment_description=?, updated_at=? WHERE id=?",
+               (incoming, now, rental_id))
+    log_activity("sitepulse", "rental_swap", swap_id, "completed", field="status",
+                 old_value="Scheduled", new_value="Completed")
+    log_activity("sitepulse", "rental", rental_id, "updated", field="equipment_description",
+                 old_value=swap["outgoing_equipment_description"], new_value=incoming)
+    db.commit()
+    _rental_notify(
+        f"✅ Replacement received -- exchange complete\n"
+        f"Project: {r['job_name'] or '—'}\n"
+        f"Outgoing: {swap['outgoing_equipment_description']}\n"
+        f"Incoming: {incoming}\n"
+        f"Completed by: {completer}",
+        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+    )
+    flash("Exchange completed -- rental continues with the replacement equipment.")
+    return redirect(url_for("sitepulse_rentals_list"))
+
+
+@app.route("/sitepulse/rentals/<int:rental_id>/activity")
+@login_required
+def sitepulse_rental_activity_log(rental_id):
+    """Per-rental history view -- direct reuse of the existing
+    sitepulse/asset/<id>/activity pattern and the shared activity_log.html
+    template, not a second audit framework. Includes both the rental's
+    own activity_log rows (entity_type='rental') and every swap event
+    that ever belonged to it (entity_type='rental_swap'), so the full
+    lifecycle -- created/edited/swap requested/vendor contacted/
+    scheduled/completed/returned/reopened -- reconstructs in one place,
+    in order."""
+    if not _authorized("action:activity_log:view"):
+        flash("Not authorized.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    db = get_db()
+    r = db.execute("SELECT * FROM sitepulse_rentals WHERE id = ?", (rental_id,)).fetchone()
+    if not r:
+        flash("Rental not found.", "error")
+        return redirect(url_for("sitepulse_rentals_list"))
+    swap_ids = [row["id"] for row in db.execute("SELECT id FROM sitepulse_rental_swaps WHERE rental_id = ?", (rental_id,)).fetchall()]
+    if swap_ids:
+        placeholders = ",".join("?" * len(swap_ids))
+        entries = db.execute(
+            f"""SELECT * FROM activity_log
+                WHERE (section='sitepulse' AND entity_type='rental' AND entity_id = ?)
+                   OR (section='sitepulse' AND entity_type='rental_swap' AND entity_id IN ({placeholders}))
+                ORDER BY created_at DESC""",
+            (rental_id, *swap_ids)
+        ).fetchall()
+    else:
+        entries = db.execute(
+            "SELECT * FROM activity_log WHERE section='sitepulse' AND entity_type='rental' AND entity_id = ? ORDER BY created_at DESC",
+            (rental_id,)
+        ).fetchall()
+    return render_template("sitepulse/activity_log.html", entries=entries, record_name=r["equipment_description"])
+
+
+@app.route("/sitepulse/procurement/rental-swaps")
+@login_required
+def sitepulse_procurement_rental_swaps():
+    """Procurement's rental-swap coordination queue -- reads the SAME
+    sitepulse_rental_swaps records the Equipment Center lifecycle owns;
+    this is a VIEW into that one source of truth, never a second table
+    or a duplicated rental record (CTO decision #1/#5)."""
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    rows = db.execute(
+        """SELECT sw.*, r.equipment_description AS current_equipment, r.job_name, r.vendor
+           FROM sitepulse_rental_swaps sw
+           JOIN sitepulse_rentals r ON r.id = sw.rental_id
+           WHERE sw.status != 'Completed'
+           ORDER BY sw.requested_at ASC"""
+    ).fetchall()
+    return render_template("sitepulse/rental_swap_queue.html", swaps=rows, has_place_order_access=_authorized("action:sitepulse:place_order"))
 
 
 @app.route("/sitepulse/rentals/<int:rental_id>/delete", methods=["POST"])
@@ -2590,30 +3016,163 @@ def inventory_delete_material(material_id):
 
 
 def send_due_concrete_reminders():
-    """The day before a scheduled pour, send the full order details (the
-    same notification the old immediate-on-schedule message used to be).
-    No cron here -- same pattern as apply_due_scheduled_moves: check for
-    anything due whenever the concrete list page loads, and send it once.
+    """Legacy entry point -- unchanged name/signature so the existing
+    GET /inventory/concrete call site keeps working exactly as before.
+    Delegates entirely to process_due_concrete_reminders(), the single
+    reusable processor also invoked by the new scheduled command (see
+    scripts/run_concrete_reminders.py) -- there is deliberately no
+    second implementation of the reminder logic."""
+    process_due_concrete_reminders()
+
+
+_CONCRETE_REMINDER_CLAIM_TIMEOUT_SECONDS = 300  # 5 minutes -- long enough to cover a real WhatsApp call, short enough to recover quickly if a claiming process dies
+
+
+def _concrete_scheduled_pour_datetime_houston(r):
+    """The authoritative scheduled pour date/time as a real
+    America/Chicago-aware datetime, using the EXACT SAME time-field
+    precedence already proven correct in the existing order
+    notification (build_concrete_order_notification): confirmed
+    concrete_arrival_time wins over the originally requested pour_time
+    when both exist. No new time field is introduced. Returns None if
+    there's no usable date/time to compute from (defensive -- a
+    'Scheduled' row should always have both, but this must never crash
+    the batch if one is somehow missing/malformed)."""
+    if not r["pour_date"]:
+        return None
+    time_str = r["concrete_arrival_time"] or r["pour_time"]
+    if not time_str:
+        return None
+    try:
+        pour_date = datetime.strptime(r["pour_date"], "%Y-%m-%d").date()
+        pour_time = datetime.strptime(time_str, "%H:%M").time()
+    except ValueError:
+        return None
+    return datetime.combine(pour_date, pour_time, tzinfo=ZoneInfo("America/Chicago"))
+
+
+def process_due_concrete_reminders():
+    """THE single reusable Concrete reminder processor. Callable from
+    (A) the existing GET /inventory/concrete page-load path (temporary
+    backup, per CTO decision, until Railway Cron is confirmed reliable
+    in production) via send_due_concrete_reminders() above, and (B) the
+    short-lived scheduled command (scripts/run_concrete_reminders.py).
+
+    TIMING SEMANTICS: reminder_due_at is the scheduled pour's own
+    date/time (Houston-local, via _concrete_scheduled_pour_datetime_houston
+    above) minus exactly one day -- e.g. a 7:00 AM Sep 11 pour is due for
+    reminder at 7:00 AM Sep 10, not merely "sometime the day before."
+    Eligibility is `now >= reminder_due_at AND now < pour_datetime` --
+    an OPEN WINDOW, not an exact-minute match, specifically so an hourly
+    (or delayed/recovering) scheduler still sends a correct, on-time-ish
+    reminder rather than missing it by running a few minutes late. Once
+    the pour itself has passed, the window closes -- a stale reminder is
+    never sent after the fact.
+
+    ATOMIC CLAIM (the concurrency fix): a single `UPDATE ... WHERE
+    full_reminder_sent_at IS NULL AND (reminder_claimed_at IS NULL OR
+    reminder_claimed_at <= <stale threshold>)` is SQLite's own atomic
+    unit of work -- exactly one concurrent caller can ever have this
+    statement's WHERE clause match a given row and update it; every
+    other simultaneous caller's identical UPDATE simply matches zero
+    rows for that id (checked via rowcount). The claim happens and is
+    committed BEFORE any WhatsApp call, and the WhatsApp attempt
+    happens only after successfully winning it. This is committed
+    immediately (not batched) precisely so a concurrently-running
+    second process sees the claim right away, not just once this whole
+    batch finishes.
+
+    RECOVERY: on send failure, the claim is cleared immediately (not
+    left to expire) so the very next run can retry without waiting out
+    the staleness window. If a process dies after claiming but before
+    it can clear/finalize anything, the claim remains stale until
+    _CONCRETE_REMINDER_CLAIM_TIMEOUT_SECONDS has passed, after which
+    any later run's claim UPDATE can win it again.
+
+    SUCCESS-ONLY MARKING: full_reminder_sent_at is set ONLY when
+    send_whatsapp_group_message actually reports success -- never
+    overloaded as a pre-send claim; a claim and a successful send are
+    two genuinely different facts, tracked by two different columns.
+
+    SAFE LOGGING: on failure, this logs only the record id and a fixed
+    generic failure label -- never the WhatsApp helper's raw `detail`
+    string, which (via requests' own exception string representations)
+    can include the Ultramsg request URL and therefore the configured
+    instance ID. No token, instance ID, URL, or raw provider/exception
+    text is ever included here.
+
+    ONE FAILURE DOES NOT BLOCK OTHERS: each due record's claim+send is
+    independent and wrapped in its own try/except.
+
+    Returns {"due": <int>, "sent": <int>, "failed": <int>}.
     """
     db = get_db()
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    due = db.execute(
-        "SELECT * FROM inventory_concrete_requests WHERE status = 'Scheduled' AND pour_date = ? "
-        "AND (full_reminder_sent_at IS NULL OR full_reminder_sent_at = '')",
-        (tomorrow,)
+    houston_now = datetime.now(ZoneInfo("America/Chicago"))
+    stale_before = (houston_now - timedelta(seconds=_CONCRETE_REMINDER_CLAIM_TIMEOUT_SECONDS)).isoformat()
+
+    candidates = db.execute(
+        "SELECT * FROM inventory_concrete_requests WHERE status = 'Scheduled' "
+        "AND (full_reminder_sent_at IS NULL OR full_reminder_sent_at = '')"
     ).fetchall()
-    for r in due:
-        order_chat_id = whatsapp_chat_id_for_site(r["project"], r["job_site_address"])
-        send_whatsapp_group_message(
-            "📋 Tomorrow's concrete order:\n\n" + build_concrete_order_notification(r),
-            chat_id=order_chat_id
-        )
-        db.execute(
-            "UPDATE inventory_concrete_requests SET full_reminder_sent_at = ? WHERE id = ?",
-            (datetime.utcnow().isoformat(), r["id"])
-        )
-    if due:
-        db.commit()
+
+    due_count = 0
+    sent_count = 0
+    failed_count = 0
+    for r in candidates:
+        pour_dt = _concrete_scheduled_pour_datetime_houston(r)
+        if pour_dt is None:
+            continue
+        reminder_due_at = pour_dt - timedelta(days=1)
+        if not (houston_now >= reminder_due_at and houston_now < pour_dt):
+            continue
+        due_count += 1
+
+        try:
+            claim_time = datetime.utcnow().isoformat()
+            cur = db.execute(
+                "UPDATE inventory_concrete_requests SET reminder_claimed_at = ? "
+                "WHERE id = ? AND (full_reminder_sent_at IS NULL OR full_reminder_sent_at = '') "
+                "AND (reminder_claimed_at IS NULL OR reminder_claimed_at = '' OR reminder_claimed_at <= ?)",
+                (claim_time, r["id"], stale_before)
+            )
+            db.commit()
+            if cur.rowcount != 1:
+                # Another concurrent caller already holds a live claim
+                # on this exact record (or it was already sent between
+                # our SELECT and this UPDATE) -- this is not a failure,
+                # it's correctly losing a race. Skip it entirely; the
+                # claim-holder is responsible for it.
+                continue
+
+            order_chat_id = whatsapp_chat_id_for_site(r["project"], r["job_site_address"])
+            ok, detail = send_whatsapp_group_message(
+                "📋 Tomorrow's concrete order:\n\n" + build_concrete_order_notification(r),
+                chat_id=order_chat_id
+            )
+            if ok:
+                db.execute(
+                    "UPDATE inventory_concrete_requests SET full_reminder_sent_at = ?, reminder_claimed_at = NULL WHERE id = ?",
+                    (datetime.utcnow().isoformat(), r["id"])
+                )
+                db.commit()
+                sent_count += 1
+            else:
+                # Failure -- release the claim immediately (rather than
+                # waiting for the staleness timeout) so the very next
+                # run can retry right away. full_reminder_sent_at stays
+                # unset. Never log the raw detail string.
+                db.execute("UPDATE inventory_concrete_requests SET reminder_claimed_at = NULL WHERE id = ?", (r["id"],))
+                db.commit()
+                print(f"[concrete-reminder] send failed for request id={r['id']} -- will retry on next run")
+                failed_count += 1
+        except Exception:
+            # One record's unexpected failure must never stop the rest
+            # of the batch. Leave the claim as-is here (rather than
+            # guessing at recovery mid-exception) -- it will safely
+            # become retryable once the staleness timeout passes.
+            print(f"[concrete-reminder] unexpected error processing request id={r['id']} -- will retry once its claim goes stale")
+            failed_count += 1
+    return {"due": due_count, "sent": sent_count, "failed": failed_count}
 
 
 @app.route("/inventory/concrete")

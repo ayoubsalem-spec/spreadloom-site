@@ -1,0 +1,34 @@
+{% extends "sitepulse/base.html" %}
+{% block content %}
+<h1>Edit Rental</h1>
+<div class="card">
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label>Equipment</label>
+        <input type="text" name="equipment_description" value="{{ r['equipment_description'] }}" required autofocus>
+        <label>Vendor</label>
+        <input type="text" name="vendor" value="{{ r['vendor'] }}" required>
+        <label>Job / Site</label>
+        <input type="text" name="job_name" value="{{ r['job_name'] or '' }}">
+        <div class="form-row">
+            <div style="flex:1;"><label>Rate</label><input type="text" name="rate_amount" value="{{ r['rate_amount'] or '' }}"></div>
+            <div style="flex:1;">
+                <label>Rate Period</label>
+                <select name="rate_period">
+                    <option value="Daily" {{ 'selected' if r['rate_period']=='Daily' }}>Daily</option>
+                    <option value="Weekly" {{ 'selected' if r['rate_period']=='Weekly' }}>Weekly</option>
+                    <option value="Monthly" {{ 'selected' if r['rate_period']=='Monthly' }}>Monthly</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Rented Date</label><input type="date" name="rented_date" value="{{ r['rented_date'] }}" required></div>
+            <div style="flex:1;"><label>Due Back</label><input type="date" name="due_date" value="{{ r['due_date'] or '' }}"></div>
+        </div>
+        <label>Notes</label>
+        <input type="text" name="notes" value="{{ r['notes'] or '' }}">
+        <button type="submit" class="btn btn-gold">Save Changes</button>
+        <a href="{{ url_for('sitepulse_rentals_list') }}" class="btn btn-sm">Cancel</a>
+    </form>
+</div>
+{% endblock %}

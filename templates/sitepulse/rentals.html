@@ -47,17 +47,63 @@
             </td>
             <td>{% if r['running_cost'] is not none %}${{ "%.2f"|format(r['running_cost']) }} ({{ r['days_out'] }}d){% else %}&mdash;{% endif %}</td>
             <td style="white-space:nowrap;">
-                {% if r['rental_status'] != 'Returned' %}
+                <a href="{{ url_for('sitepulse_rental_activity_log', rental_id=r['id']) }}" class="btn btn-sm">History</a>
+                {% if r['rental_status'] == 'Returned' %}
+                <form method="POST" action="{{ url_for('sitepulse_reopen_rental', rental_id=r['id']) }}" style="display:inline;" onsubmit="return promptReopenReason(this);">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="reason" value="">
+                    <button type="submit" class="btn btn-sm">Reopen</button>
+                </form>
+                {% else %}
+                <a href="{{ url_for('sitepulse_edit_rental', rental_id=r['id']) }}" class="btn btn-sm">Edit</a>
+                {% if r['open_swap'] %}
+                    {% if r['open_swap']['status'] == 'Scheduled' %}
+                    <form method="POST" action="{{ url_for('sitepulse_rental_swap_complete', rental_id=r['id'], swap_id=r['open_swap']['id']) }}" style="display:inline;" onsubmit="return promptCompleteExchange(this);">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="incoming_equipment_description" value="">
+                        <button type="submit" class="btn btn-sm">Complete Exchange</button>
+                    </form>
+                    {% else %}
+                    <span class="sub">Swap: {{ r['open_swap']['status'] }}</span>
+                    {% endif %}
+                {% else %}
+                <form method="POST" action="{{ url_for('sitepulse_rental_swap_request', rental_id=r['id']) }}" style="display:inline;" onsubmit="return promptSwapReason(this);">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="reason" value="">
+                    <button type="submit" class="btn btn-sm">Request Swap</button>
+                </form>
                 <form method="POST" action="{{ url_for('sitepulse_return_rental', rental_id=r['id']) }}" style="display:inline;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-sm">Mark Returned</button>
                 </form>
+                {% endif %}
                 {% endif %}
             </td>
         </tr>
         {% endfor %}
     </table>
 </div>
+
+<script>
+function promptSwapReason(form) {
+    var reason = prompt('Reason for swap/exchange (optional):', '');
+    if (reason === null) return false;
+    form.querySelector('input[name="reason"]').value = reason;
+    return true;
+}
+function promptCompleteExchange(form) {
+    var incoming = prompt('Replacement equipment description:', '');
+    if (!incoming) return false;
+    form.querySelector('input[name="incoming_equipment_description"]').value = incoming;
+    return true;
+}
+function promptReopenReason(form) {
+    var reason = prompt('Reason for reopening this rental:', '');
+    if (!reason) return false;
+    form.querySelector('input[name="reason"]').value = reason;
+    return true;
+}
+</script>
 
 <!-- MOBILE -->
 <div class="mobile-only">
@@ -78,11 +124,38 @@
             {% if r['rate_amount'] %}<span>Rate: ${{ r['rate_amount'] }}/{{ r['rate_period'] }}</span>{% endif %}
             {% if r['running_cost'] is not none %}<span>Cost so far: <strong style="color:var(--gold-light);">${{ "%.2f"|format(r['running_cost']) }}</strong> ({{ r['days_out'] }} days)</span>{% endif %}
         </div>
-        {% if r['rental_status'] != 'Returned' %}
-        <form method="POST" action="{{ url_for('sitepulse_return_rental', rental_id=r['id']) }}" style="margin-top:12px;">
+        {% if r['rental_status'] == 'Returned' %}
+        <form method="POST" action="{{ url_for('sitepulse_reopen_rental', rental_id=r['id']) }}" style="margin-top:12px;" onsubmit="return promptReopenReason(this);">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm" style="min-height:44px; width:100%;">Mark Returned</button>
+            <input type="hidden" name="reason" value="">
+            <button type="submit" class="btn btn-sm" style="min-height:44px; width:100%;">Reopen</button>
         </form>
+        {% else %}
+        <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap;">
+            <a href="{{ url_for('sitepulse_edit_rental', rental_id=r['id']) }}" class="btn btn-sm">Edit</a>
+            {% if r['open_swap'] %}
+                {% if r['open_swap']['status'] == 'Scheduled' %}
+                <form method="POST" action="{{ url_for('sitepulse_rental_swap_complete', rental_id=r['id'], swap_id=r['open_swap']['id']) }}" onsubmit="return promptCompleteExchange(this);">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="incoming_equipment_description" value="">
+                    <button type="submit" class="btn btn-sm">Complete Exchange</button>
+                </form>
+                {% else %}
+                <span class="sub" style="align-self:center;">Swap: {{ r['open_swap']['status'] }}</span>
+                {% endif %}
+            {% else %}
+            <form method="POST" action="{{ url_for('sitepulse_rental_swap_request', rental_id=r['id']) }}" onsubmit="return promptSwapReason(this);">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="reason" value="">
+                <button type="submit" class="btn btn-sm">Request Swap</button>
+            </form>
+            <form method="POST" action="{{ url_for('sitepulse_return_rental', rental_id=r['id']) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="btn btn-sm">Mark Returned</button>
+            </form>
+            {% endif %}
+            <a href="{{ url_for('sitepulse_rental_activity_log', rental_id=r['id']) }}" class="btn btn-sm">History</a>
+        </div>
         {% endif %}
     </div>
     {% endfor %}
