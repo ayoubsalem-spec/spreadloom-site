@@ -2556,6 +2556,22 @@ def _rental_notify(text, chat_id=None):
         print(f"[whatsapp] rental lifecycle notification failed (non-fatal, lifecycle transition already committed): {e}")
 
 
+def _rental_whatsapp_chat_id(db, rental):
+    """Route Outside Rental lifecycle notifications through the existing
+    WhatsApp Site Groups matcher. Match against the rental's free-text
+    job/site plus the canonical linked Project Hunt project name when one
+    exists. No separate rental routing table or hardcoded site names.
+    Falls back exactly like other SitePulse/equipment notifications.
+    """
+    project_name = ""
+    project_id = rental["project_id"]
+    if project_id:
+        project = db.execute("SELECT name FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+        if project:
+            project_name = project["name"] or ""
+    return whatsapp_chat_id_for_site(rental["job_name"], project_name) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+
+
 @app.route("/sitepulse/rentals/<int:rental_id>/return", methods=["POST"])
 @login_required
 def sitepulse_return_rental(rental_id):
@@ -2589,7 +2605,7 @@ def sitepulse_return_rental(rental_id):
         f"Equipment: {r['equipment_description']}\n"
         f"Project: {r['job_name'] or '—'}\n"
         f"Returned by: {current_user.name or current_user.email}",
-        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Rental marked returned.")
     return redirect(url_for("sitepulse_rentals_list"))
@@ -2633,7 +2649,7 @@ def sitepulse_reopen_rental(rental_id):
         f"Equipment: {r['equipment_description']}\n"
         f"Reason: {reason}\n"
         f"Reopened by: {current_user.name or current_user.email}",
-        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Rental reopened.")
     return redirect(url_for("sitepulse_rentals_list"))
@@ -2731,7 +2747,7 @@ def sitepulse_rental_swap_request(rental_id):
         f"Outgoing equipment: {r['equipment_description']}\n"
         f"Reason: {reason or '—'}\n"
         f"Requested by: {requester}",
-        chat_id=ULTRAMSG_GROUP_CHAT_ID
+        chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Swap/exchange requested -- Procurement has been notified.")
     return redirect(url_for("sitepulse_rentals_list"))
@@ -2766,7 +2782,7 @@ def sitepulse_rental_swap_vendor_contacted(rental_id, swap_id):
         f"Equipment: {swap['outgoing_equipment_description']}\n"
         f"Project: {r['job_name'] if r else '—'}\n"
         f"By: {contacter}",
-        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Marked Vendor Contacted.")
     return redirect(url_for("sitepulse_rentals_list"))
@@ -2807,7 +2823,7 @@ def sitepulse_rental_swap_scheduled(rental_id, swap_id):
         f"Project: {r['job_name'] if r else '—'}\n"
         f"Scheduled date: {scheduled_date}\n"
         f"By: {scheduler}",
-        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Swap scheduled.")
     return redirect(url_for("sitepulse_rentals_list"))
@@ -2864,7 +2880,7 @@ def sitepulse_rental_swap_complete(rental_id, swap_id):
         f"Outgoing: {swap['outgoing_equipment_description']}\n"
         f"Incoming: {incoming}\n"
         f"Completed by: {completer}",
-        chat_id=ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Exchange completed -- rental continues with the replacement equipment.")
     return redirect(url_for("sitepulse_rentals_list"))

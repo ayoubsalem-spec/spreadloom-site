@@ -80,10 +80,10 @@ def main():
     db.execute("DELETE FROM sitepulse_rentals WHERE equipment_description LIKE '__RentalTest%'")
     db.commit()
 
-    def make_rental(vendor="Vendor Co", equipment="__RentalTest Skid Steer", rented_date="2026-09-01", due_date=None, returned_date=None):
+    def make_rental(vendor="Vendor Co", equipment="__RentalTest Skid Steer", rented_date="2026-09-01", due_date=None, returned_date=None, job_name="Test Job", project_id=None):
         cur = db.execute(
-            "INSERT INTO sitepulse_rentals (vendor, equipment_description, job_name, rate_amount, rate_period, rented_date, due_date, returned_date, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (vendor, equipment, "Test Job", "100", "Daily", rented_date, due_date, returned_date, now, now)
+            "INSERT INTO sitepulse_rentals (vendor, equipment_description, job_name, project_id, rate_amount, rate_period, rented_date, due_date, returned_date, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (vendor, equipment, job_name, project_id, "100", "Daily", rented_date, due_date, returned_date, now, now)
         )
         db.commit()
         return cur.lastrowid
@@ -393,6 +393,95 @@ def main():
             login(no_activity_client, "__rental_noactivity@test.local", pw)
             resp_no_activity = no_activity_client.get(f"/sitepulse/rentals/{rid3}/activity", follow_redirects=True)
             check("user without action:activity_log:view is denied", "not authorized" in resp_no_activity.get_data(as_text=True).lower())
+
+        # ============================================================
+        # WhatsApp Site Groups routing for Outside Rental lifecycle
+        # ============================================================
+        print()
+        print("=== Outside Rental notifications use existing WhatsApp Site Groups routing ===")
+        db.execute("DELETE FROM whatsapp_site_groups WHERE keyword IN ('Peninsula','Bellaire')")
+        db.execute("INSERT INTO whatsapp_site_groups (keyword, chat_id, created_at) VALUES (?,?,?)",
+                   ("Peninsula", "__PENINSULA_CHAT__", now))
+        db.execute("INSERT INTO whatsapp_site_groups (keyword, chat_id, created_at) VALUES (?,?,?)",
+                   ("Bellaire", "__BELLAIRE_CHAT__", now))
+        project_cur = db.execute(
+            "INSERT INTO tracker_projects (name, client, status, created_at, updated_at) VALUES (?,?,?,?,?)",
+            ("Peninsula Test Project", "__RentalTest Client", "In Progress", now, now)
+        )
+        peninsula_project_id = project_cur.lastrowid
+        db.commit()
+
+        # Direct routing checks: free-text job/site, case-insensitivity, linked
+        # Project Hunt project name, and existing SitePulse fallback behavior.
+        rid_route_job = make_rental(equipment="__RentalTest RouteJob", job_name="pEnInSuLa field office")
+        route_job_row = db.execute("SELECT * FROM sitepulse_rentals WHERE id=?", (rid_route_job,)).fetchone()
+        check("site routing: case-insensitive Peninsula job/site -> Peninsula group",
+              appmod._rental_whatsapp_chat_id(db, route_job_row) == "__PENINSULA_CHAT__")
+
+        rid_route_linked = make_rental(equipment="__RentalTest RouteLinked", job_name="Generic field office", project_id=peninsula_project_id)
+        route_linked_row = db.execute("SELECT * FROM sitepulse_rentals WHERE id=?", (rid_route_linked,)).fetchone()
+        check("site routing: linked Project Hunt name -> Peninsula group even when free-text job lacks keyword",
+              appmod._rental_whatsapp_chat_id(db, route_linked_row) == "__PENINSULA_CHAT__")
+
+        rid_route_bellaire = make_rental(equipment="__RentalTest RouteBellaire", job_name="Bellaire")
+        route_bellaire_row = db.execute("SELECT * FROM sitepulse_rentals WHERE id=?", (rid_route_bellaire,)).fetchone()
+        check("site routing: Bellaire job/site -> Bellaire group",
+              appmod._rental_whatsapp_chat_id(db, route_bellaire_row) == "__BELLAIRE_CHAT__")
+
+        old_sitepulse_default = appmod.ULTRAMSG_SITEPULSE_GROUP_CHAT_ID
+        appmod.ULTRAMSG_SITEPULSE_GROUP_CHAT_ID = "__DEFAULT_SITEPULSE_CHAT__"
+        try:
+            rid_route_none = make_rental(equipment="__RentalTest RouteFallback", job_name="Unmatched Site")
+            route_none_row = db.execute("SELECT * FROM sitepulse_rentals WHERE id=?", (rid_route_none,)).fetchone()
+            check("site routing: no keyword match -> existing default SitePulse group",
+                  appmod._rental_whatsapp_chat_id(db, route_none_row) == "__DEFAULT_SITEPULSE_CHAT__")
+        finally:
+            appmod.ULTRAMSG_SITEPULSE_GROUP_CHAT_ID = old_sitepulse_default
+
+        # End-to-end lifecycle: every one of the six new rental notifications
+        # must resolve through the same existing site-group matcher.
+        rid_route_flow = make_rental(equipment="__RentalTest RouteFlow", job_name="Peninsula - Building A")
+        routed_calls = []
+        def capture_rental_whatsapp(text, chat_id=None):
+            routed_calls.append((text, chat_id))
+            return True, "ok"
+
+        with patch("app.send_whatsapp_group_message", side_effect=capture_rental_whatsapp):
+            token = get_csrf(equip_client, "/sitepulse/rentals")
+            equip_client.post(f"/sitepulse/rentals/{rid_route_flow}/swap/request",
+                              data={"csrf_token": token, "reason": "Routing test"})
+            route_swap = db.execute("SELECT * FROM sitepulse_rental_swaps WHERE rental_id=?", (rid_route_flow,)).fetchone()
+
+            token = get_csrf(proc_client, "/sitepulse/procurement/rental-swaps")
+            proc_client.post(f"/sitepulse/rentals/{rid_route_flow}/swap/{route_swap['id']}/vendor-contacted",
+                             data={"csrf_token": token})
+
+            token = get_csrf(proc_client, "/sitepulse/procurement/rental-swaps")
+            proc_client.post(f"/sitepulse/rentals/{rid_route_flow}/swap/{route_swap['id']}/scheduled",
+                             data={"csrf_token": token, "scheduled_date": "2026-09-25"})
+
+            token = get_csrf(equip_client, "/sitepulse/rentals")
+            equip_client.post(f"/sitepulse/rentals/{rid_route_flow}/swap/{route_swap['id']}/complete",
+                              data={"csrf_token": token, "incoming_equipment_description": "__RentalTest RouteReplacement"})
+
+            token = get_csrf(equip_client, "/sitepulse/rentals")
+            equip_client.post(f"/sitepulse/rentals/{rid_route_flow}/return", data={"csrf_token": token})
+
+            token = get_csrf(equip_client, "/sitepulse/rentals")
+            equip_client.post(f"/sitepulse/rentals/{rid_route_flow}/reopen",
+                              data={"csrf_token": token, "reason": "Routing reopen test"})
+
+        check("site routing: all six rental lifecycle notifications fired", len(routed_calls) == 6)
+        check("site routing: Swap Requested -> Peninsula group", len(routed_calls) >= 1 and routed_calls[0][1] == "__PENINSULA_CHAT__")
+        check("site routing: Vendor Contacted -> Peninsula group", len(routed_calls) >= 2 and routed_calls[1][1] == "__PENINSULA_CHAT__")
+        check("site routing: Swap Scheduled -> Peninsula group", len(routed_calls) >= 3 and routed_calls[2][1] == "__PENINSULA_CHAT__")
+        check("site routing: Replacement Received -> Peninsula group", len(routed_calls) >= 4 and routed_calls[3][1] == "__PENINSULA_CHAT__")
+        check("site routing: Return -> Peninsula group", len(routed_calls) >= 5 and routed_calls[4][1] == "__PENINSULA_CHAT__")
+        check("site routing: Reopen -> Peninsula group", len(routed_calls) >= 6 and routed_calls[5][1] == "__PENINSULA_CHAT__")
+
+        db.execute("DELETE FROM whatsapp_site_groups WHERE keyword IN ('Peninsula','Bellaire')")
+        db.execute("DELETE FROM tracker_projects WHERE id=?", (peninsula_project_id,))
+        db.commit()
 
         # ============================================================
         # WhatsApp failure behavior -- RELEASE-BLOCKER FIX VERIFICATION
