@@ -912,6 +912,26 @@ def _seed_roles_and_permissions(db):
             if perm_row:
                 db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (role_id, perm_row[0]))
 
+    # Narrow, one-time backfill: Project Deployment introduced two brand
+    # new permission keys after every existing role had already been
+    # seeded once, so the "only wire up permissions the first time a
+    # role is seeded" rule above correctly skipped them everywhere --
+    # meaning even a true Administrator got silently locked out of a
+    # feature they should always have, with no way to self-grant it
+    # (the Permissions Center explicitly blocks editing your own
+    # permissions). This grants ONLY these two specific keys to ONLY
+    # the Administrator role, via INSERT OR IGNORE -- it never touches
+    # any other role, never touches any other permission, and never
+    # overwrites a hand-edited grant/deny anywhere. Safe to leave in
+    # permanently; once granted, INSERT OR IGNORE makes every
+    # subsequent restart a no-op.
+    admin_role = db.execute("SELECT id FROM roles WHERE name = 'Administrator'").fetchone()
+    if admin_role:
+        for key in ("module:project_deployment:view", "action:project_deployment:manage"):
+            perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
+            if perm_row:
+                db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (admin_role[0], perm_row[0]))
+
 
 def _grant_administrator_new_permissions(db, keys):
     """_seed_roles_and_permissions only wires up a role's permissions the
