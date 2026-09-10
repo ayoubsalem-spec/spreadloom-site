@@ -118,8 +118,8 @@ def main():
         check("all 10 tools registered including set_project_context",
               "set_project_context" in appmod.ATLAS_TOOLS)
         tool = appmod.ATLAS_TOOLS["set_project_context"]
-        check("set_project_context uses a read-level permission (module:project_hunt:view)",
-              tool.permission == "module:project_hunt:view")
+        check("set_project_context uses read-level module permission alternatives (Project Hunt, Equipment Center, or SitePulse -- any one satisfies it, per the module-authorization fix)",
+              tool.permission == ("module:project_hunt:view", "module:equipment_center:view", "module:sitepulse:view"))
         check("set_project_context is classified as a read tool (no DB mutation, no write-confirmation gate)",
               tool.kind == "read")
 

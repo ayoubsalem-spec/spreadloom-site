@@ -1,0 +1,109 @@
+{# Shared Purchase Request item-rows partial (hotfix: data-truth + mobile UX).
+
+   Used by BOTH new_purchase_request.html and edit_purchase_request.html so
+   the fix lives at the correct shared level, not duplicated in two places
+   that could drift apart again.
+
+   Renders ONE row/card per item already in `items` (real saved rows on
+   Edit, empty list on Create), plus a "+ Add Item" control that clones a
+   blank row/card via a tiny bit of vanilla JS -- no fixed stack of 9 blank
+   rows, and no artificial limit on how many can be added.
+
+   Desktop/tablet (>640px): compact horizontal row, same information
+   density as before.
+   Mobile (<=640px): each item becomes a stacked card -- Description,
+   Supplier, Quantity, Unit each get their own full-width labeled field,
+   so nothing is ever visually clipped/unreadable regardless of how long a
+   value is. This is purely a presentation change: every input still uses
+   the exact same name="...[]" attributes the existing save handler (in
+   app.py, unchanged) already reads via request.form.getlist(...), so
+   nothing about how a submission is processed changes. #}
+<style>
+    .pr-items-list { display: flex; flex-direction: column; gap: 10px; }
+    .pr-item-row { display: grid; grid-template-columns: 28px 1.4fr 1.4fr 1fr 70px 90px 32px; gap: 8px; align-items: center; padding: 8px 10px; background: var(--surface-2); border-radius: 8px; }
+    .pr-item-row .pr-item-num { color: var(--text-faint); font-size: 12px; text-align: center; }
+    .pr-item-row input { width: 100%; min-width: 0; }
+    .pr-item-remove { background: none; border: none; color: var(--text-faint); cursor: pointer; font-size: 16px; line-height: 1; padding: 4px; }
+    .pr-item-remove:hover { color: #F87171; }
+    .pr-item-field-label { display: none; }
+    .pr-add-item-btn { margin-top: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; background: none; border: 1px dashed var(--line); color: var(--text-dim); border-radius: 8px; padding: 8px 14px; cursor: pointer; width: 100%; }
+    .pr-add-item-btn:hover { border-color: var(--gold); color: var(--gold); }
+
+    /* Desktop/tablet column headers -- same grid-template-columns as
+       .pr-item-row itself, so each header sits exactly above its
+       corresponding field. Hidden at mobile width (below), where the
+       inline .pr-item-field-label on each field already provides that
+       same context, so nothing is ever unlabeled at any width. */
+    .pr-items-header { display: grid; grid-template-columns: 28px 1.4fr 1.4fr 1fr 70px 90px 32px; gap: 8px; padding: 0 10px; margin-bottom: 2px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+
+    /* Mobile: switch each row to a stacked, fully-labeled card -- every
+       field gets its own full-width line, so Quantity/Unit/Supplier can
+       never be clipped no matter how narrow the phone is. */
+    @media (max-width: 640px) {
+        .pr-items-header { display: none; }
+        .pr-item-row { grid-template-columns: 1fr; gap: 10px; position: relative; padding: 14px 12px; }
+        .pr-item-row .pr-item-num { position: absolute; top: 10px; right: 40px; text-align: right; }
+        .pr-item-field-label { display: block; font-size: 11px; color: var(--text-faint); margin-bottom: 3px; font-family: 'IBM Plex Mono', monospace; text-transform: uppercase; letter-spacing: 0.03em; }
+        .pr-item-row input { font-size: 16px; padding: 10px; } /* 16px avoids iOS auto-zoom-on-focus */
+        .pr-item-remove { position: absolute; top: 6px; right: 6px; }
+    }
+</style>
+
+<div class="pr-items-header" aria-hidden="true">
+    <div></div>
+    <div>Item</div>
+    <div>Description</div>
+    <div>Supplier</div>
+    <div>Qty</div>
+    <div>Unit</div>
+    <div></div>
+</div>
+<div class="pr-items-list" id="pr-items-list">
+    {% for it in items|default([]) %}
+    <div class="pr-item-row">
+        <div class="pr-item-num">{{ loop.index }}</div>
+        <div><span class="pr-item-field-label">Item</span><input type="text" name="item[]" value="{{ it['item'] if it else '' }}"></div>
+        <div><span class="pr-item-field-label">Description</span><input type="text" name="description[]" value="{{ it['description'] if it else '' }}"></div>
+        <div><span class="pr-item-field-label">Supplier</span><input type="text" name="supplier[]" value="{{ it['supplier'] if it else '' }}"></div>
+        <div><span class="pr-item-field-label">Qty</span><input type="text" name="qty[]" value="{{ it['qty'] if it else '' }}" inputmode="decimal"></div>
+        <div><span class="pr-item-field-label">Unit</span><input type="text" name="unit[]" value="{{ it['unit'] if it else '' }}" placeholder="e.g. roll, box, ea"></div>
+        <button type="button" class="pr-item-remove" onclick="this.closest('.pr-item-row').remove()" title="Remove item" aria-label="Remove item">&times;</button>
+    </div>
+    {% endfor %}
+    {% if not items|default([]) %}
+    <div class="pr-item-row">
+        <div class="pr-item-num">1</div>
+        <div><span class="pr-item-field-label">Item</span><input type="text" name="item[]"></div>
+        <div><span class="pr-item-field-label">Description</span><input type="text" name="description[]"></div>
+        <div><span class="pr-item-field-label">Supplier</span><input type="text" name="supplier[]"></div>
+        <div><span class="pr-item-field-label">Qty</span><input type="text" name="qty[]" inputmode="decimal"></div>
+        <div><span class="pr-item-field-label">Unit</span><input type="text" name="unit[]" placeholder="e.g. roll, box, ea"></div>
+        <button type="button" class="pr-item-remove" onclick="this.closest('.pr-item-row').remove()" title="Remove item" aria-label="Remove item">&times;</button>
+    </div>
+    {% endif %}
+</div>
+<button type="button" class="pr-add-item-btn" id="pr-add-item-btn">+ Add Item</button>
+
+<script>
+(function () {
+    var list = document.getElementById('pr-items-list');
+    var addBtn = document.getElementById('pr-add-item-btn');
+    if (!list || !addBtn) return;
+    addBtn.addEventListener('click', function () {
+        var row = document.createElement('div');
+        row.className = 'pr-item-row';
+        var count = list.querySelectorAll('.pr-item-row').length + 1;
+        row.innerHTML =
+            '<div class="pr-item-num">' + count + '</div>' +
+            '<div><span class="pr-item-field-label">Item</span><input type="text" name="item[]"></div>' +
+            '<div><span class="pr-item-field-label">Description</span><input type="text" name="description[]"></div>' +
+            '<div><span class="pr-item-field-label">Supplier</span><input type="text" name="supplier[]"></div>' +
+            '<div><span class="pr-item-field-label">Qty</span><input type="text" name="qty[]" inputmode="decimal"></div>' +
+            '<div><span class="pr-item-field-label">Unit</span><input type="text" name="unit[]" placeholder="e.g. roll, box, ea"></div>' +
+            '<button type="button" class="pr-item-remove" onclick="this.closest(\'.pr-item-row\').remove()" title="Remove item" aria-label="Remove item">&times;</button>';
+        list.appendChild(row);
+        var firstInput = row.querySelector('input');
+        if (firstInput) firstInput.focus();
+    });
+})();
+</script>

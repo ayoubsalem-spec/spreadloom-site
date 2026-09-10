@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<span class="rc-eyebrow">Project Deployment</span>
+<h1>Deployment Dashboard</h1>
+<p class="sub">Prepare awarded projects for field mobilization.</p>
+
+{% if awarded_without_deployment %}
+<div class="card">
+    <h3>Awarded projects not yet started</h3>
+    {% for p in awarded_without_deployment %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--line);">
+        <div>{{ p['name'] }} <span class="sub">{{ p['client'] or '' }}</span></div>
+        <form method="POST" action="{{ url_for('project_deployment_start', project_id=p['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-gold">Start Deployment</button>
+        </form>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="card" style="padding:0; overflow-x:auto; margin-top:16px;">
+    <table>
+        <tr><th>Project</th><th>Status</th><th>Readiness</th><th>Blocking</th><th>Start Date</th><th>Supervisor</th><th></th></tr>
+        {% for d in deployments %}
+        <tr>
+            <td>{{ d['project_name'] }}</td>
+            <td>{{ d['status'] }}</td>
+            <td>{{ d['readiness_percent'] }}%</td>
+            <td>{{ d['blocking_count'] }}</td>
+            <td>{{ d['start_date'] or '—' }}</td>
+            <td>{{ d['supervisor_name'] or '—' }}</td>
+            <td><a href="{{ url_for('project_deployment_detail', deployment_id=d['id']) }}" class="btn btn-sm">Open</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="sub">No deployments started yet.</td></tr>
+        {% endfor %}
+    </table>
+</div>
+{% endblock %}

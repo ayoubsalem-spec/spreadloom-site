@@ -612,6 +612,7 @@ def inject_permissions():
         # no legacy-list fallback. Backend remains the source of truth;
         # these only decide what's shown.
         "has_product_intelligence_access": _authorized("module:product_intelligence:view"),
+        "has_project_deployment_access": _authorized("module:project_deployment:view"),
         "has_team_admin_access": _authorized("module:team_admin:view"),
         "has_whatsapp_admin_access": is_whatsapp_admin(),
         "has_system_data_access": _authorized("action:system_data:manage"),
@@ -797,6 +798,7 @@ PERMISSION_CATALOG = [
     ("module:sitepulse:view", "module", "SitePulse"),
     ("module:product_intelligence:view", "module", "Product Intelligence"),
     ("module:atlas:view", "module", "Atlas"),
+    ("module:project_deployment:view", "module", "Project Deployment"),
     ("module:bidflow:view", "module", "BidFlow (not yet built)"),
     ("module:engineering:view", "module", "Engineering (not yet built)"),
     ("module:finance:view", "module", "Finance (not yet built)"),
@@ -804,6 +806,7 @@ PERMISSION_CATALOG = [
     # -- actions --
     ("action:project_hunt:manage", "action", "Manage Projects"),
     ("action:equipment_center:manage", "action", "Manage Equipment"),
+    ("action:project_deployment:manage", "action", "Manage Project Deployment"),
     ("action:sitepulse:manage", "action", "Manage SitePulse Requests"),
     ("action:sitepulse:place_order", "action", "Place Purchase Orders"),
     ("action:product_intelligence:manage", "action", "Manage Product Intelligence"),
@@ -1145,6 +1148,57 @@ def init_db():
             FOREIGN KEY (rental_id) REFERENCES sitepulse_rentals (id)
         );
 
+        -- PROJECT DEPLOYMENT (Release 1). Separate module, additive only --
+        -- never a required dependency for existing SitePulse/Concrete/
+        -- Purchase/Rental behavior (confirmed by inspection: none of those
+        -- ever query this table). One row per canonical project
+        -- (UNIQUE(project_id) prevents duplicates regardless of how many
+        -- times "Start Deployment" is clicked); the controlled checklist
+        -- items are a SEPARATE child table, never a generic key-value/EAV
+        -- structure -- item_code values come from a fixed Python constant
+        -- (DEPLOYMENT_ITEM_CODES), never user-defined.
+        CREATE TABLE IF NOT EXISTS project_deployments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'Not Started',
+            preconstruction_meeting_date TEXT,
+            job_description TEXT,
+            start_date TEXT,
+            expected_completion_date TEXT,
+            supervisor_name TEXT, supervisor_phone TEXT, supervisor_email TEXT,
+            client_contact_name TEXT, client_contact_phone TEXT, client_contact_email TEXT,
+            city_county TEXT, city_county_phone TEXT,
+            inspections_required_list TEXT,
+            working_hours TEXT,
+            site_access_points TEXT, parking_rules TEXT,
+            office_needed INTEGER DEFAULT 0,
+            storage_container_needed INTEGER DEFAULT 0,
+            dumpster_needed INTEGER DEFAULT 0, dumpster_size TEXT, dumpster_date TEXT,
+            toilets_needed INTEGER DEFAULT 0, toilets_qty TEXT, toilets_date TEXT,
+            fence_needed INTEGER DEFAULT 0, fence_linear_feet TEXT, fence_date TEXT,
+            started_by TEXT, started_at TEXT,
+            deployed_at TEXT,
+            created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (project_id) REFERENCES tracker_projects (id)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_deployment_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deployment_id INTEGER NOT NULL,
+            item_code TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Not Started',
+            applies INTEGER NOT NULL DEFAULT 1,
+            owner TEXT,
+            due_date TEXT,
+            notes TEXT,
+            completed_at TEXT, completed_by TEXT,
+            reopened_at TEXT, reopened_by TEXT,
+            override_reason TEXT, override_by TEXT, override_at TEXT,
+            created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (deployment_id) REFERENCES project_deployments (id),
+            UNIQUE(deployment_id, item_code)
+        );
+
         -- Site Inventory: concrete requests + material inventory, split out
         -- of SitePulse into their own section per today's direction.
         CREATE TABLE IF NOT EXISTS inventory_materials (
@@ -1473,6 +1527,11 @@ def init_db():
         # a fixed staleness timeout if the claiming process died before
         # it could clear or finalize the claim.
         "ALTER TABLE inventory_concrete_requests ADD COLUMN reminder_claimed_at TEXT",
+        # Project Deployment V1.2: correcting real gaps found against the
+        # actual company PROJECT_CHECKLIST.pdf audit -- these two columns
+        # were missing from the header form entirely.
+        "ALTER TABLE project_deployments ADD COLUMN job_description TEXT",
+        "ALTER TABLE project_deployments ADD COLUMN inspections_required_list TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
         # Phase 1: project identity columns (see project_link_review above).
@@ -1555,6 +1614,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_atlas_conversations_user ON atlas_conversations(user_id, updated_at)",
         "CREATE INDEX IF NOT EXISTS idx_atlas_messages_conversation ON atlas_messages(conversation_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_rental_swaps_rental ON sitepulse_rental_swaps(rental_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_deployment_items_deployment ON project_deployment_items(deployment_id, item_code)",
     ]:
         try:
             db.execute(index_sql)
@@ -2763,10 +2823,10 @@ def sitepulse_rental_swap_vendor_contacted(rental_id, swap_id):
     swap = db.execute("SELECT * FROM sitepulse_rental_swaps WHERE id = ? AND rental_id = ?", (swap_id, rental_id)).fetchone()
     if not swap:
         flash("Swap record not found.", "error")
-        return redirect(url_for("sitepulse_rentals_list"))
+        return redirect(url_for("sitepulse_procurement_rental_swaps"))
     if swap["status"] != "Requested":
         flash(f"Cannot mark Vendor Contacted -- this swap is currently '{swap['status']}'.", "error")
-        return redirect(url_for("sitepulse_rentals_list"))
+        return redirect(url_for("sitepulse_procurement_rental_swaps"))
     now = datetime.utcnow().isoformat()
     contacter = current_user.name or current_user.email
     db.execute(
@@ -2785,7 +2845,7 @@ def sitepulse_rental_swap_vendor_contacted(rental_id, swap_id):
         chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Marked Vendor Contacted.")
-    return redirect(url_for("sitepulse_rentals_list"))
+    return redirect(url_for("sitepulse_procurement_rental_swaps"))
 
 
 @app.route("/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/scheduled", methods=["POST"])
@@ -2798,15 +2858,15 @@ def sitepulse_rental_swap_scheduled(rental_id, swap_id):
     swap = db.execute("SELECT * FROM sitepulse_rental_swaps WHERE id = ? AND rental_id = ?", (swap_id, rental_id)).fetchone()
     if not swap:
         flash("Swap record not found.", "error")
-        return redirect(url_for("sitepulse_rentals_list"))
+        return redirect(url_for("sitepulse_procurement_rental_swaps"))
     # FAIL CLOSED: cannot schedule before vendor coordination happened.
     if swap["status"] != "Vendor Contacted":
         flash(f"Cannot schedule -- vendor must be contacted first (current status: '{swap['status']}').", "error")
-        return redirect(url_for("sitepulse_rentals_list"))
+        return redirect(url_for("sitepulse_procurement_rental_swaps"))
     scheduled_date = (request.form.get("scheduled_date") or "").strip()
     if not scheduled_date:
         flash("A scheduled date is required.", "error")
-        return redirect(url_for("sitepulse_rentals_list"))
+        return redirect(url_for("sitepulse_procurement_rental_swaps"))
     now = datetime.utcnow().isoformat()
     scheduler = current_user.name or current_user.email
     db.execute(
@@ -2826,7 +2886,7 @@ def sitepulse_rental_swap_scheduled(rental_id, swap_id):
         chat_id=_rental_whatsapp_chat_id(db, r)
     )
     flash("Swap scheduled.")
-    return redirect(url_for("sitepulse_rentals_list"))
+    return redirect(url_for("sitepulse_procurement_rental_swaps"))
 
 
 @app.route("/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/complete", methods=["POST"])
@@ -2921,6 +2981,401 @@ def sitepulse_rental_activity_log(rental_id):
             (rental_id,)
         ).fetchall()
     return render_template("sitepulse/activity_log.html", entries=entries, record_name=r["equipment_description"])
+
+
+def _deployment_readiness(db, deployment_id):
+    """Computes readiness using ONLY the readiness_scored items whose
+    applies=1 -- non-readiness/informational items never distort this
+    percentage (Clarification #2), and a conditional item that doesn't
+    apply to this project never enters the denominator at all. Returns
+    (percent, blocking_required_incomplete[], total_scored, done_scored)."""
+    items = db.execute("SELECT * FROM project_deployment_items WHERE deployment_id = ?", (deployment_id,)).fetchall()
+    scored = [i for i in items if i["applies"] and DEPLOYMENT_ITEM_CODES_BY_CODE.get(i["item_code"], (None, None, None, None, True, None))[4]]
+    done = [i for i in scored if i["status"] == "Completed" or i["override_reason"]]
+    percent = round(100 * len(done) / len(scored)) if scored else 0
+    blocking = [i for i in items if i["applies"] and DEPLOYMENT_ITEM_CODES_BY_CODE.get(i["item_code"], (None, None, None, False, None, None))[3]
+                and i["status"] != "Completed" and not i["override_reason"]]
+    return percent, blocking, len(scored), len(done)
+
+
+@app.route("/deployment")
+@login_required
+def project_deployment_dashboard():
+    if not _authorized("module:project_deployment:view"):
+        flash("You don't have access to Project Deployment.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    awarded_without_deployment = db.execute(
+        """SELECT tp.* FROM tracker_projects tp
+           LEFT JOIN project_deployments pd ON pd.project_id = tp.id
+           WHERE tp.status = 'Awarded' AND pd.id IS NULL
+           ORDER BY tp.name"""
+    ).fetchall()
+    deployments = db.execute(
+        """SELECT pd.*, tp.name AS project_name, tp.client AS project_client
+           FROM project_deployments pd JOIN tracker_projects tp ON tp.id = pd.project_id
+           ORDER BY pd.updated_at DESC"""
+    ).fetchall()
+    enriched = []
+    for d in deployments:
+        percent, blocking, _, _ = _deployment_readiness(db, d["id"])
+        row = dict(d)
+        row["readiness_percent"] = percent
+        row["blocking_count"] = len(blocking)
+        enriched.append(row)
+    return render_template("deployment/dashboard.html", awarded_without_deployment=awarded_without_deployment, deployments=enriched)
+
+
+@app.route("/deployment/start/<int:project_id>", methods=["POST"])
+@login_required
+def project_deployment_start(project_id):
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to start a deployment.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    project = db.execute("SELECT id, status FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        flash("Project not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    existing = db.execute("SELECT id FROM project_deployments WHERE project_id = ?", (project_id,)).fetchone()
+    if existing:
+        # Idempotent: repeated Start Deployment clicks never duplicate --
+        # simply route to the existing record.
+        return redirect(url_for("project_deployment_detail", deployment_id=existing["id"]))
+    now = datetime.utcnow().isoformat()
+    starter = current_user.name or current_user.email
+    cur = db.execute(
+        "INSERT INTO project_deployments (project_id, status, started_by, started_at, created_at, updated_at) VALUES (?, 'Not Started', ?, ?, ?, ?)",
+        (project_id, starter, now, now, now)
+    )
+    deployment_id = cur.lastrowid
+    for item_code, label, category, required, readiness_scored, conditional in DEPLOYMENT_ITEM_CODES:
+        db.execute(
+            "INSERT INTO project_deployment_items (deployment_id, item_code, status, applies, created_at, updated_at) VALUES (?, ?, 'Not Started', ?, ?, ?)",
+            (deployment_id, item_code, 0 if conditional else 1, now, now)
+        )
+    log_activity("project_deployment", "deployment", deployment_id, "deployment_started", field="project_id", new_value=str(project_id))
+    db.commit()
+    flash("Deployment started.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>")
+@login_required
+def project_deployment_detail(deployment_id):
+    if not _authorized("module:project_deployment:view"):
+        flash("You don't have access to Project Deployment.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    deployment = db.execute(
+        """SELECT pd.*, tp.name AS project_name, tp.client AS project_client, tp.address AS project_address
+           FROM project_deployments pd JOIN tracker_projects tp ON tp.id = pd.project_id
+           WHERE pd.id = ?""",
+        (deployment_id,)
+    ).fetchone()
+    if not deployment:
+        flash("Deployment not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    items = db.execute("SELECT * FROM project_deployment_items WHERE deployment_id = ? ORDER BY id", (deployment_id,)).fetchall()
+    enriched_items = []
+    for i in items:
+        meta = DEPLOYMENT_ITEM_CODES_BY_CODE.get(i["item_code"])
+        row = dict(i)
+        row["label"] = meta[1] if meta else i["item_code"]
+        row["category"] = meta[2] if meta else "Other"
+        row["required"] = meta[3] if meta else False
+        row["conditional"] = meta[5] if meta else False
+        enriched_items.append(row)
+    percent, blocking, total_scored, done_scored = _deployment_readiness(db, deployment_id)
+    open_purchases = db.execute("SELECT COUNT(*) c FROM inventory_purchase_requests WHERE project_id = ?", (deployment["project_id"],)).fetchone()["c"]
+    open_concrete = db.execute("SELECT COUNT(*) c FROM inventory_concrete_requests WHERE project_id = ?", (deployment["project_id"],)).fetchone()["c"]
+    items_by_code = {i["item_code"]: i for i in enriched_items}
+    return render_template(
+        "deployment/detail.html", deployment=deployment, items=enriched_items, items_by_code=items_by_code, readiness_percent=percent,
+        blocking_count=len(blocking), open_purchases=open_purchases, open_concrete=open_concrete,
+        can_manage=_authorized("action:project_deployment:manage"),
+        statuses=DEPLOYMENT_STATUS_OPTIONS,
+    )
+
+
+def _get_deployment_item_or_none(db, deployment_id, item_id):
+    return db.execute("SELECT * FROM project_deployment_items WHERE id = ? AND deployment_id = ?", (item_id, deployment_id)).fetchone()
+
+
+DEPLOYMENT_HEADER_FORM_FIELDS = [
+    "preconstruction_meeting_date", "job_description",
+    "start_date", "expected_completion_date",
+    "supervisor_name", "supervisor_phone", "supervisor_email",
+    "client_contact_name", "client_contact_phone", "client_contact_email",
+    "city_county", "city_county_phone", "inspections_required_list",
+    "working_hours", "site_access_points", "parking_rules",
+    "dumpster_size", "dumpster_date",
+    "toilets_qty", "toilets_date",
+    "fence_linear_feet", "fence_date",
+]
+DEPLOYMENT_HEADER_CHECKBOX_FIELDS = [
+    "office_needed", "storage_container_needed",
+    "dumpster_needed", "toilets_needed", "fence_needed",
+]
+
+
+@app.route("/deployment/<int:deployment_id>/edit", methods=["GET", "POST"])
+@login_required
+def project_deployment_edit(deployment_id):
+    """The actual working Project Checklist form -- built the same way
+    Concrete Requests and Purchase Requests were built: plain label/input
+    pairs, following the source PROJECT_CHECKLIST.pdf's own section
+    order and wording, submitted as one straightforward form. This is
+    the piece that was missing from V1/V1.1 -- the database columns
+    existed but nothing let a real user type into them."""
+    if not _authorized("module:project_deployment:view"):
+        flash("You don't have access to Project Deployment.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    deployment = db.execute(
+        """SELECT pd.*, tp.name AS project_name, tp.client AS project_client, tp.address AS project_address
+           FROM project_deployments pd JOIN tracker_projects tp ON tp.id = pd.project_id
+           WHERE pd.id = ?""",
+        (deployment_id,)
+    ).fetchone()
+    if not deployment:
+        flash("Deployment not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    can_manage = _authorized("action:project_deployment:manage")
+
+    if request.method == "POST":
+        if not can_manage:
+            flash("You don't have permission to edit this deployment.", "error")
+            return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+        now = datetime.utcnow().isoformat()
+        set_clauses = []
+        values = []
+        for field in DEPLOYMENT_HEADER_FORM_FIELDS:
+            set_clauses.append(f"{field} = ?")
+            values.append((request.form.get(field) or "").strip() or None)
+        for field in DEPLOYMENT_HEADER_CHECKBOX_FIELDS:
+            set_clauses.append(f"{field} = ?")
+            values.append(1 if request.form.get(field) == "yes" else 0)
+        set_clauses.append("updated_at = ?")
+        values.append(now)
+        values.append(deployment_id)
+        db.execute(f"UPDATE project_deployments SET {', '.join(set_clauses)} WHERE id = ?", values)
+        log_activity("project_deployment", "deployment", deployment_id, "checklist_updated", field="header_fields", new_value="updated")
+        # Conditional logistics items: a coordination requirement only
+        # becomes applicable once its own "needed?" answer is Yes --
+        # matching the same conditional-item pattern already used for
+        # the permit/plans behavior above.
+        for field, item_code in [("office_needed", "office_needed_coordinated"), ("storage_container_needed", "storage_container_coordinated"),
+                                   ("dumpster_needed", "dumpster_coordinated"), ("toilets_needed", "toilets_coordinated"), ("fence_needed", "fence_coordinated")]:
+            applies_val = 1 if request.form.get(field) == "yes" else 0
+            db.execute("UPDATE project_deployment_items SET applies=?, updated_at=? WHERE deployment_id=? AND item_code=?",
+                       (applies_val, now, deployment_id, item_code))
+        db.commit()
+        flash("Checklist saved.")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+    # Unified checklist page (per CTO UX correction): the standalone
+    # edit form is retired in favor of one continuous checklist page.
+    # This route now only serves POST (saving header fields); a GET
+    # here redirects to the unified page instead of rendering a
+    # separate form.
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/item/<int:item_id>/complete", methods=["POST"])
+@login_required
+def project_deployment_item_complete(deployment_id, item_id):
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to update deployment items.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    item = _get_deployment_item_or_none(db, deployment_id, item_id)
+    if not item:
+        flash("Deployment item not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    now = datetime.utcnow().isoformat()
+    completer = current_user.name or current_user.email
+    owner = (request.form.get("owner") or item["owner"] or "").strip() or None
+    due_date = request.form.get("due_date") or item["due_date"]
+    notes = request.form.get("notes") or item["notes"]
+    db.execute(
+        "UPDATE project_deployment_items SET status='Completed', completed_at=?, completed_by=?, owner=?, due_date=?, notes=?, updated_at=? WHERE id=?",
+        (now, completer, owner, due_date, notes, now, item_id)
+    )
+    log_activity("project_deployment", "deployment_item", item_id, "item_completed", field="status", old_value=item["status"], new_value="Completed")
+    if item["item_code"] == "drawings_specs_approved":
+        # Conditional behavior from the source checklist ("If Yes, Print
+        # Permit 1 copy and Plans 2 copies"): the permit/plans item only
+        # becomes applicable once drawings/specs are actually approved --
+        # it stays N/A (applies=0) until then, matching the paper form's
+        # own conditional logic rather than being an unconditional
+        # blocker from the start.
+        db.execute("UPDATE project_deployment_items SET applies=1, updated_at=? WHERE deployment_id=? AND item_code='permit_plans_printed' AND applies=0",
+                   (now, deployment_id))
+    db.commit()
+    flash("Item marked complete.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/item/<int:item_id>/reopen", methods=["POST"])
+@login_required
+def project_deployment_item_reopen(deployment_id, item_id):
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to update deployment items.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    item = _get_deployment_item_or_none(db, deployment_id, item_id)
+    if not item:
+        flash("Deployment item not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    reason = (request.form.get("reason") or "").strip()
+    if not reason:
+        flash("A reason is required to reopen a deployment item.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    now = datetime.utcnow().isoformat()
+    reopener = current_user.name or current_user.email
+    db.execute(
+        "UPDATE project_deployment_items SET status='Not Started', reopened_at=?, reopened_by=?, override_reason=NULL, override_by=NULL, override_at=?, notes=?, updated_at=? WHERE id=?",
+        (now, reopener, None, f"Reopened: {reason}", now, item_id)
+    )
+    log_activity("project_deployment", "deployment_item", item_id, "item_reopened", field="status", old_value=item["status"], new_value="Not Started")
+    db.commit()
+    flash("Item reopened.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/item/<int:item_id>/override", methods=["POST"])
+@login_required
+def project_deployment_item_override(deployment_id, item_id):
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to override deployment items.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    item = _get_deployment_item_or_none(db, deployment_id, item_id)
+    if not item:
+        flash("Deployment item not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    reason = (request.form.get("reason") or "").strip()
+    if not reason:
+        flash("A reason is required to override a deployment item.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    if item["status"] == "Completed":
+        flash("This item is already completed -- no override needed.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    now = datetime.utcnow().isoformat()
+    overrider = current_user.name or current_user.email
+    # The underlying item status is deliberately left as-is (truthful --
+    # it was NOT actually completed) -- only override_reason/by/at are
+    # set, which _deployment_readiness treats as satisfying the gate
+    # while remaining visibly distinct from a real completion.
+    db.execute(
+        "UPDATE project_deployment_items SET override_reason=?, override_by=?, override_at=?, updated_at=? WHERE id=?",
+        (reason, overrider, now, now, item_id)
+    )
+    log_activity("project_deployment", "deployment_item", item_id, "override_applied", field="override_reason", new_value=reason)
+    db.commit()
+    flash("Item overridden.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/status", methods=["POST"])
+@login_required
+def project_deployment_status(deployment_id):
+    """Status advances only through this route's own server-side
+    validation -- never a free dropdown, per the required "safer UX"
+    direction. Ready to Mobilize is fail-closed: every applicable
+    required item must be Completed or overridden, checked here, not
+    merely assumed from whatever the UI happened to show."""
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to change deployment status.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    deployment = db.execute("SELECT * FROM project_deployments WHERE id = ?", (deployment_id,)).fetchone()
+    if not deployment:
+        flash("Deployment not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    target_status = request.form.get("target_status")
+    if target_status not in DEPLOYMENT_STATUS_OPTIONS:
+        flash("Invalid deployment status.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    current_idx = DEPLOYMENT_STATUS_OPTIONS.index(deployment["status"])
+    target_idx = DEPLOYMENT_STATUS_OPTIONS.index(target_status)
+    if target_idx != current_idx + 1:
+        flash("Deployment status can only advance one step at a time.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    if target_status in ("Ready to Mobilize", "Deployed"):
+        percent, blocking, _, _ = _deployment_readiness(db, deployment_id)
+        if blocking:
+            flash(f"Cannot advance -- {len(blocking)} required item(s) still incomplete/not overridden.", "error")
+            return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    now = datetime.utcnow().isoformat()
+    extra_field = ""
+    if target_status == "Deployed":
+        db.execute("UPDATE project_deployments SET status=?, deployed_at=?, updated_at=? WHERE id=?", (target_status, now, now, deployment_id))
+        log_activity("project_deployment", "deployment", deployment_id, "project_activated", field="status", old_value=deployment["status"], new_value=target_status)
+    else:
+        db.execute("UPDATE project_deployments SET status=?, updated_at=? WHERE id=?", (target_status, now, deployment_id))
+        action_name = "ready_to_mobilize" if target_status == "Ready to Mobilize" else "status_changed"
+        log_activity("project_deployment", "deployment", deployment_id, action_name, field="status", old_value=deployment["status"], new_value=target_status)
+    db.commit()
+    flash(f"Deployment status updated to {target_status}.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/reopen", methods=["POST"])
+@login_required
+def project_deployment_reopen(deployment_id):
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to reopen this deployment.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    deployment = db.execute("SELECT * FROM project_deployments WHERE id = ?", (deployment_id,)).fetchone()
+    if not deployment:
+        flash("Deployment not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    reason = (request.form.get("reason") or "").strip()
+    if not reason:
+        flash("A reason is required to reopen a deployment.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    if deployment["status"] == "Not Started":
+        flash("This deployment has not started -- nothing to reopen.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    now = datetime.utcnow().isoformat()
+    db.execute("UPDATE project_deployments SET status='In Preparation', updated_at=? WHERE id=?", (now, deployment_id))
+    log_activity("project_deployment", "deployment", deployment_id, "deployment_reopened", field="status",
+                 old_value=deployment["status"], new_value=f"In Preparation (reason: {reason})")
+    db.commit()
+    flash("Deployment reopened.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/activity")
+@login_required
+def project_deployment_activity(deployment_id):
+    if not _authorized("action:activity_log:view"):
+        flash("Not authorized.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    deployment = db.execute("SELECT * FROM project_deployments WHERE id = ?", (deployment_id,)).fetchone()
+    if not deployment:
+        flash("Deployment not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    item_ids = [r["id"] for r in db.execute("SELECT id FROM project_deployment_items WHERE deployment_id = ?", (deployment_id,)).fetchall()]
+    if item_ids:
+        placeholders = ",".join("?" * len(item_ids))
+        entries = db.execute(
+            f"""SELECT * FROM activity_log
+                WHERE (section='project_deployment' AND entity_type='deployment' AND entity_id = ?)
+                   OR (section='project_deployment' AND entity_type='deployment_item' AND entity_id IN ({placeholders}))
+                ORDER BY created_at DESC""",
+            (deployment_id, *item_ids)
+        ).fetchall()
+    else:
+        entries = db.execute(
+            "SELECT * FROM activity_log WHERE section='project_deployment' AND entity_type='deployment' AND entity_id = ? ORDER BY created_at DESC",
+            (deployment_id,)
+        ).fetchall()
+    return render_template("sitepulse/activity_log.html", entries=entries, record_name=f"Deployment #{deployment_id}")
 
 
 @app.route("/sitepulse/procurement/rental-swaps")
@@ -3029,6 +3484,26 @@ def inventory_delete_material(material_id):
     db.commit()
     flash("Material deleted.")
     return redirect(url_for("inventory_materials_list"))
+
+
+@app.route("/internal/cron/concrete-reminders", methods=["POST"])
+@csrf.exempt
+def internal_cron_concrete_reminders():
+    """Authenticated Railway-cron trigger for the Concrete reminder processor.
+
+    The processor executes inside the LIVE web service, so it uses the same
+    mounted DATA_DIR/SQLite database as BuildIQ.  The caller must present the
+    dedicated CONCRETE_CRON_SECRET; this endpoint is not user/session auth.
+    """
+    configured_secret = os.environ.get("CONCRETE_CRON_SECRET", "").strip()
+    supplied_secret = request.headers.get("X-BuildIQ-Cron-Secret", "").strip()
+    if not configured_secret:
+        return {"ok": False, "error": "cron_not_configured"}, 503
+    if not supplied_secret or not secrets.compare_digest(supplied_secret, configured_secret):
+        return {"ok": False, "error": "unauthorized"}, 401
+
+    result = process_due_concrete_reminders()
+    return {"ok": True, **result}, 200
 
 
 def send_due_concrete_reminders():
@@ -3864,6 +4339,41 @@ def inventory_delete_purchase(request_id):
 # ---------------------------------------------------------------------------
 
 TR_STATUS_OPTIONS = ["In Progress", "Submitted", "Awarded", "Unmeant", "On Hold", "Cancelled", "Pending", "Archived"]
+
+# PROJECT DEPLOYMENT -- the controlled, BuildIQ-defined checklist. This is
+# a fixed Python constant, never editable by users, never stored/created
+# dynamically -- this is precisely what keeps project_deployment_items
+# from becoming a generic task system or EAV structure. Each tuple:
+# (item_code, label, category, required, readiness_scored, conditional).
+# `required` = must be Completed or overridden before Ready to Mobilize.
+# `readiness_scored` = counts toward the readiness percentage at all
+# (per Clarification #2 -- purely informational items must NOT distort
+# the percentage). `conditional` = only enters the denominator/gate when
+# its own `applies` flag is true (dumpster/toilets/fence/office/storage).
+DEPLOYMENT_ITEM_CODES = [
+    ("drawings_specs_approved", "Drawings/specifications finalized and approved", "Plans & Permits", True, True, False),
+    ("permit_plans_printed", "If Yes: Print Permit (1 copy) and Plans (2 copies)", "Plans & Permits", True, True, True),
+    ("inspections_responsibility_assigned", "Who is responsible for scheduling inspections?", "Plans & Permits", False, True, False),
+    ("office_needed_coordinated", "Office coordination (if needed)", "Site Logistics", False, True, True),
+    ("storage_container_coordinated", "Storage container coordination (if needed)", "Site Logistics", False, True, True),
+    ("dumpster_coordinated", "Dumpster coordination (if needed)", "Site Logistics", False, True, True),
+    ("toilets_coordinated", "Portable toilet coordination (if needed)", "Site Logistics", False, True, True),
+    ("fence_coordinated", "Temporary fence coordination (if needed)", "Site Logistics", False, True, True),
+    ("subcontractors_assigned", "Subcontractors assigned", "Subs & Reminders", True, True, False),
+    ("change_orders_approval_required", "Change Orders to be approved before proceeding", "Subs & Reminders", False, True, False),
+    ("site_meetings_conducted", "Site Meetings", "Subs & Reminders", False, True, False),
+    ("safety_meeting_enforcement", "Safety Meeting and enforcement", "Subs & Reminders", False, True, False),
+    ("no_client_subs_interaction", "No Client and Subs interaction", "Subs & Reminders", False, True, False),
+    ("preconstruction_pictures", "Preconstruction Pictures", "Subs & Reminders", True, True, False),
+    ("rfi_submittals_confirmed", "RFI Submittals", "Subs & Reminders", True, True, False),
+    ("purchase_orders_confirmed", "Purchase Orders", "Subs & Reminders", True, True, False),
+    ("concrete_forms_confirmed", "Concrete Forms", "Subs & Reminders", True, True, False),
+]
+DEPLOYMENT_ITEM_CODES_BY_CODE = {code: (code, label, category, required, readiness_scored, conditional)
+                                  for code, label, category, required, readiness_scored, conditional in DEPLOYMENT_ITEM_CODES}
+DEPLOYMENT_STATUS_OPTIONS = ["Not Started", "In Preparation", "Ready for Review", "Ready to Mobilize", "Deployed"]
+DEPLOYMENT_ITEM_STATUS_OPTIONS = ["Not Started", "In Progress", "Completed"]
+
 TR_STATUS_BADGE_CLASS = {
     "In Progress": "status-inprogress", "Submitted": "status-submitted",
     "Awarded": "status-awarded", "Unmeant": "status-lost",
@@ -4341,6 +4851,19 @@ def register_tool(name, description, parameters, permission, atlas_permission, k
     reachable from the model's output. If it's not in ATLAS_TOOLS, it
     does not run.
 
+    `permission` is normally a single permission-key string, checked as
+    an AND requirement alongside atlas_permission (see execute_tool).
+    It may ALSO be a tuple/list of alternative permission-key strings,
+    in which case ANY ONE of them satisfies the manual-permission half
+    of the gate (an explicit, generic OR) -- this is NOT a fake combined
+    permission key invented in the permissions table; it's the existing
+    user_has_permission() resolver called once per alternative, same as
+    it would be called for a single string, with the results OR'd in
+    code. Added specifically so a tool like set_project_context/
+    get_project_intelligence can require "at least one relevant BuildIQ
+    module permission" without inventing a synthetic permission string
+    that would need to be kept in sync with role definitions elsewhere.
+
     Rejects a malformed registration immediately (ValueError, at import
     time, loud and unmissable) rather than letting it into ATLAS_TOOLS --
     a tool with a missing/empty permission or atlas_permission would
@@ -4352,8 +4875,13 @@ def register_tool(name, description, parameters, permission, atlas_permission, k
     behavior needs to provide on its own -- defense at both layers."""
     if not name or not isinstance(name, str):
         raise ValueError("register_tool: name must be a non-empty string")
-    if not permission or not isinstance(permission, str):
-        raise ValueError(f"register_tool({name!r}): permission must be a non-empty string, got {permission!r}")
+    permission_is_valid_single = isinstance(permission, str) and permission
+    permission_is_valid_alternatives = (
+        isinstance(permission, (tuple, list)) and len(permission) > 0
+        and all(isinstance(p, str) and p for p in permission)
+    )
+    if not (permission_is_valid_single or permission_is_valid_alternatives):
+        raise ValueError(f"register_tool({name!r}): permission must be a non-empty string or a non-empty tuple/list of non-empty strings, got {permission!r}")
     if not atlas_permission or not isinstance(atlas_permission, str):
         raise ValueError(f"register_tool({name!r}): atlas_permission must be a non-empty string, got {atlas_permission!r}")
     if kind not in ("read", "write"):
@@ -4508,7 +5036,14 @@ def execute_tool(tool_name, raw_params, user, confirmed=False, session_context=N
         get_db().commit()
         return ToolResult(False, error=err)
 
-    manual_ok = user_has_permission(user, tool.permission)
+    if isinstance(tool.permission, (tuple, list)):
+        # Explicit OR across alternative module permissions -- ANY one
+        # satisfies this half of the gate. Same resolver, called once
+        # per alternative; no synthetic combined permission key exists
+        # anywhere in the permissions table.
+        manual_ok = any(user_has_permission(user, p) for p in tool.permission)
+    else:
+        manual_ok = user_has_permission(user, tool.permission)
     atlas_ok = user_has_permission(user, tool.atlas_permission)
     if not (manual_ok and atlas_ok):
         log_activity("atlas", "tool_call", 0, "atlas_denied", field=tool_name,
@@ -8403,8 +8938,15 @@ def tracker_view_project(project_id):
     # the same filtered view the user was looking at -- not just wherever
     # browser history happens to point.
     back_filter = request.args.get("filter", "")
+    # DISCOVERABILITY PATCH: narrow lookup only for Start/Open Deployment
+    # button state -- deliberately does NOT read anything beyond
+    # existence (no readiness/checklist data), and does NOT leak any
+    # additional Project Hunt data into Deployment or vice versa.
+    existing_deployment = db.execute("SELECT id FROM project_deployments WHERE project_id = ?", (project_id,)).fetchone()
     return render_template("tracker/project.html", p=project, trade_groups=trade_groups, docs=docs,
-                            status_options=TR_STATUS_OPTIONS, back_filter=back_filter)
+                            status_options=TR_STATUS_OPTIONS, back_filter=back_filter,
+                            existing_deployment_id=(existing_deployment["id"] if existing_deployment else None),
+                            can_manage_deployment=_authorized("action:project_deployment:manage"))
 
 
 @app.route("/tracker/project/<int:project_id>/update", methods=["POST"])

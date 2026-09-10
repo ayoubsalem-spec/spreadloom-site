@@ -55,6 +55,23 @@
         </div>
     </div>
 
+    {% if has_project_deployment_access %}
+    <div class="card" style="width:280px; padding:0; position:relative;">
+        <div style="padding:14px 22px 22px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px;">
+                <div style="width:40px; height:40px;"></div>
+                <span class="stamp status-beta">BETA</span>
+            </div>
+            <h3 style="font-size:19px; margin-bottom:4px;">Project Deployment</h3>
+            <div style="color:var(--cyan); font-size:12px; font-family:'IBM Plex Mono',monospace; margin-bottom:12px;">GET THE JOB READY</div>
+            <p class="sub" style="min-height:40px;">Prepare awarded projects for field mobilization.</p>
+            {% if current_user.is_authenticated %}
+            <a href="{{ url_for('project_deployment_dashboard') }}" class="btn" style="width:100%; text-align:center; margin-top:8px;">Open System &rarr;</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
 </div>
 
 {% if not current_user.is_authenticated %}

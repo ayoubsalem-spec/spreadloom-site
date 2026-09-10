@@ -11,6 +11,14 @@
         <span class="badge {{ p['status']|statusclass }}" style="font-size:13px; padding:6px 16px;">{{ p['status'] }}</span>
         <a href="{{ url_for('tracker_edit_project', project_id=p['id']) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Edit Project</a>
         <a href="{{ url_for('tracker_project_activity_log', project_id=p['id']) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Activity Log</a>
+        {% if existing_deployment_id and has_project_deployment_access %}
+        <a href="{{ url_for('project_deployment_detail', deployment_id=existing_deployment_id) }}" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Open Deployment</a>
+        {% elif p['status'] == 'Awarded' and can_manage_deployment %}
+        <form method="POST" action="{{ url_for('project_deployment_start', project_id=p['id']) }}" style="display:inline;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm" style="margin-left:8px; margin-top:0;">Start Deployment</button>
+        </form>
+        {% endif %}
     </div>
 </div>
 

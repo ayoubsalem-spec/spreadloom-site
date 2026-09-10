@@ -205,6 +205,9 @@
                 {% if has_product_intelligence_access %}
                 <a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>
                 {% endif %}
+                {% if has_project_deployment_access %}
+                <a href="{{ url_for('project_deployment_dashboard') }}" class="{{ 'active' if request.path.startswith('/deployment') }}">Project Deployment</a>
+                {% endif %}
             </div>
         </nav>
 

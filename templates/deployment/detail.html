@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+{% block content %}
+<span class="rc-eyebrow">Project Deployment</span>
+<h1>{{ deployment['project_name'] }}</h1>
+<p class="sub">{{ deployment['project_client'] or '' }} — {{ deployment['project_address'] or '' }}</p>
+
+<div class="card">
+    <div style="display:flex; flex-wrap:wrap; gap:24px;">
+        <div><strong>Status:</strong> {{ deployment['status'] }}</div>
+        <div><strong>Readiness:</strong> {{ readiness_percent }}%</div>
+        <div><strong>Blocking items:</strong> {{ blocking_count }}</div>
+        <div><strong>Open Purchase Requests:</strong> {{ open_purchases }}</div>
+        <div><strong>Open Concrete Requests:</strong> {{ open_concrete }}</div>
+    </div>
+    <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        {% if can_manage %}
+        {% set idx = statuses.index(deployment['status']) %}
+        {% if idx + 1 < statuses|length %}
+        <form method="POST" action="{{ url_for('project_deployment_status', deployment_id=deployment['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="target_status" value="{{ statuses[idx + 1] }}">
+            <button type="submit" class="btn btn-gold">Advance to {{ statuses[idx + 1] }}</button>
+        </form>
+        {% endif %}
+        {% if deployment['status'] != 'Not Started' %}
+        <form method="POST" action="{{ url_for('project_deployment_reopen', deployment_id=deployment['id']) }}" onsubmit="return promptReason(this);">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="reason" value="">
+            <button type="submit" class="btn btn-sm">Reopen</button>
+        </form>
+        {% endif %}
+        {% endif %}
+        <a href="{{ url_for('project_deployment_activity', deployment_id=deployment['id']) }}" class="btn btn-sm">History</a>
+    </div>
+</div>
+
+{% macro item_row(code, helper=None) %}
+{% set i = items_by_code.get(code) %}
+{% if i %}
+<div style="margin-top:10px; padding:10px 0; border-top:1px solid var(--line);">
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div>
+            <strong>{{ i['label'] }}</strong>{% if i['required'] %} <span class="sub">(required)</span>{% endif %}
+            {% if helper %}<div class="sub" style="margin-top:2px;">{{ helper }}</div>{% endif %}
+            <div class="sub" style="margin-top:2px;">
+                Status: {{ i['status'] }}
+                {% if i['override_reason'] %} — overridden: {{ i['override_reason'] }}{% endif %}
+                {% if i['owner'] %} · Owner: {{ i['owner'] }}{% endif %}
+                {% if i['due_date'] %} · Due: {{ i['due_date'] }}{% endif %}
+                {% if i['notes'] %} · Notes: {{ i['notes'] }}{% endif %}
+            </div>
+        </div>
+        {% if can_manage %}
+        <div style="display:flex; flex-wrap:wrap; gap:6px;">
+            {% if i['status'] != 'Completed' %}
+            <form method="POST" action="{{ url_for('project_deployment_item_complete', deployment_id=deployment['id'], item_id=i['id']) }}" style="display:flex; gap:4px; flex-wrap:wrap; align-items:center;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="text" name="owner" placeholder="Owner" value="{{ i['owner'] or '' }}" style="width:110px;">
+                <input type="date" name="due_date" value="{{ i['due_date'] or '' }}" style="width:130px;">
+                <button type="submit" class="btn btn-sm">Complete</button>
+            </form>
+            {% if not i['override_reason'] %}
+            <form method="POST" action="{{ url_for('project_deployment_item_override', deployment_id=deployment['id'], item_id=i['id']) }}" onsubmit="return promptReason(this);">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="reason" value="">
+                <button type="submit" class="btn btn-sm">Override</button>
+            </form>
+            {% endif %}
+            {% else %}
+            <form method="POST" action="{{ url_for('project_deployment_item_reopen', deployment_id=deployment['id'], item_id=i['id']) }}" onsubmit="return promptReason(this);">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="reason" value="">
+                <button type="submit" class="btn btn-sm">Reopen</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+<div class="card" style="margin-top:16px;">
+    {% if can_manage %}
+    <form id="checklist-form" method="POST" action="{{ url_for('project_deployment_edit', deployment_id=deployment['id']) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    </form>
+    {% endif %}
+
+        <h3 style="font-size:15px; color:var(--gold); margin-bottom:6px;">Project Checklist</h3>
+        <label>Preconstruction Meeting Date</label>
+        <input type="date" name="preconstruction_meeting_date" value="{{ deployment['preconstruction_meeting_date'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form">
+        <label style="margin-top:10px;">Job Description</label>
+        <input type="text" name="job_description" value="{{ deployment['job_description'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form">
+        <label style="margin-top:10px;">Job Address</label>
+        <input type="text" value="{{ deployment['project_address'] or '' }}" disabled>
+        <p class="sub" style="margin-top:2px;">Shared from Project Hunt — edit on the project's own page.</p>
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Job Essentials</h3>
+        <div class="form-row">
+            <div style="flex:1;"><label>Start Date</label><input type="date" name="start_date" value="{{ deployment['start_date'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Expected Completion Date</label><input type="date" name="expected_completion_date" value="{{ deployment['expected_completion_date'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Job Supervisor</label><input type="text" name="supervisor_name" value="{{ deployment['supervisor_name'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="supervisor_phone" value="{{ deployment['supervisor_phone'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Email</label><input type="text" name="supervisor_email" value="{{ deployment['supervisor_email'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+        <div class="form-row">
+            <div style="flex:1;"><label>Client Main Contact</label><input type="text" name="client_contact_name" value="{{ deployment['client_contact_name'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="client_contact_phone" value="{{ deployment['client_contact_phone'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Email</label><input type="text" name="client_contact_email" value="{{ deployment['client_contact_email'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Plans, Permits & Approvals</h3>
+        <p class="sub" style="margin-bottom:4px;">Prepared one week before start day.</p>
+    {{ item_row("drawings_specs_approved") }}
+    {{ item_row("permit_plans_printed") }}
+
+        <div class="form-row" style="margin-top:14px;">
+            <div style="flex:1;"><label>Which City or County?</label><input type="text" name="city_county" value="{{ deployment['city_county'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Phone</label><input type="text" name="city_county_phone" value="{{ deployment['city_county_phone'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+        <label style="margin-top:10px;">Inspections Required</label>
+        <input type="text" name="inspections_required_list" value="{{ deployment['inspections_required_list'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form">
+
+    {{ item_row("inspections_responsibility_assigned") }}
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Site Logistics</h3>
+        <div class="form-row">
+            <div style="flex:1;">
+                <label>Office needed?</label>
+                <select name="office_needed" {{ 'disabled' if not can_manage }} form="checklist-form">
+                    <option value="no" {{ 'selected' if not deployment['office_needed'] }}>No</option>
+                    <option value="yes" {{ 'selected' if deployment['office_needed'] }}>Yes</option>
+                </select>
+            </div>
+            <div style="flex:1;">
+                <label>Storage Container needed?</label>
+                <select name="storage_container_needed" {{ 'disabled' if not can_manage }} form="checklist-form">
+                    <option value="no" {{ 'selected' if not deployment['storage_container_needed'] }}>No</option>
+                    <option value="yes" {{ 'selected' if deployment['storage_container_needed'] }}>Yes</option>
+                </select>
+            </div>
+        </div>
+        <label style="margin-top:10px;">Working Hours</label>
+        <input type="text" name="working_hours" value="{{ deployment['working_hours'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form">
+
+        <div class="form-row" style="margin-top:10px;">
+            <div style="flex:1;">
+                <label>Dumpster needed?</label>
+                <select name="dumpster_needed" {{ 'disabled' if not can_manage }} form="checklist-form">
+                    <option value="no" {{ 'selected' if not deployment['dumpster_needed'] }}>No</option>
+                    <option value="yes" {{ 'selected' if deployment['dumpster_needed'] }}>Yes</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>Dumpster Size</label><input type="text" name="dumpster_size" value="{{ deployment['dumpster_size'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Date</label><input type="date" name="dumpster_date" value="{{ deployment['dumpster_date'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+
+        <div class="form-row" style="margin-top:10px;">
+            <div style="flex:1;">
+                <label>Portable Toilets needed?</label>
+                <select name="toilets_needed" {{ 'disabled' if not can_manage }} form="checklist-form">
+                    <option value="no" {{ 'selected' if not deployment['toilets_needed'] }}>No</option>
+                    <option value="yes" {{ 'selected' if deployment['toilets_needed'] }}>Yes</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>Qty</label><input type="text" name="toilets_qty" value="{{ deployment['toilets_qty'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Date</label><input type="date" name="toilets_date" value="{{ deployment['toilets_date'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+
+        <div class="form-row" style="margin-top:10px;">
+            <div style="flex:1;">
+                <label>Temp Fence needed?</label>
+                <select name="fence_needed" {{ 'disabled' if not can_manage }} form="checklist-form">
+                    <option value="no" {{ 'selected' if not deployment['fence_needed'] }}>No</option>
+                    <option value="yes" {{ 'selected' if deployment['fence_needed'] }}>Yes</option>
+                </select>
+            </div>
+            <div style="flex:1;"><label>How many ln Ft?</label><input type="text" name="fence_linear_feet" value="{{ deployment['fence_linear_feet'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+            <div style="flex:1;"><label>Date</label><input type="date" name="fence_date" value="{{ deployment['fence_date'] or '' }}" {{ 'disabled' if not can_manage }} form="checklist-form"></div>
+        </div>
+
+        <label style="margin-top:10px;">Site Access Points and Parking Rules</label>
+        <input type="text" name="site_access_points" value="{{ deployment['site_access_points'] or '' }}" placeholder="Site access points" {{ 'disabled' if not can_manage }} form="checklist-form">
+        <input type="text" name="parking_rules" value="{{ deployment['parking_rules'] or '' }}" placeholder="Parking rules" style="margin-top:6px;" {{ 'disabled' if not can_manage }} form="checklist-form">
+
+        {% if can_manage %}
+        <button type="submit" form="checklist-form" class="btn btn-gold" style="margin-top:16px;">Save Checklist</button>
+        {% endif %}
+
+    <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Subs & Reminders</h3>
+    {{ item_row("subcontractors_assigned") }}
+    {{ item_row("change_orders_approval_required") }}
+    {{ item_row("site_meetings_conducted") }}
+    {{ item_row("safety_meeting_enforcement") }}
+    {{ item_row("no_client_subs_interaction") }}
+    {{ item_row("preconstruction_pictures") }}
+    {{ item_row("rfi_submittals_confirmed") }}
+    {{ item_row("purchase_orders_confirmed", helper="See linked Purchase Requests for evidence — not automatically completed.") }}
+    {{ item_row("concrete_forms_confirmed", helper="See linked Concrete Requests for evidence — not automatically completed.") }}
+</div>
+<script>
+function promptReason(form) {
+    var reason = prompt('Reason:', '');
+    if (!reason) return false;
+    form.querySelector('input[name="reason"]').value = reason;
+    return true;
+}
+</script>
+{% endblock %}
