@@ -37,6 +37,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas as pdf_canvas
+from reportlab.lib.utils import ImageReader
 from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session, Response, stream_with_context
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import CSRFProtect
@@ -382,7 +383,157 @@ def build_purchase_order_pdf(r, items):
     return buf.read()
 
 
-@app.template_filter("friendly_dt")
+def build_field_report_pdf(report_info, photos, version_number):
+    """Professional multi-page SitePulse Field Report PDF -- same visual
+    convention (navy header bar, gold section titles) as the existing
+    concrete/purchase order PDFs above, extended to a real multi-page
+    layout with embedded photos since a field report routinely has more
+    content than a single page. `report_info` is a plain dict (NOT a
+    live field_reports row) so this function works identically whether
+    called for a real Submit or an ephemeral Preview -- it never reads
+    or writes the database itself.
+    """
+    buf = io.BytesIO()
+    c = pdf_canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    navy = colors.HexColor("#0B1220")
+    gold = colors.HexColor("#D4A537")
+    x = 0.75 * inch
+    top_margin = height - 0.9 * inch
+    bottom_margin = 0.75 * inch
+    page_num = [1]
+
+    def new_page_header(title):
+        c.setFillColor(navy)
+        c.rect(0, height - 1.1 * inch, width, 1.1 * inch, fill=1, stroke=0)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 18)
+        c.drawString(x, height - 0.65 * inch, title)
+        c.setFont("Helvetica", 10)
+        c.drawString(x, height - 0.9 * inch, f"BuildIQ SitePulse  |  Version {version_number}  |  {report_info.get('report_date') or ''}")
+        return height - 1.5 * inch
+
+    def footer():
+        c.setFont("Helvetica-Oblique", 8)
+        c.setFillColor(colors.HexColor("#888888"))
+        c.drawString(x, 0.5 * inch, "Generated automatically by BuildIQ / SitePulse")
+        c.drawRightString(width - x, 0.5 * inch, f"Page {page_num[0]}")
+
+    def new_page(title):
+        footer()
+        c.showPage()
+        page_num[0] += 1
+        return new_page_header(title)
+
+    y = new_page_header(f"Field Report \u2014 {report_info.get('project_name') or ''}")
+
+    def section(label):
+        nonlocal y
+        if y < bottom_margin + 40:
+            y = new_page(f"Field Report \u2014 {report_info.get('project_name') or ''}")
+        y -= 6
+        c.setFillColor(gold)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(x, y, label)
+        c.setFillColor(navy)
+        y -= 18
+
+    def line(label, value):
+        nonlocal y
+        if y < bottom_margin + 20:
+            y = new_page(f"Field Report \u2014 {report_info.get('project_name') or ''}")
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(x, y, f"{label}:")
+        c.setFont("Helvetica", 10)
+        c.drawString(x + 1.6 * inch, y, str(value) if value else "\u2014")
+        y -= 16
+
+    def wrapped(label, value):
+        nonlocal y
+        if y < bottom_margin + 40:
+            y = new_page(f"Field Report \u2014 {report_info.get('project_name') or ''}")
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(x, y, f"{label}:")
+        y -= 14
+        y = _pdf_write_wrapped(c, value or "\u2014", x, y, width - 1.5 * inch, size=10)
+        y -= 6
+
+    section("Project")
+    line("Project", report_info.get("project_name"))
+    line("Client", report_info.get("project_client"))
+    line("Address", report_info.get("project_address"))
+    line("Report Date", report_info.get("report_date"))
+    line("Submitted By", report_info.get("submitted_by") or report_info.get("author") or "\u2014")
+
+    section("Work Completed")
+    y = _pdf_write_wrapped(c, report_info.get("work_completed") or "\u2014", x, y, width - 1.5 * inch, size=10)
+
+    section("Issues / Blockers")
+    if report_info.get("has_issues"):
+        y = _pdf_write_wrapped(c, report_info.get("issues_blockers") or "\u2014", x, y, width - 1.5 * inch, size=10)
+    else:
+        c.setFont("Helvetica", 10)
+        c.drawString(x, y, "No Issues")
+        y -= 16
+
+    section("Next Steps")
+    y = _pdf_write_wrapped(c, report_info.get("next_steps") or "\u2014", x, y, width - 1.5 * inch, size=10)
+
+    if report_info.get("general_notes"):
+        section("General Notes")
+        y = _pdf_write_wrapped(c, report_info["general_notes"], x, y, width - 1.5 * inch, size=10)
+
+    if photos:
+        section("Photos")
+        img_w = 2.6 * inch
+        img_h = 1.9 * inch
+        gap = 0.25 * inch
+        col = 0
+        row_start_y = y
+        for p in photos:
+            path = os.path.join(UPLOAD_DIR, p["filename"])
+            if not os.path.exists(path):
+                continue
+            if row_start_y - img_h < bottom_margin + 30:
+                row_start_y = new_page(f"Field Report \u2014 {report_info.get('project_name') or ''} (photos continued)")
+                col = 0
+            px = x + col * (img_w + gap)
+            try:
+                c.drawImage(ImageReader(path), px, row_start_y - img_h, width=img_w, height=img_h, preserveAspectRatio=True, anchor="c")
+            except Exception:
+                pass
+            if p.get("caption"):
+                c.setFont("Helvetica", 8)
+                c.setFillColor(navy)
+                c.drawString(px, row_start_y - img_h - 12, p["caption"][:60])
+            col += 1
+            if col >= 2:
+                col = 0
+                row_start_y -= (img_h + 0.4 * inch)
+        y = row_start_y - img_h - 0.3 * inch
+
+    footer()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
+def save_generated_pdf(pdf_bytes):
+    """Stores a SERVER-GENERATED PDF (never a user upload) under a safe,
+    random, server-controlled filename -- deliberately NOT save_photo(),
+    which is scoped to user-uploaded images and would be a category
+    misuse here. Filename is never derived from user input (no report
+    title, no project name) -- same uuid4-based convention as
+    save_photo(), just a fixed .pdf extension and no upload validation
+    (there's no "upload" here at all, the bytes are generated in-process
+    by build_field_report_pdf above)."""
+    filename = f"{uuid.uuid4().hex}.pdf"
+    with open(os.path.join(UPLOAD_DIR, secure_filename(filename)), "wb") as f:
+        f.write(pdf_bytes)
+    return filename
+
+
+
 def friendly_dt(iso_str):
     """'2026-08-18T19:36:00' (stored UTC) -> 'August 18, 2026 at 2:36 PM'
     (converted to Houston/Central time, DST-aware)."""
@@ -807,6 +958,7 @@ PERMISSION_CATALOG = [
     ("action:project_hunt:manage", "action", "Manage Projects"),
     ("action:equipment_center:manage", "action", "Manage Equipment"),
     ("action:project_deployment:manage", "action", "Manage Project Deployment"),
+    ("action:sitepulse:report", "action", "SitePulse Reporting (Daily Capture / Field Reports)"),
     ("action:sitepulse:manage", "action", "Manage SitePulse Requests"),
     ("action:sitepulse:place_order", "action", "Place Purchase Orders"),
     ("action:product_intelligence:manage", "action", "Manage Product Intelligence"),
@@ -927,7 +1079,7 @@ def _seed_roles_and_permissions(db):
     # subsequent restart a no-op.
     admin_role = db.execute("SELECT id FROM roles WHERE name = 'Administrator'").fetchone()
     if admin_role:
-        for key in ("module:project_deployment:view", "action:project_deployment:manage"):
+        for key in ("module:project_deployment:view", "action:project_deployment:manage", "action:sitepulse:report"):
             perm_row = db.execute("SELECT id FROM permissions WHERE key = ?", (key,)).fetchone()
             if perm_row:
                 db.execute("INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)", (admin_role[0], perm_row[0]))
@@ -1217,6 +1369,67 @@ def init_db():
             created_at TEXT, updated_at TEXT,
             FOREIGN KEY (deployment_id) REFERENCES project_deployments (id),
             UNIQUE(deployment_id, item_code)
+        );
+
+        -- SITEPULSE REPORTING (V1). Photos are PROJECT-owned (never tied
+        -- to one report) -- report_photo_selections is the only place
+        -- report-membership is expressed, so selecting a photo for a
+        -- report never duplicates the file or the row. field_reports is
+        -- the MUTABLE/current state; field_report_versions is the
+        -- IMMUTABLE submission history -- every successful Submit
+        -- inserts a new version row and never overwrites/deletes a
+        -- prior one, so a reopened report's earlier submission remains
+        -- fully retrievable forever.
+        CREATE TABLE IF NOT EXISTS project_field_photos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            original_filename TEXT,
+            caption TEXT,
+            uploaded_by TEXT,
+            uploaded_at TEXT,
+            archived INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (project_id) REFERENCES tracker_projects (id)
+        );
+
+        CREATE TABLE IF NOT EXISTS field_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            report_date TEXT,
+            work_completed TEXT,
+            issues_blockers TEXT,
+            has_issues INTEGER NOT NULL DEFAULT 0,
+            next_steps TEXT,
+            general_notes TEXT,
+            status TEXT NOT NULL DEFAULT 'Draft',
+            current_version_id INTEGER,
+            created_by TEXT,
+            last_edited_by TEXT,
+            created_at TEXT, updated_at TEXT,
+            FOREIGN KEY (project_id) REFERENCES tracker_projects (id)
+        );
+
+        CREATE TABLE IF NOT EXISTS report_photo_selections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id INTEGER NOT NULL,
+            photo_id INTEGER NOT NULL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (report_id) REFERENCES field_reports (id),
+            FOREIGN KEY (photo_id) REFERENCES project_field_photos (id),
+            UNIQUE(report_id, photo_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS field_report_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id INTEGER NOT NULL,
+            version_number INTEGER NOT NULL,
+            pdf_filename TEXT NOT NULL,
+            content_snapshot_json TEXT NOT NULL,
+            submitted_by TEXT,
+            submitted_at TEXT,
+            created_at TEXT,
+            FOREIGN KEY (report_id) REFERENCES field_reports (id),
+            UNIQUE(report_id, version_number)
         );
 
         -- Site Inventory: concrete requests + material inventory, split out
@@ -1635,6 +1848,10 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_atlas_messages_conversation ON atlas_messages(conversation_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_rental_swaps_rental ON sitepulse_rental_swaps(rental_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_deployment_items_deployment ON project_deployment_items(deployment_id, item_code)",
+        "CREATE INDEX IF NOT EXISTS idx_field_photos_project ON project_field_photos(project_id, archived, uploaded_at)",
+        "CREATE INDEX IF NOT EXISTS idx_field_reports_project ON field_reports(project_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_report_photo_selections_report ON report_photo_selections(report_id, sort_order)",
+        "CREATE INDEX IF NOT EXISTS idx_field_report_versions_report ON field_report_versions(report_id, version_number)",
     ]:
         try:
             db.execute(index_sql)
@@ -3398,6 +3615,387 @@ def project_deployment_activity(deployment_id):
     return render_template("sitepulse/activity_log.html", entries=entries, record_name=f"Deployment #{deployment_id}")
 
 
+# ============================================================
+# SITEPULSE REPORTING (V1)
+# ============================================================
+
+def _reporting_authorized_for_project(project_id):
+    """The permission model approved for Reporting: module:sitepulse:view
+    to see anything, action:sitepulse:report for normal authoring
+    (Daily Capture, Draft create/edit, submit), action:sitepulse:manage
+    for the higher-authority action of reopening an already-Submitted
+    report. Not granted merely from Project Hunt access."""
+    return _authorized("module:sitepulse:view")
+
+
+def _reporting_can_author():
+    """CORRECTION: normal Reporting authoring requires BOTH
+    module:sitepulse:view AND action:sitepulse:report -- a user with
+    only the action permission (e.g. a malformed/partial grant) must
+    not be able to mutate Reporting data at all. Fixing this one helper
+    closes the gap for every route that calls it (Daily Capture upload,
+    caption edit, report create/edit/submit) without needing to touch
+    each call site individually."""
+    return _authorized("module:sitepulse:view") and _authorized("action:sitepulse:report")
+
+
+def _reporting_can_manage():
+    """Unchanged approved rule: module:sitepulse:view + action:sitepulse:manage
+    for reopening an already-Submitted report."""
+    return _authorized("module:sitepulse:view") and _authorized("action:sitepulse:manage")
+
+
+@app.route("/sitepulse/project/<int:project_id>/photos", methods=["GET", "POST"])
+@login_required
+def sitepulse_project_photos(project_id):
+    """Daily Capture. Phone-first: multi-photo upload in one POST,
+    captions entirely optional and addable afterward -- never forced
+    per-photo before Save, matching the locked product requirement."""
+    if not _reporting_authorized_for_project(project_id):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    project = db.execute("SELECT id, name, client, address FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        flash("Project not found.", "error")
+        return redirect(url_for("inventory_home"))
+
+    if request.method == "POST":
+        if not _reporting_can_author():
+            flash("You don't have permission to add field photos.", "error")
+            return redirect(url_for("sitepulse_project_photos", project_id=project_id))
+        now = datetime.utcnow().isoformat()
+        uploader = current_user.name or current_user.email
+        files = request.files.getlist("photos")
+        saved_count = 0
+        for f in files:
+            filename = save_photo(f)
+            if filename:
+                db.execute(
+                    "INSERT INTO project_field_photos (project_id, filename, original_filename, uploaded_by, uploaded_at, archived) VALUES (?,?,?,?,?,0)",
+                    (project_id, filename, secure_filename(f.filename or ""), uploader, now)
+                )
+                saved_count += 1
+        if saved_count:
+            db.commit()
+            log_activity("sitepulse_reporting", "field_photos", project_id, "photos_added", field="count", new_value=str(saved_count))
+            db.commit()
+            flash(f"{saved_count} photo(s) saved.")
+        return redirect(url_for("sitepulse_project_photos", project_id=project_id))
+
+    photos = db.execute(
+        "SELECT * FROM project_field_photos WHERE project_id = ? AND archived = 0 ORDER BY uploaded_at DESC",
+        (project_id,)
+    ).fetchall()
+    return render_template("sitepulse/reports/daily_capture.html", project=project, photos=photos,
+                            can_author=_reporting_can_author())
+
+
+@app.route("/sitepulse/photos/<int:photo_id>/caption", methods=["POST"])
+@login_required
+def sitepulse_photo_caption(photo_id):
+    if not _reporting_can_author():
+        flash("You don't have permission to edit this photo.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    photo = db.execute("SELECT * FROM project_field_photos WHERE id = ?", (photo_id,)).fetchone()
+    if not photo:
+        flash("Photo not found.", "error")
+        return redirect(url_for("home"))
+    caption = (request.form.get("caption") or "").strip() or None
+    db.execute("UPDATE project_field_photos SET caption = ? WHERE id = ?", (caption, photo_id))
+    db.commit()
+    return redirect(url_for("sitepulse_project_photos", project_id=photo["project_id"]))
+
+
+@app.route("/sitepulse/photos/<int:photo_id>/file")
+@login_required
+def sitepulse_photo_file(photo_id):
+    """Project-scoped, authorization-checked serving route -- deliberately
+    NOT the generic /uploads/<filename> route, which is login-only and
+    not project-scoped. Resolves photo -> its project_id -> the
+    requester's actual SitePulse permission for that project, before
+    ever touching the filesystem. Unauthorized -> 403. Unknown id -> 404.
+    No filesystem path is ever exposed in either response."""
+    db = get_db()
+    photo = db.execute("SELECT * FROM project_field_photos WHERE id = ?", (photo_id,)).fetchone()
+    if not photo:
+        return ("Not found", 404)
+    if not _reporting_authorized_for_project(photo["project_id"]):
+        return ("Forbidden", 403)
+    return send_from_directory(UPLOAD_DIR, secure_filename(photo["filename"]))
+
+
+@app.route("/sitepulse/project/<int:project_id>/reports")
+@login_required
+def sitepulse_project_reports(project_id):
+    """Report History -- chronological, shows every report and its
+    current version, never hides prior submitted versions after a
+    resubmit (those remain reachable from the report's own detail page)."""
+    if not _reporting_authorized_for_project(project_id):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    project = db.execute("SELECT id, name, client, address FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        flash("Project not found.", "error")
+        return redirect(url_for("inventory_home"))
+    reports = db.execute(
+        """SELECT fr.*, frv.version_number AS current_version_number, frv.submitted_at AS current_submitted_at
+           FROM field_reports fr LEFT JOIN field_report_versions frv ON frv.id = fr.current_version_id
+           WHERE fr.project_id = ? ORDER BY fr.updated_at DESC""",
+        (project_id,)
+    ).fetchall()
+    return render_template("sitepulse/reports/history.html", project=project, reports=reports,
+                            can_author=_reporting_can_author())
+
+
+@app.route("/sitepulse/project/<int:project_id>/reports/new", methods=["POST"])
+@login_required
+def sitepulse_report_create(project_id):
+    if not _reporting_can_author():
+        flash("You don't have permission to create a field report.", "error")
+        return redirect(url_for("sitepulse_project_reports", project_id=project_id))
+    db = get_db()
+    project = db.execute("SELECT id FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        flash("Project not found.", "error")
+        return redirect(url_for("inventory_home"))
+    now = datetime.utcnow().isoformat()
+    author = current_user.name or current_user.email
+    cur = db.execute(
+        "INSERT INTO field_reports (project_id, report_date, status, created_by, last_edited_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+        (project_id, date.today().isoformat(), "Draft", author, author, now, now)
+    )
+    report_id = cur.lastrowid
+    log_activity("sitepulse_reporting", "field_report", report_id, "report_created", field="project_id", new_value=str(project_id))
+    db.commit()
+    return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+
+
+def _report_row(db, report_id):
+    return db.execute(
+        """SELECT fr.*, tp.name AS project_name, tp.client AS project_client, tp.address AS project_address
+           FROM field_reports fr JOIN tracker_projects tp ON tp.id = fr.project_id
+           WHERE fr.id = ?""",
+        (report_id,)
+    ).fetchone()
+
+
+@app.route("/sitepulse/reports/<int:report_id>", methods=["GET", "POST"])
+@login_required
+def sitepulse_report_detail(report_id):
+    """The unified report composition page -- header (auto-filled),
+    recent Daily Capture photos for selection, the three core fields
+    plus one-tap No Issues, and Preview/Submit actions."""
+    db = get_db()
+    report = _report_row(db, report_id)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("inventory_home"))
+    if not _reporting_authorized_for_project(report["project_id"]):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    can_author = _reporting_can_author()
+    can_manage = _reporting_can_manage()
+
+    if request.method == "POST":
+        if report["status"] != "Draft":
+            flash("This report has been submitted -- reopen it before editing.", "error")
+            return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+        if not can_author:
+            flash("You don't have permission to edit this report.", "error")
+            return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+        now = datetime.utcnow().isoformat()
+        editor = current_user.name or current_user.email
+        has_issues = request.form.get("has_issues") == "yes"
+        # NO ISSUES BEHAVIOR: deterministic, not merely cosmetic --
+        # when has_issues is false, issues_blockers is explicitly
+        # cleared server-side so stale contradictory text can never
+        # silently survive alongside a "No Issues" state.
+        issues_text = (request.form.get("issues_blockers") or "").strip() if has_issues else None
+        db.execute(
+            """UPDATE field_reports SET report_date=?, work_completed=?, issues_blockers=?, has_issues=?,
+               next_steps=?, general_notes=?, last_edited_by=?, updated_at=? WHERE id=?""",
+            (request.form.get("report_date") or report["report_date"],
+             (request.form.get("work_completed") or "").strip() or None,
+             issues_text,
+             1 if has_issues else 0,
+             (request.form.get("next_steps") or "").strip() or None,
+             (request.form.get("general_notes") or "").strip() or None,
+             editor, now, report_id)
+        )
+        selected_ids = request.form.getlist("selected_photos")
+        db.execute("DELETE FROM report_photo_selections WHERE report_id = ?", (report_id,))
+        for idx, pid in enumerate(selected_ids):
+            photo = db.execute("SELECT id FROM project_field_photos WHERE id = ? AND project_id = ?", (pid, report["project_id"])).fetchone()
+            if photo:
+                db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, photo["id"], idx))
+        db.commit()
+        flash("Report saved.")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+
+    recent_photos = db.execute(
+        "SELECT * FROM project_field_photos WHERE project_id = ? AND archived = 0 ORDER BY uploaded_at DESC LIMIT 40",
+        (report["project_id"],)
+    ).fetchall()
+    selected_ids = {r["photo_id"] for r in db.execute("SELECT photo_id FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchall()}
+    versions = db.execute("SELECT * FROM field_report_versions WHERE report_id = ? ORDER BY version_number DESC", (report_id,)).fetchall()
+    return render_template("sitepulse/reports/detail.html", report=report, recent_photos=recent_photos,
+                            selected_ids=selected_ids, versions=versions, can_author=can_author, can_manage=can_manage)
+
+
+def _build_report_snapshot(db, report):
+    """The immutable content snapshot captured at submission time --
+    structured, not just a PDF reference, per the approved architecture:
+    report text fields + the EXACT photo selection (ids, captions, sort
+    order) as they existed at that moment, so field_report_versions can
+    answer what a past version actually contained even after
+    report_photo_selections and field_reports have both since moved on."""
+    selections = db.execute(
+        """SELECT rps.sort_order, pfp.id AS photo_id, pfp.filename, pfp.caption
+           FROM report_photo_selections rps JOIN project_field_photos pfp ON pfp.id = rps.photo_id
+           WHERE rps.report_id = ? ORDER BY rps.sort_order""",
+        (report["id"],)
+    ).fetchall()
+    return {
+        "report_date": report["report_date"],
+        "work_completed": report["work_completed"],
+        "issues_blockers": report["issues_blockers"],
+        "has_issues": bool(report["has_issues"]),
+        "next_steps": report["next_steps"],
+        "general_notes": report["general_notes"],
+        "project_id": report["project_id"],
+        "project_name": report["project_name"],
+        "project_client": report["project_client"],
+        "project_address": report["project_address"],
+        "created_by": report["created_by"],
+        "photos": [{"photo_id": s["photo_id"], "filename": s["filename"], "caption": s["caption"], "sort_order": s["sort_order"]} for s in selections],
+    }
+
+
+@app.route("/sitepulse/reports/<int:report_id>/preview")
+@login_required
+def sitepulse_report_preview(report_id):
+    """Ephemeral preview -- generates a PDF in-memory using the SAME
+    builder function Submit uses, and streams it directly. Never calls
+    save_generated_pdf, never inserts a field_report_versions row,
+    never increments a version number, never touches field_reports.status.
+    Leaves no official version history whatsoever."""
+    db = get_db()
+    report = _report_row(db, report_id)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("inventory_home"))
+    if not _reporting_authorized_for_project(report["project_id"]):
+        return ("Forbidden", 403)
+    snapshot = _build_report_snapshot(db, report)
+    snapshot["submitted_by"] = current_user.name or current_user.email
+    pdf_bytes = build_field_report_pdf(snapshot, snapshot["photos"], version_number="Preview")
+    return Response(pdf_bytes, mimetype="application/pdf", headers={"Content-Disposition": "inline; filename=preview.pdf"})
+
+
+@app.route("/sitepulse/reports/<int:report_id>/submit", methods=["POST"])
+@login_required
+def sitepulse_report_submit(report_id):
+    """SUBMIT / VERSIONING -- the safe-failure-order implementation:
+    the PDF is generated and written to disk FIRST; the DB is only
+    updated (new version row + current_version_id + status) AFTER that
+    succeeds. If PDF generation/storage raises, nothing is committed --
+    the report simply stays in its current Draft state, exactly as
+    required ("must not leave the database claiming success if PDF
+    generation/storage fails")."""
+    if not _reporting_can_author():
+        flash("You don't have permission to submit this report.", "error")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+    db = get_db()
+    report = _report_row(db, report_id)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("inventory_home"))
+    if not _reporting_authorized_for_project(report["project_id"]):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    if report["status"] != "Draft":
+        flash("This report has already been submitted.", "error")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+    if not (report["work_completed"] or "").strip():
+        flash("Work Completed is required before submitting.", "error")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+
+    submitter = current_user.name or current_user.email
+    now = datetime.utcnow().isoformat()
+    snapshot = _build_report_snapshot(db, report)
+    snapshot["submitted_by"] = submitter
+
+    existing_max = db.execute("SELECT MAX(version_number) AS mx FROM field_report_versions WHERE report_id = ?", (report_id,)).fetchone()
+    next_version = (existing_max["mx"] or 0) + 1
+
+    try:
+        pdf_bytes = build_field_report_pdf(snapshot, snapshot["photos"], version_number=next_version)
+        pdf_filename = save_generated_pdf(pdf_bytes)
+    except Exception as e:
+        # Safe failure: no partial DB write has happened yet at all --
+        # the report remains exactly as it was, retryable.
+        flash(f"Report submission failed while generating the PDF -- nothing was changed. ({e})", "error")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+
+    cur = db.execute(
+        "INSERT INTO field_report_versions (report_id, version_number, pdf_filename, content_snapshot_json, submitted_by, submitted_at, created_at) VALUES (?,?,?,?,?,?,?)",
+        (report_id, next_version, pdf_filename, json.dumps(snapshot), submitter, now, now)
+    )
+    version_id = cur.lastrowid
+    db.execute("UPDATE field_reports SET status='Submitted', current_version_id=?, updated_at=? WHERE id=?", (version_id, now, report_id))
+    log_activity("sitepulse_reporting", "field_report", report_id, "report_submitted", field="version_number", new_value=str(next_version))
+    db.commit()
+    flash(f"Report submitted (version {next_version}).")
+    return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+
+
+@app.route("/sitepulse/reports/<int:report_id>/reopen", methods=["POST"])
+@login_required
+def sitepulse_report_reopen(report_id):
+    if not _reporting_can_manage():
+        flash("You don't have permission to reopen a submitted report.", "error")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+    db = get_db()
+    report = _report_row(db, report_id)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("inventory_home"))
+    if not _reporting_authorized_for_project(report["project_id"]):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    if report["status"] != "Submitted":
+        flash("This report is not currently submitted.", "error")
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+    now = datetime.utcnow().isoformat()
+    db.execute("UPDATE field_reports SET status='Draft', updated_at=? WHERE id=?", (now, report_id))
+    log_activity("sitepulse_reporting", "field_report", report_id, "report_reopened", field="status", old_value="Submitted", new_value="Draft")
+    db.commit()
+    flash("Report reopened for editing. Prior submitted versions remain unchanged and available below.")
+    return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+
+
+@app.route("/sitepulse/reports/<int:report_id>/versions/<int:version_id>/pdf")
+@login_required
+def sitepulse_report_version_pdf(version_id, report_id):
+    """Secure PDF serving -- resolves version -> its report -> its
+    project -> the requester's SitePulse permission, before serving.
+    Never the generic /uploads/<filename> route. Unauthorized -> 403.
+    Unknown/mismatched id -> 404."""
+    db = get_db()
+    version = db.execute("SELECT * FROM field_report_versions WHERE id = ? AND report_id = ?", (version_id, report_id)).fetchone()
+    if not version:
+        return ("Not found", 404)
+    report = db.execute("SELECT project_id FROM field_reports WHERE id = ?", (report_id,)).fetchone()
+    if not report:
+        return ("Not found", 404)
+    if not _reporting_authorized_for_project(report["project_id"]):
+        return ("Forbidden", 403)
+    return send_from_directory(UPLOAD_DIR, secure_filename(version["pdf_filename"]), mimetype="application/pdf")
+
+
 @app.route("/sitepulse/procurement/rental-swaps")
 @login_required
 def sitepulse_procurement_rental_swaps():
@@ -3437,6 +4035,23 @@ def sitepulse_delete_rental(rental_id):
 # ---------------------------------------------------------------------------
 # Site Inventory -- Concrete Requests + Materials
 # ---------------------------------------------------------------------------
+
+@app.route("/sitepulse/reports/select-project")
+@login_required
+def sitepulse_reports_select_project():
+    """Lightweight project picker -- Reporting is inherently per-project
+    (Daily Capture/Reports need a project first), reusing the exact same
+    inclusive project query already proven safe by the existing
+    Concrete/Purchase/Rental "new" forms, not a new filtering rule."""
+    if not _authorized("module:sitepulse:view"):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    projects = db.execute(
+        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
+    ).fetchall()
+    return render_template("sitepulse/reports/select_project.html", projects=projects)
+
 
 @app.route("/inventory/")
 @login_required
