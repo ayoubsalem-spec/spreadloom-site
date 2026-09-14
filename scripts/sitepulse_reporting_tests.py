@@ -659,6 +659,117 @@ def main():
     heif_pdf_resp = author_client.get(f"/sitepulse/reports/{heif_report['id']}/versions/{heif_v1['id']}/pdf")
     check(".heif report: PDF actually embeds the image", sum(len(p.images) for p in PdfReader(io.BytesIO(heif_pdf_resp.data)).pages) >= 1)
 
+    print()
+    print("=== V1.3: project eligibility -- only operational projects appear in Field Reports selector ===")
+    pid_pursuing = make_project(name="__RepTest PursuingOnly", status="In Progress")
+    pid_awarded = make_project(name="__RepTest AwardedProj", status="Awarded")
+    selector_resp = author_client.get("/sitepulse/reports/select-project")
+    selector_body = selector_resp.get_data(as_text=True)
+    check("non-operational (In Progress, never awarded) project does NOT appear in the selector", "__RepTest PursuingOnly" not in selector_body)
+    check("Awarded project DOES appear in the selector", "__RepTest AwardedProj" in selector_body)
+
+    # A project with a Deployment record must remain eligible even if its
+    # Project Hunt status later changes away from Awarded -- no stranding.
+    pid_deployed_then_changed = make_project(name="__RepTest DeployedThenChanged", status="Awarded")
+    now3 = datetime.utcnow().isoformat()
+    db.execute("INSERT INTO project_deployments (project_id, status, created_at, updated_at) VALUES (?,?,?,?)", (pid_deployed_then_changed, "Not Started", now3, now3))
+    db.execute("UPDATE tracker_projects SET status='On Hold' WHERE id=?", (pid_deployed_then_changed,))
+    db.commit()
+    selector_resp2 = author_client.get("/sitepulse/reports/select-project")
+    check("a project with a Deployment record remains eligible even after its Project Hunt status changes away from Awarded (no stranding)",
+          "__RepTest DeployedThenChanged" in selector_resp2.get_data(as_text=True))
+
+    print()
+    print("=== V1.3: project search/filter ===")
+    search_resp = author_client.get("/sitepulse/reports/select-project?q=AwardedProj")
+    search_body = search_resp.get_data(as_text=True)
+    check("search filters to the matching project", "__RepTest AwardedProj" in search_body and "__RepTest DeployedThenChanged" not in search_body)
+
+    print()
+    print("=== V1.3: Rental Swap Queue placement ===")
+    sitepulse_home_body = author_client.get("/inventory/").get_data(as_text=True)
+    check("Rental Swap Queue absent from SitePulse home", "Rental Swap Queue" not in sitepulse_home_body)
+    equip_uid_v13 = make_user(db, "__rep_equip_v13@test.local", "__rep_equip_v13", now, pw_hash, ["module:equipment_center:view"])
+    equip_client_v13 = appmod.app.test_client()
+    login(equip_client_v13, "__rep_equip_v13@test.local", pw)
+    equipment_dashboard_body = equip_client_v13.get("/sitepulse/").get_data(as_text=True)
+    check("Rental Swap Queue present on the Equipment Center dashboard", "Rental Swap Queue" in equipment_dashboard_body)
+
+    print()
+    print("=== V1.3: navigation active-state ===")
+    reports_nav_body = author_client.get("/sitepulse/reports/select-project").get_data(as_text=True)
+    sitepulse_nav_idx = reports_nav_body.find(">SitePulse</a>")
+    equip_nav_idx = reports_nav_body.find(">Equipment Center</a>")
+    sitepulse_active = 'class="active"' in reports_nav_body[max(0, sitepulse_nav_idx-200):sitepulse_nav_idx]
+    equip_active = 'class="active"' in reports_nav_body[max(0, equip_nav_idx-200):equip_nav_idx]
+    check("Field Reports route highlights SitePulse as active", sitepulse_active)
+    check("Field Reports route does NOT highlight Equipment Center as active", not equip_active)
+
+    equip_dash_body = equip_client_v13.get("/sitepulse/").get_data(as_text=True)
+    equip_nav_idx2 = equip_dash_body.find(">Equipment Center</a>")
+    equip_active2 = 'class="active"' in equip_dash_body[max(0, equip_nav_idx2-200):equip_nav_idx2]
+    check("Equipment Center's own dashboard still correctly highlights Equipment Center (no regression)", equip_active2)
+
+    print()
+    print("=== V1.3: Back navigation ===")
+    check("Select Project has a Back-to-SitePulse link", "Back to SitePulse" in selector_body)
+    daily_capture_body = author_client.get(f"/sitepulse/project/{pid_awarded}/photos").get_data(as_text=True)
+    check("Daily Capture has a Back-to-Field-Reports link", "Back to Field Reports" in daily_capture_body)
+    history_body_v13 = author_client.get(f"/sitepulse/project/{pid_awarded}/reports").get_data(as_text=True)
+    check("Report History has a Back-to-Field-Reports link", "Back to Field Reports" in history_body_v13)
+
+    print()
+    print("=== V1.3: submitted report renders read-only, draft remains editable ===")
+    pid_ux = make_project(name="__RepTest SubmittedUX", status="Awarded")
+    token_uxr = get_csrf(author_client, f"/sitepulse/project/{pid_ux}/reports")
+    author_client.post(f"/sitepulse/project/{pid_ux}/reports/new", data={"csrf_token": token_uxr})
+    ux_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_ux,)).fetchone()
+
+    draft_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}").get_data(as_text=True)
+    check("Draft report still renders an editable textarea for Work Completed", '<textarea class="rep-field" name="work_completed"' in draft_body)
+    check("Back-to-Reports link present on the report page", "Back to Reports" in draft_body)
+
+    token_uxs = get_csrf(author_client, f"/sitepulse/reports/{ux_report['id']}")
+    author_client.post(f"/sitepulse/reports/{ux_report['id']}", data={
+        "csrf_token": token_uxs, "work_completed": "UX hierarchy test", "has_issues": "no", "next_steps": "x", "general_notes": ""
+    })
+    token_uxsub = get_csrf(author_client, f"/sitepulse/reports/{ux_report['id']}")
+    author_client.post(f"/sitepulse/reports/{ux_report['id']}/submit", data={"csrf_token": token_uxsub})
+
+    submitted_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}").get_data(as_text=True)
+    check("Submitted report does NOT render an editable Work Completed textarea by default", '<textarea class="rep-field" name="work_completed"' not in submitted_body)
+    check("Submitted report shows the actual content as read-only text", "UX hierarchy test" in submitted_body)
+    check("Submitted report shows Share as a primary action", "share-report-btn" in submitted_body)
+    check("Submitted report shows Download PDF as a primary action", "Download PDF" in submitted_body)
+
+    # Verify layout ORDER: primary actions/content must appear before Version History in the HTML.
+    version_history_idx = submitted_body.find("Version History")
+    work_completed_idx = submitted_body.find("Work Completed")
+    check("Version History appears AFTER the report content (Work Completed), not before it",
+          version_history_idx > work_completed_idx and work_completed_idx != -1 and version_history_idx != -1)
+    share_idx = submitted_body.find("share-report-btn")
+    check("Primary Share/Download actions appear BEFORE Version History", share_idx < version_history_idx)
+
+    print()
+    print("=== V1.3: Reopen permission remains manage-only, correctly returns Submitted -> Draft ===")
+    author_only_uid_v13 = make_user(db, "__rep_authoronly_v13@test.local", "__rep_authoronly_v13", now, pw_hash, ["module:sitepulse:view", "action:sitepulse:report"])
+    author_only_client_v13 = appmod.app.test_client()
+    login(author_only_client_v13, "__rep_authoronly_v13@test.local", pw)
+    reopen_attempt_body = author_only_client_v13.get(f"/sitepulse/reports/{ux_report['id']}").get_data(as_text=True)
+    check("author-only (no manage) user does not see the Reopen action", "Reopen for Editing" not in reopen_attempt_body)
+
+    token_reopen_v13 = get_csrf(author_client, f"/sitepulse/reports/{ux_report['id']}")
+    author_client.post(f"/sitepulse/reports/{ux_report['id']}/reopen", data={"csrf_token": token_reopen_v13})
+    ux_report_reopened = db.execute("SELECT status FROM field_reports WHERE id=?", (ux_report["id"],)).fetchone()
+    check("Reopen (by an authorized manager) correctly returns Submitted to Draft", ux_report_reopened["status"] == "Draft")
+    reopened_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}").get_data(as_text=True)
+    check("after Reopen, the report renders editable again", '<textarea class="rep-field" name="work_completed"' in reopened_body)
+
+    print()
+    print("=== V1.3: historical version photos remain correct, current-submitted photos correspond to current version ===")
+    v1_heic_report_body = author_client.get(f"/sitepulse/reports/{heic_report['id']}").get_data(as_text=True)
+    check("submitted report's Report Photos section reflects the current version's own snapshot photos", "iPhone jobsite photo" in v1_heic_report_body)
+
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
     print("\nCleaning up...")
