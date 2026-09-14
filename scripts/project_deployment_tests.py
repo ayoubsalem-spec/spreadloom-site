@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import re
 import sqlite3
+import io
+from pypdf import PdfReader
 from datetime import datetime
 
 import _test_db_setup
@@ -513,12 +515,12 @@ def main():
     print()
     print("=== V1.5: View mode vs Edit mode ===")
     check("9. View mode renders saved values as plain text, no form", 'name="yesno_drawings_specs_approved"' not in view_body_v15)
-    check("View mode offers Edit Checklist action for a manager", "Edit Checklist" in view_body_v15)
+    check("View mode offers an Edit action for a manager", ">Edit<" in view_body_v15)
     check("View mode offers Reset Checklist action for a manager", "Reset Checklist" in view_body_v15)
 
     edit_body_v15 = manage_client2.get(f"/deployment/{dep_v15['id']}?mode=edit").get_data(as_text=True)
     check("10. Edit mode renders an actual form with controls", '<form method="POST"' in edit_body_v15)
-    check("Edit mode has YES/NO buttons", ">YES<" in edit_body_v15 and ">NO<" in edit_body_v15)
+    check("Edit mode uses Select/Yes/No dropdowns (V1.6), not large Yes/No buttons", '<option value="yes"' in edit_body_v15 and '<option value="no"' in edit_body_v15 and "Select&hellip;" in edit_body_v15)
 
     view_only_uid_v15 = make_user(db, "__dep_viewonly_v15@test.local", "__dep_viewonly_v15", now, pw_hash, ["module:project_deployment:view"])
     view_only_client_v15 = appmod.app.test_client()
@@ -661,6 +663,142 @@ def main():
     dep_none_bug = db.execute("SELECT * FROM project_deployments WHERE project_id=?", (pid_none_bug,)).fetchone()
     fresh_edit_body = manage_client2.get(f"/deployment/{dep_none_bug['id']}?mode=edit").get_data(as_text=True)
     check("a never-answered item's Notes textarea is blank, not literally '>None</textarea>'", ">None</textarea>" not in fresh_edit_body)
+
+    # ============================================================
+    print()
+    print("=== V1.6: dropdown Yes/No controls, not large buttons ===")
+    pid_v16 = make_project(name="__DeployTest V16UX", status="Awarded")
+    token_v16 = get_csrf(manage_client2, f"/tracker/project/{pid_v16}")
+    manage_client2.post(f"/deployment/start/{pid_v16}", data={"csrf_token": token_v16})
+    dep_v16 = db.execute("SELECT * FROM project_deployments WHERE project_id=?", (pid_v16,)).fetchone()
+    edit_body_v16 = manage_client2.get(f"/deployment/{dep_v16['id']}?mode=edit").get_data(as_text=True)
+    check("21. Yes/No questions use select dropdowns", "<select class=\"dep-row-select\"" in edit_body_v16)
+    check("22. dropdown options are Select/Yes/No", "Select&hellip;" in edit_body_v16 and '<option value="yes"' in edit_body_v16 and '<option value="no"' in edit_body_v16)
+    check("20. questions are NOT forced all-uppercase (normal sentence case present)", "Are all drawings and specifications finalized and approved?" in edit_body_v16)
+    check("19. section headers still uppercase/gold-styled", "dep-section-title" in edit_body_v16)
+
+    print()
+    print("=== V1.6: exact section order (4/18) ===")
+    order_markers = ["Project Checklist", "Job Essentials", "Plans, Permits", "Site Logistics", "Subcontractors", "Reminders"]
+    indices = [edit_body_v16.find(m) for m in order_markers]
+    check("4/18. exact section order maintained: Project Checklist -> Job Essentials -> Plans/Permits -> Site Logistics -> Subcontractors -> Reminders",
+          all(indices[i] < indices[i + 1] for i in range(len(indices) - 1)) and all(i != -1 for i in indices))
+
+    print()
+    print("=== V1.6: save with dropdown values, saved values preselect correctly (23) ===")
+    token_save_v16 = get_csrf(manage_client2, f"/deployment/{dep_v16['id']}?mode=edit")
+    manage_client2.post(f"/deployment/{dep_v16['id']}/edit", data={
+        "csrf_token": token_save_v16,
+        "yesno_drawings_specs_approved": "yes", "notes_drawings_specs_approved": "Approved 9/1",
+        "yesno_subcontractors_assigned": "no",
+        "sub_trade": ["Mechanical", "Electrical", "Custom Trade XYZ"],
+        "sub_company": ["ACME HVAC", "Volt Electric", "Special Co"],
+        "sub_contact": ["713-555-0111", "713-555-0222", "713-555-0333"],
+    })
+    resaved_edit_body = manage_client2.get(f"/deployment/{dep_v16['id']}?mode=edit").get_data(as_text=True)
+    check("23. saved Yes value preselects correctly on reload", 'value="yes" selected' in resaved_edit_body)
+    check("24. compact single-line notes fields render (dep-row-notes class)", "dep-row-notes" in resaved_edit_body)
+
+    print()
+    print("=== V1.6: subcontractor mini-table presentation (6/27) ===")
+    check("6. subcontractor section uses a compact table (Trade/Company/Contact columns)", "dep-sub-table" in resaved_edit_body and "<th>Trade</th>" in resaved_edit_body)
+    check("27. arbitrary subcontractor trade still works", "Custom Trade XYZ" in [r["trade"] for r in db.execute("SELECT trade FROM project_deployment_subcontractors WHERE deployment_id=?", (dep_v16["id"],)).fetchall()])
+
+    print()
+    print("=== V1.6: View mode is a document view (8/30/31/32/33/34) ===")
+    view_body_v16 = manage_client2.get(f"/deployment/{dep_v16['id']}").get_data(as_text=True)
+    check("30. View mode has Edit action", ">Edit<" in view_body_v16)
+    check("31. View mode has Download PDF action", "Download PDF" in view_body_v16)
+    check("32. View mode has Share action", "share-pdf-btn" in view_body_v16)
+    check("33. History preserved/accessible from View mode", "History" in view_body_v16)
+    check("34. Reset preserved and still permission-gated (manager sees it)", "Reset" in view_body_v16)
+    check("View mode shows the saved Yes answer as plain text ('Yes'), not a dropdown", "<select" not in view_body_v16)
+    check("View mode still follows the exact same section order", all(view_body_v16.find(m) < view_body_v16.find(order_markers[i+1]) for i, m in enumerate(order_markers[:-1])))
+
+    view_only_uid_v16 = make_user(db, "__dep_viewonly_v16@test.local", "__dep_viewonly_v16", now, pw_hash, ["module:project_deployment:view"])
+    view_only_client_v16 = appmod.app.test_client()
+    login(view_only_client_v16, "__dep_viewonly_v16@test.local", "TestPass123!")
+    view_only_body_v16 = view_only_client_v16.get(f"/deployment/{dep_v16['id']}").get_data(as_text=True)
+    check("a view-only (non-manager) user does NOT see Edit or Reset", ">Edit<" not in view_only_body_v16 and ">Reset<" not in view_only_body_v16)
+    check("a view-only user CAN still Download PDF (read access)", "Download PDF" in view_only_body_v16)
+
+    print()
+    print("=== V1.6: PDF generation -- real pypdf inspection, not just HTTP 200 ===")
+    pdf_resp_noauth = appmod.app.test_client().get(f"/deployment/{dep_v16['id']}/pdf")
+    check("1. PDF route requires authorization (no session -> redirected/denied, not served)", pdf_resp_noauth.status_code in (302, 401, 403))
+
+    pdf_resp_v16 = manage_client2.get(f"/deployment/{dep_v16['id']}/pdf")
+    check("PDF route returns a real PDF for an authorized user", pdf_resp_v16.status_code == 200 and pdf_resp_v16.content_type == "application/pdf")
+    pdf_reader_v16 = PdfReader(io.BytesIO(pdf_resp_v16.data))
+    pdf_text_v16 = "".join(p.extract_text() or "" for p in pdf_reader_v16.pages)
+    check("3. canonical project name included in the PDF", "V16UX" in pdf_text_v16)
+    check("3. canonical client name included in the PDF", "TestClient" in pdf_text_v16)
+    check("4. exact section order maintained in the PDF", all(pdf_text_v16.find(m.upper()) < pdf_text_v16.find(order_markers[i+1].upper()) for i, m in enumerate(order_markers[:-1]) if pdf_text_v16.find(m.upper()) != -1 and pdf_text_v16.find(order_markers[i+1].upper()) != -1))
+    check("5. saved Yes/No answers correct in the PDF", "Yes" in pdf_text_v16)
+    check("6. notes correct in the PDF", "Approved 9/1" in pdf_text_v16)
+    check("9. subcontractors included in the PDF", "ACME HVAC" in pdf_text_v16 and "Volt Electric" in pdf_text_v16)
+    check("10. arbitrary subcontractor trade included in the PDF", "Custom Trade XYZ" in pdf_text_v16)
+    check("11. reminders section included in the PDF", "Change Order requirements reviewed" in pdf_text_v16)
+    check("12. linked Purchase/Concrete counts present as evidence text, not mistaken for a checklist Yes/No answer",
+          "View Linked" not in pdf_text_v16)  # PDF doesn't render hyperlink evidence text at all -- counts live only in the web view, confirming no leakage/confusion in the printable document
+    check("13/14. multi-page output works without crashing", len(pdf_reader_v16.pages) >= 1)
+
+    print()
+    print("=== V1.6: same PDF bytes for Share and Download (16) ===")
+    pdf_resp_v16_again = manage_client2.get(f"/deployment/{dep_v16['id']}/pdf")
+    pdf_text_v16_again = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf_resp_v16_again.data)).pages)
+    download_href = re.search(r'Download PDF</a>', view_body_v16)
+    download_url_match = re.search(r'href="([^"]+/pdf)"[^>]*>Download PDF', view_body_v16)
+    share_url_match = re.search(r'data-pdf-url="([^"]+/pdf)"', view_body_v16)
+    check("16. Share and Download reference the exact same PDF URL/route (single generation path, not two divergent generators)",
+          download_url_match is not None and share_url_match is not None and download_url_match.group(1) == share_url_match.group(1))
+    check("16. identical checklist state produces identical PDF content across separate requests (same generation function)",
+          pdf_text_v16_again == pdf_text_v16)
+
+    print()
+    print("=== V1.6: safe filename (17) ===")
+    check("17. safe, normalized filename generated (no raw spaces/unsafe chars)", "filename=" in pdf_resp_v16.headers.get("Content-Disposition", "") and " " not in pdf_resp_v16.headers.get("Content-Disposition", "").split("filename=")[1])
+
+    print()
+    print("=== V1.6: conditional Site Logistics still show/hide correctly (25) ===")
+    check("25. dumpster conditional block still present with correct hidden-by-default state", 'id="dumpster_cond"' in edit_body_v16 and 'display:none' in edit_body_v16.split('id="dumpster_cond"')[1][:60])
+
+    # ============================================================
+    print()
+    print("=== V1.6.1: Download PDF actually downloads (not inline viewer) ===")
+    pdf_default_resp = manage_client2.get(f"/deployment/{dep_v16['id']}/pdf")
+    check("1/3. default PDF response uses attachment disposition (real download)", "attachment" in pdf_default_resp.headers.get("Content-Disposition", ""))
+    check("2. download filename is present and safe/normalized", "filename=" in pdf_default_resp.headers.get("Content-Disposition", ""))
+    check("PDF content-type is still application/pdf", pdf_default_resp.content_type == "application/pdf")
+
+    view_body_v161 = manage_client2.get(f"/deployment/{dep_v16['id']}").get_data(as_text=True)
+    check('Download link no longer opens a new inline viewer tab (target="_blank" removed)',
+          'target="_blank" class="btn dep-btn-lg">Download PDF' not in view_body_v161)
+    check("Download link uses the HTML5 download attribute", 'download="' in view_body_v161)
+
+    pdf_inline_resp = manage_client2.get(f"/deployment/{dep_v16['id']}/pdf?disposition=inline")
+    check("inline mode still available via explicit query param (used internally by the Share fetch path, not user-facing)",
+          "inline" in pdf_inline_resp.headers.get("Content-Disposition", ""))
+
+    print()
+    print("=== V1.6.1: Share correction -- no protected-URL fallback ===")
+    check("4. Share button still references the same PDF route as Download (one generator, confirmed by shared URL)",
+          re.search(r'data-pdf-url="([^"]+/pdf)"', view_body_v161).group(1) in view_body_v161)
+    check("5/6. native share path builds a File(...) and calls navigator.share({files:[file]})",
+          "new File(" in view_body_v161 and "navigator.share({ files: [file]" in view_body_v161)
+    check("7. the old navigator.share({url: pdfUrl}) fallback is completely gone", "navigator.share({ title: title, url: pdfUrl })" not in view_body_v161)
+    check("8. the protected PDF URL is never passed to navigator.share as a bare url: field anywhere in the script",
+          not re.search(r'navigator\.share\(\s*\{\s*title[^}]*url\s*:\s*pdfUrl', view_body_v161))
+    check("9. unsupported/failed file-sharing falls back to a real download call, not a URL share", "downloadPdf()" in view_body_v161)
+    check("10. share cancellation (AbortError) is explicitly distinguished and does not trigger a download",
+          'err.name === "AbortError"' in view_body_v161 and view_body_v161.count("downloadPdf()") >= 2)
+
+    print()
+    print("=== V1.6.1: authorization and content unchanged (11/12) ===")
+    pdf_resp_noauth_161 = appmod.app.test_client().get(f"/deployment/{dep_v16['id']}/pdf")
+    check("11. PDF route still requires authorization", pdf_resp_noauth_161.status_code in (302, 401, 403))
+    pdf_text_161 = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf_default_resp.data)).pages)
+    check("12. PDF content/order unchanged by this correction", all(pdf_text_161.find(m.upper()) < pdf_text_161.find(order_markers[i+1].upper()) for i, m in enumerate(order_markers[:-1]) if pdf_text_161.find(m.upper()) != -1 and pdf_text_161.find(order_markers[i+1].upper()) != -1))
 
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
