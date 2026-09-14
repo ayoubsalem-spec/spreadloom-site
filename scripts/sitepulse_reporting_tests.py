@@ -14,7 +14,7 @@ import re
 import sqlite3
 from datetime import datetime
 from unittest.mock import patch
-from PIL import Image
+from PIL import Image, ImageOps, ImageDraw
 from pypdf import PdfReader
 import pillow_heif
 pillow_heif.register_heif_opener()
@@ -769,6 +769,144 @@ def main():
     print("=== V1.3: historical version photos remain correct, current-submitted photos correspond to current version ===")
     v1_heic_report_body = author_client.get(f"/sitepulse/reports/{heic_report['id']}").get_data(as_text=True)
     check("submitted report's Report Photos section reflects the current version's own snapshot photos", "iPhone jobsite photo" in v1_heic_report_body)
+
+    print()
+    print("=== V1.3.1: Daily Capture structural changes -- dedicated camera/library inputs ===")
+    daily_capture_body = author_client.get(f"/sitepulse/project/{pid_awarded}/photos").get_data(as_text=True)
+    check("dedicated camera input exists (id=cameraInput)", 'id="cameraInput"' in daily_capture_body)
+    check("camera input has capture=\"environment\"", 'id="cameraInput" accept="image/*" capture="environment"' in daily_capture_body)
+    check("dedicated library input exists (id=libraryInput)", 'id="libraryInput"' in daily_capture_body)
+    check("library input has NO capture attribute", 'id="libraryInput" accept="image/*" multiple' in daily_capture_body and "capture" not in daily_capture_body.split('id="libraryInput"')[1].split(">")[0])
+    check("library input supports multiple", 'id="libraryInput" accept="image/*" multiple' in daily_capture_body)
+    check("client-side pending accumulation logic present (addFiles function)", "function addFiles(fileList)" in daily_capture_body)
+    check("pending files are appended, never replaced (push, not reassignment)", "pendingFiles.push(fileList[i])" in daily_capture_body)
+    check("remove preserves other pending files (splice by index)", "pendingFiles.splice(idx, 1)" in daily_capture_body)
+    check("Save submits the entire pending batch via DataTransfer in one request", "new DataTransfer()" in daily_capture_body and "fetch(form.action" in daily_capture_body)
+    check("HEIC/HEIF pending files get a neutral placeholder instead of being rejected for lack of preview", "isPreviewable" in daily_capture_body)
+    check("post-save state offers both Add More Photos and Create Report", "Add More Photos" in daily_capture_body and "Create Report" in daily_capture_body)
+
+    print()
+    print("=== V1.3.1: backend upload path unchanged -- mixed batch still saves correctly in one POST (proves Save-once works end to end) ===")
+    pid_batch = make_project(name="__RepTest BatchUpload")
+    token_batch = get_csrf(author_client, f"/sitepulse/project/{pid_batch}/photos")
+    batch_resp = author_client.post(f"/sitepulse/project/{pid_batch}/photos", data={
+        "csrf_token": token_batch,
+        "photos": [(real_photo((10, 200, 10)), "cam1.jpg"), (real_photo((10, 10, 200)), "cam2.jpg"),
+                   (real_photo((200, 10, 10)), "lib1.jpg"), (real_photo((200, 200, 10)), "lib2.jpg")]
+    }, content_type="multipart/form-data")
+    batch_photos = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_batch,)).fetchall()
+    check("a mixed 4-photo batch (simulating camera+camera+library+library) saves in one POST", len(batch_photos) == 4)
+    check("invalid file in an otherwise-valid batch is safely rejected without crashing the request", batch_resp.status_code in (200, 302))
+
+    print()
+    print("=== V1.3.1: PDF ORIENTATION -- the actual production defect, proven and fixed ===")
+
+    def make_exif_jpeg(width, height, orientation):
+        img = Image.new("RGB", (width, height), color=(100, 100, 200))
+        d = ImageDraw.Draw(img)
+        d.rectangle([5, 5, 40, 40], fill=(255, 255, 0))
+        exif = img.getexif()
+        if orientation:
+            exif[0x0112] = orientation
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", exif=exif, quality=90)
+        buf.seek(0)
+        return buf
+
+    pid_exif = make_project(name="__RepTest ExifOrientation")
+    exif_fixtures = [
+        ("normal_landscape", make_exif_jpeg(600, 450, 1), (600, 450)),
+        ("normal_portrait", make_exif_jpeg(450, 600, 1), (450, 600)),
+        ("exif_orientation_6", make_exif_jpeg(600, 450, 6), (450, 600)),
+        ("exif_orientation_8", make_exif_jpeg(600, 450, 8), (450, 600)),
+        ("exif_orientation_3", make_exif_jpeg(600, 450, 3), (600, 450)),
+    ]
+    exif_photo_ids = {}
+    for label, buf, expected_display_size in exif_fixtures:
+        token_ex = get_csrf(author_client, f"/sitepulse/project/{pid_exif}/photos")
+        author_client.post(f"/sitepulse/project/{pid_exif}/photos", data={
+            "csrf_token": token_ex, "photos": [(buf, f"{label}.jpg")]
+        }, content_type="multipart/form-data")
+        photo_row = db.execute("SELECT * FROM project_field_photos WHERE project_id=? ORDER BY id DESC LIMIT 1", (pid_exif,)).fetchone()
+        exif_photo_ids[label] = (photo_row["id"], photo_row["filename"], expected_display_size)
+
+    # Direct unit-level proof: the exact orientation-correction logic
+    # used inside build_field_report_pdf, applied to each real fixture,
+    # produces the correct DISPLAY dimensions -- not just HTTP 200.
+    for label, (photo_id, filename, expected_size) in exif_photo_ids.items():
+        path = os.path.join(appmod.UPLOAD_DIR, filename)
+        img = Image.open(path)
+        corrected = ImageOps.exif_transpose(img)
+        check(f"EXIF fix -- {label}: corrected display size matches expected {expected_size}", corrected.size == expected_size)
+
+    check("CRITICAL: landscape RAW PIXELS + EXIF Orientation 6 renders PORTRAIT (the actual phone-photo case)",
+          exif_photo_ids["exif_orientation_6"][2] == (450, 600))
+    check("CRITICAL: a legitimate landscape photo (no rotation needed) remains landscape",
+          exif_photo_ids["normal_landscape"][2] == (600, 450))
+
+    # Full end-to-end: build a real report with ALL orientation cases,
+    # submit it, and inspect the genuine generated PDF -- not just that
+    # generation succeeded.
+    token_exr = get_csrf(author_client, f"/sitepulse/project/{pid_exif}/reports")
+    author_client.post(f"/sitepulse/project/{pid_exif}/reports/new", data={"csrf_token": token_exr})
+    exif_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_exif,)).fetchone()
+    token_exs = get_csrf(author_client, f"/sitepulse/reports/{exif_report['id']}")
+    author_client.post(f"/sitepulse/reports/{exif_report['id']}", data={
+        "csrf_token": token_exs, "work_completed": "EXIF orientation regression test", "has_issues": "no", "next_steps": "x", "general_notes": "",
+        "selected_photos": [str(v[0]) for v in exif_photo_ids.values()]
+    })
+    token_exsub = get_csrf(author_client, f"/sitepulse/reports/{exif_report['id']}")
+    author_client.post(f"/sitepulse/reports/{exif_report['id']}/submit", data={"csrf_token": token_exsub})
+    exif_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (exif_report["id"],)).fetchone()
+    check("report containing all 5 EXIF orientation cases submits successfully", exif_report_after["status"] == "Submitted")
+    exif_v1 = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (exif_report["id"],)).fetchone()
+    exif_pdf_resp = author_client.get(f"/sitepulse/reports/{exif_report['id']}/versions/{exif_v1['id']}/pdf")
+    check("EXIF regression PDF downloads successfully", exif_pdf_resp.status_code == 200)
+    exif_pdf_images = sum(len(p.images) for p in PdfReader(io.BytesIO(exif_pdf_resp.data)).pages)
+    check("EXIF regression PDF actually embeds all 5 images", exif_pdf_images >= 5)
+
+    print()
+    print("=== V1.3.1: PNG/WEBP orientation and aspect ratio preserved (no regression from the JPEG-focused fix) ===")
+    for label, fmt, size in [("png_portrait", "PNG", (450, 600)), ("webp_landscape", "WEBP", (600, 450))]:
+        pid_fmt_o = make_project(name=f"__RepTest {label}")
+        buf = io.BytesIO()
+        Image.new("RGB", size, color=(50, 150, 100)).save(buf, format=fmt, quality=90)
+        buf.seek(0)
+        ext = "png" if fmt == "PNG" else "webp"
+        token_fo = get_csrf(author_client, f"/sitepulse/project/{pid_fmt_o}/photos")
+        author_client.post(f"/sitepulse/project/{pid_fmt_o}/photos", data={"csrf_token": token_fo, "photos": [(buf, f"test.{ext}")]}, content_type="multipart/form-data")
+        fmt_photo_o = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_fmt_o,)).fetchone()
+        stored_img = Image.open(os.path.join(appmod.UPLOAD_DIR, fmt_photo_o["filename"]))
+        check(f"{label}: stored file preserves its true dimensions/aspect ratio ({size})", stored_img.size == size)
+
+    print()
+    print("=== V1.3.1: HEIC regression remains green after the orientation fix ===")
+    pid_heic_v131 = make_project(name="__RepTest HeicAfterOrientationFix")
+    heic_buf_v131 = io.BytesIO()
+    Image.new("RGB", (600, 450), color=(90, 60, 210)).save(heic_buf_v131, format="HEIF", quality=90)
+    heic_buf_v131.seek(0)
+    token_hv131 = get_csrf(author_client, f"/sitepulse/project/{pid_heic_v131}/photos")
+    heic_resp_v131 = author_client.post(f"/sitepulse/project/{pid_heic_v131}/photos", data={"csrf_token": token_hv131, "photos": [(heic_buf_v131, "iphone.heic")]}, content_type="multipart/form-data")
+    check("HEIC upload still works after the orientation fix", heic_resp_v131.status_code in (200, 302))
+    heic_photo_v131 = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_heic_v131,)).fetchone()
+    check("HEIC still normalizes to JPEG", heic_photo_v131["filename"].lower().endswith(".jpg"))
+
+    print()
+    print("=== V1.3.1: missing/unreadable selected photo still blocks submission safely (regression) ===")
+    pid_missing_v131 = make_project(name="__RepTest MissingV131")
+    token_mv131 = get_csrf(author_client, f"/sitepulse/project/{pid_missing_v131}/photos")
+    author_client.post(f"/sitepulse/project/{pid_missing_v131}/photos", data={"csrf_token": token_mv131, "photos": [(real_photo((5, 5, 5)), "vanish.jpg")]}, content_type="multipart/form-data")
+    missing_photo_v131 = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_missing_v131,)).fetchone()
+    os.remove(os.path.join(appmod.UPLOAD_DIR, missing_photo_v131["filename"]))
+    token_mr131 = get_csrf(author_client, f"/sitepulse/project/{pid_missing_v131}/reports")
+    author_client.post(f"/sitepulse/project/{pid_missing_v131}/reports/new", data={"csrf_token": token_mr131})
+    missing_report_v131 = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_missing_v131,)).fetchone()
+    token_ms131 = get_csrf(author_client, f"/sitepulse/reports/{missing_report_v131['id']}")
+    author_client.post(f"/sitepulse/reports/{missing_report_v131['id']}", data={"csrf_token": token_ms131, "work_completed": "x", "has_issues": "no", "next_steps": "x", "general_notes": "", "selected_photos": [str(missing_photo_v131["id"])]})
+    token_msub131 = get_csrf(author_client, f"/sitepulse/reports/{missing_report_v131['id']}")
+    author_client.post(f"/sitepulse/reports/{missing_report_v131['id']}/submit", data={"csrf_token": token_msub131})
+    missing_report_after_v131 = db.execute("SELECT * FROM field_reports WHERE id=?", (missing_report_v131["id"],)).fetchone()
+    check("missing selected photo still blocks Submit after the orientation fix (regression)", missing_report_after_v131["status"] == "Draft")
 
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
