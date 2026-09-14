@@ -8,7 +8,12 @@
     .rep-photo-card img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; display:block; }
     .rep-caption-input { width:100%; font-size:16px; padding:12px; min-height:44px; box-sizing:border-box; }
     .rep-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; width:100%; box-sizing:border-box; }
-    .rep-upload-input { font-size:16px; padding:14px; min-height:48px; width:100%; box-sizing:border-box; }
+    .rep-action-row { display:flex; gap:10px; flex-wrap:wrap; }
+    .rep-action-row button { flex:1; min-width:150px; }
+    .rep-pending-tile { position:relative; border-radius:8px; overflow:hidden; border:2px solid var(--line); }
+    .rep-pending-tile img, .rep-pending-tile .rep-pending-placeholder { width:100%; aspect-ratio:4/3; object-fit:cover; display:flex; align-items:center; justify-content:center; background:var(--surface-2); font-size:11px; text-align:center; padding:6px; box-sizing:border-box; }
+    .rep-pending-remove { position:absolute; top:6px; right:6px; background:rgba(10,20,32,0.85); color:#fff; border:none; border-radius:50%; width:32px; height:32px; font-size:16px; cursor:pointer; }
+    .rep-saved-banner { text-align:center; padding:20px; }
 </style>
 <span class="rc-eyebrow">SitePulse</span>
 <h1 style="word-break:break-word;">{{ project['name'] }}</h1>
@@ -19,15 +24,162 @@
 </div>
 
 {% if can_author %}
-<div class="card">
-    <form method="POST" enctype="multipart/form-data">
+<div class="card" id="captureState">
+    <!-- STATE A: empty -- two explicit actions -->
+    <div id="emptyActions" class="rep-action-row">
+        <button type="button" class="btn btn-gold rep-btn-lg" id="takePhotoBtn">Take Photo</button>
+        <button type="button" class="btn rep-btn-lg" id="chooseLibraryBtn">Choose From Library</button>
+    </div>
+
+    <!-- Hidden dedicated inputs -- camera input biases the rear camera;
+         library input has NO capture attribute so the browser offers
+         its normal Photo Library / file picker. Each click event
+         re-triggers picking, and results are merged into the
+         client-side pendingFiles array below -- never replacing it. -->
+    <input type="file" id="cameraInput" accept="image/*" capture="environment" style="display:none;">
+    <input type="file" id="libraryInput" accept="image/*" multiple style="display:none;">
+
+    <!-- STATE B: pending tray -->
+    <div id="pendingTray" style="display:none; margin-top:16px;">
+        <div id="pendingCount" style="font-weight:600; margin-bottom:10px;"></div>
+        <div class="rep-photo-grid" id="pendingGrid"></div>
+        <div class="rep-action-row" style="margin-top:14px;">
+            <button type="button" class="btn rep-btn-lg" id="takeAnotherBtn">Take Another Photo</button>
+            <button type="button" class="btn rep-btn-lg" id="addFromLibraryBtn">Add From Library</button>
+        </div>
+        <button type="button" class="btn btn-gold rep-btn-lg" id="saveBtn" style="margin-top:14px;">Save Photos</button>
+    </div>
+
+    <!-- STATE C: saved result -->
+    <div id="savedState" style="display:none;">
+        <div class="rep-saved-banner">
+            <div id="savedMessage" style="font-size:18px; font-weight:600; color:var(--teal);"></div>
+        </div>
+        <div class="rep-action-row">
+            <button type="button" class="btn rep-btn-lg" id="addMoreBtn">Add More Photos</button>
+            <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-gold rep-btn-lg" style="text-align:center;">Create Report</a>
+        </div>
+    </div>
+
+    <!-- Real submission form -- populated via DataTransfer immediately
+         before submit so the entire pending batch uploads in ONE POST,
+         exactly like today's backend already expects (multipart file
+         list under the "photos" field name). -->
+    <form method="POST" enctype="multipart/form-data" id="uploadForm" style="display:none;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <label style="font-size:15px;">Take or Choose Photos</label>
-        <input class="rep-upload-input" type="file" name="photos" accept="image/*" capture="environment" multiple required>
-        <p class="sub" style="margin-top:8px;">Select as many photos as you need at once. Captions are optional — add them after saving.</p>
-        <button type="submit" class="btn btn-gold rep-btn-lg" style="margin-top:12px;">Save Photos</button>
+        <input type="file" name="photos" id="submitFileInput" multiple>
     </form>
 </div>
+
+<script>
+(function () {
+    var pendingFiles = [];
+    var cameraInput = document.getElementById('cameraInput');
+    var libraryInput = document.getElementById('libraryInput');
+    var pendingTray = document.getElementById('pendingTray');
+    var emptyActions = document.getElementById('emptyActions');
+    var savedState = document.getElementById('savedState');
+    var pendingGrid = document.getElementById('pendingGrid');
+    var pendingCount = document.getElementById('pendingCount');
+
+    function isPreviewable(file) {
+        // Client-side preview support for HEIC/HEIF can vary by
+        // browser -- never reject a valid pending file merely because
+        // no thumbnail could be generated. Show a neutral placeholder
+        // with the filename instead; the backend remains the source of
+        // truth for actual format validation.
+        var ext = file.name.split('.').pop().toLowerCase();
+        return ['heic', 'heif'].indexOf(ext) === -1;
+    }
+
+    function renderTray() {
+        pendingGrid.innerHTML = '';
+        pendingFiles.forEach(function (file, idx) {
+            var tile = document.createElement('div');
+            tile.className = 'rep-pending-tile';
+            if (isPreviewable(file)) {
+                var img = document.createElement('img');
+                img.src = URL.createObjectURL(file);
+                tile.appendChild(img);
+            } else {
+                var ph = document.createElement('div');
+                ph.className = 'rep-pending-placeholder';
+                ph.textContent = file.name;
+                tile.appendChild(ph);
+            }
+            var removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'rep-pending-remove';
+            removeBtn.textContent = '\u00d7';
+            removeBtn.setAttribute('aria-label', 'Remove photo');
+            removeBtn.addEventListener('click', function () {
+                pendingFiles.splice(idx, 1);
+                renderTray();
+            });
+            tile.appendChild(removeBtn);
+            pendingGrid.appendChild(tile);
+        });
+        var count = pendingFiles.length;
+        pendingCount.textContent = count + (count === 1 ? ' photo ready to save' : ' photos ready to save');
+        document.getElementById('saveBtn').textContent = 'Save ' + count + (count === 1 ? ' Photo' : ' Photos');
+        pendingTray.style.display = count > 0 ? 'block' : 'none';
+        emptyActions.style.display = count > 0 ? 'none' : 'flex';
+    }
+
+    function addFiles(fileList) {
+        // Accumulate, never replace -- this is the actual fix for the
+        // production issue: a normal file input replaces its own
+        // FileList on every interaction, so pending selections are
+        // tracked in this in-memory array instead, independent of
+        // whatever the browser's own input elements currently hold.
+        for (var i = 0; i < fileList.length; i++) {
+            pendingFiles.push(fileList[i]);
+        }
+        renderTray();
+    }
+
+    document.getElementById('takePhotoBtn').addEventListener('click', function () { cameraInput.click(); });
+    document.getElementById('takeAnotherBtn').addEventListener('click', function () { cameraInput.click(); });
+    document.getElementById('chooseLibraryBtn').addEventListener('click', function () { libraryInput.click(); });
+    document.getElementById('addFromLibraryBtn').addEventListener('click', function () { libraryInput.click(); });
+
+    cameraInput.addEventListener('change', function () { addFiles(cameraInput.files); cameraInput.value = ''; });
+    libraryInput.addEventListener('change', function () { addFiles(libraryInput.files); libraryInput.value = ''; });
+
+    document.getElementById('saveBtn').addEventListener('click', function () {
+        if (pendingFiles.length === 0) return;
+        // Build a single real FileList via DataTransfer and submit the
+        // whole pending batch as ONE POST -- not one request per photo.
+        var dt = new DataTransfer();
+        pendingFiles.forEach(function (f) { dt.items.add(f); });
+        var submitInput = document.getElementById('submitFileInput');
+        submitInput.files = dt.files;
+        var savedCount = pendingFiles.length;
+        var form = document.getElementById('uploadForm');
+        var formData = new FormData(form);
+        fetch(form.action || window.location.href, { method: 'POST', body: formData })
+            .then(function (response) {
+                if (!response.ok) {
+                    throw new Error('Upload failed (' + response.status + ')');
+                }
+                pendingFiles = [];
+                pendingTray.style.display = 'none';
+                emptyActions.style.display = 'none';
+                document.getElementById('savedMessage').textContent = savedCount + (savedCount === 1 ? ' photo saved \u2713' : ' photos saved \u2713');
+                savedState.style.display = 'block';
+            })
+            .catch(function () {
+                alert('Upload failed -- please try again.');
+            });
+    });
+
+    document.getElementById('addMoreBtn').addEventListener('click', function () {
+        savedState.style.display = 'none';
+        emptyActions.style.display = 'flex';
+        window.location.reload();
+    });
+})();
+</script>
 {% endif %}
 
 <h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Project Photos</h3>

@@ -510,7 +510,27 @@ def build_field_report_pdf(report_info, photos, version_number):
                 col = 0
             px = x + col * (img_w + gap)
             try:
-                c.drawImage(ImageReader(path), px, row_start_y - img_h, width=img_w, height=img_h, preserveAspectRatio=True, anchor="c")
+                # V1.3.1 ORIENTATION FIX: apply EXIF-orientation
+                # correction at PDF-render time, not at upload time --
+                # save_photo() and stored files remain completely
+                # unchanged for JPG/JPEG/PNG/WEBP (they still pass
+                # through as-is), matching the narrowest-robust
+                # architecture. ReportLab's ImageReader reads raw pixel
+                # data and does NOT honor EXIF Orientation at all --
+                # confirmed by direct code inspection, this is the
+                # actual root cause of a phone photo appearing sideways
+                # in the generated PDF. Loading via PIL first and
+                # applying ImageOps.exif_transpose() produces a
+                # correctly-oriented in-memory image, which ImageReader
+                # accepts directly (it supports a PIL Image object, not
+                # only a file path) -- no second file is written to
+                # disk, nothing is re-saved, this is render-time only.
+                # For HEIC/HEIF-normalized JPEGs (already corrected at
+                # upload time and typically EXIF-orientation-reset to
+                # 1), re-applying exif_transpose here is a safe no-op.
+                pil_img = Image.open(path)
+                pil_img = ImageOps.exif_transpose(pil_img)
+                c.drawImage(ImageReader(pil_img), px, row_start_y - img_h, width=img_w, height=img_h, preserveAspectRatio=True, anchor="c")
             except Exception:
                 # PRODUCTION FIX: this used to be a bare `except: pass`
                 # -- ANY image decode/draw failure (corrupt file,
@@ -1405,6 +1425,19 @@ def init_db():
             UNIQUE(deployment_id, item_code)
         );
 
+        -- V1.5: small, additive, deployment-checklist-scoped only -- NOT
+        -- a subcontractor-management module. One row per assigned trade
+        -- on this specific deployment's checklist.
+        CREATE TABLE IF NOT EXISTS project_deployment_subcontractors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deployment_id INTEGER NOT NULL,
+            trade TEXT,
+            company TEXT,
+            contact TEXT,
+            created_at TEXT,
+            FOREIGN KEY (deployment_id) REFERENCES project_deployments (id)
+        );
+
         -- SITEPULSE REPORTING (V1). Photos are PROJECT-owned (never tied
         -- to one report) -- report_photo_selections is the only place
         -- report-membership is expressed, so selecting a photo for a
@@ -1882,6 +1915,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_atlas_messages_conversation ON atlas_messages(conversation_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_rental_swaps_rental ON sitepulse_rental_swaps(rental_id, id)",
         "CREATE INDEX IF NOT EXISTS idx_deployment_items_deployment ON project_deployment_items(deployment_id, item_code)",
+        "CREATE INDEX IF NOT EXISTS idx_deployment_subcontractors_deployment ON project_deployment_subcontractors(deployment_id)",
         "CREATE INDEX IF NOT EXISTS idx_field_photos_project ON project_field_photos(project_id, archived, uploaded_at)",
         "CREATE INDEX IF NOT EXISTS idx_field_reports_project ON field_reports(project_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_report_photo_selections_report ON report_photo_selections(report_id, sort_order)",
@@ -3361,10 +3395,14 @@ def project_deployment_detail(deployment_id):
     open_purchases = db.execute("SELECT COUNT(*) c FROM inventory_purchase_requests WHERE project_id = ?", (deployment["project_id"],)).fetchone()["c"]
     open_concrete = db.execute("SELECT COUNT(*) c FROM inventory_concrete_requests WHERE project_id = ?", (deployment["project_id"],)).fetchone()["c"]
     items_by_code = {i["item_code"]: i for i in enriched_items}
+    subcontractors = db.execute("SELECT * FROM project_deployment_subcontractors WHERE deployment_id = ? ORDER BY id", (deployment_id,)).fetchall()
+    can_manage = _authorized("action:project_deployment:manage")
+    mode = "edit" if (request.args.get("mode") == "edit" and can_manage) else "view"
     return render_template(
         "deployment/detail.html", deployment=deployment, items=enriched_items, items_by_code=items_by_code, readiness_percent=percent,
         blocking_count=len(blocking), open_purchases=open_purchases, open_concrete=open_concrete,
-        can_manage=_authorized("action:project_deployment:manage"),
+        subcontractors=subcontractors, mode=mode,
+        can_manage=can_manage,
         statuses=DEPLOYMENT_STATUS_OPTIONS,
     )
 
@@ -3431,7 +3469,6 @@ def project_deployment_edit(deployment_id):
         values.append(now)
         values.append(deployment_id)
         db.execute(f"UPDATE project_deployments SET {', '.join(set_clauses)} WHERE id = ?", values)
-        log_activity("project_deployment", "deployment", deployment_id, "checklist_updated", field="header_fields", new_value="updated")
         # Conditional logistics items: a coordination requirement only
         # becomes applicable once its own "needed?" answer is Yes --
         # matching the same conditional-item pattern already used for
@@ -3441,6 +3478,60 @@ def project_deployment_edit(deployment_id):
             applies_val = 1 if request.form.get(field) == "yes" else 0
             db.execute("UPDATE project_deployment_items SET applies=?, updated_at=? WHERE deployment_id=? AND item_code=?",
                        (applies_val, now, deployment_id, item_code))
+
+        # V1.5: the simplified Yes/No checklist -- every controlled item
+        # now answers through one plain yesno_<item_code> + notes_<item_code>
+        # pair instead of separate Complete/Override actions. Mapping
+        # (approved): Yes -> Completed-equivalent (same DB state the old
+        # Complete button produced, so readiness math is untouched);
+        # No/blank -> Not Started (unsatisfied) -- legitimate and
+        # non-blocking for every item that isn't in the required set.
+        # Owner/Due Date are no longer collected here (removed from the
+        # UI per the approved correction) but the columns themselves are
+        # left alone -- nothing is dropped, only no longer written to
+        # from this simplified path.
+        editor = current_user.name or current_user.email
+        for code, label, category, required, readiness_scored, conditional in DEPLOYMENT_ITEM_CODES:
+            answer = request.form.get(f"yesno_{code}")
+            note_val = (request.form.get(f"notes_{code}") or "").strip() or None
+            if answer == "yes":
+                db.execute(
+                    "UPDATE project_deployment_items SET status='Completed', notes=?, completed_by=?, completed_at=?, updated_at=? WHERE deployment_id=? AND item_code=?",
+                    (note_val, editor, now, now, deployment_id, code)
+                )
+            elif answer == "no":
+                db.execute(
+                    "UPDATE project_deployment_items SET status='In Progress', notes=?, completed_by=NULL, completed_at=NULL, updated_at=? WHERE deployment_id=? AND item_code=?",
+                    (note_val, now, deployment_id, code)
+                )
+            elif note_val is not None:
+                # Answer left blank but a note was added/edited -- notes
+                # are allowed regardless of Yes/No per the approved spec.
+                db.execute("UPDATE project_deployment_items SET notes=?, updated_at=? WHERE deployment_id=? AND item_code=?",
+                           (note_val, now, deployment_id, code))
+        # Drawings approved -> Yes unlocks the Permit/Plans question,
+        # exactly matching the existing conditional-unlock pattern.
+        if request.form.get("yesno_drawings_specs_approved") == "yes":
+            db.execute("UPDATE project_deployment_items SET applies=1, updated_at=? WHERE deployment_id=? AND item_code='permit_plans_printed' AND applies=0",
+                       (now, deployment_id))
+
+        # Subcontractors -- replace the full set on every save (simplest
+        # correct behavior for a small, always-fully-submitted list; the
+        # deployment_id scoping guarantees rows never leak between
+        # projects).
+        db.execute("DELETE FROM project_deployment_subcontractors WHERE deployment_id = ?", (deployment_id,))
+        trades = request.form.getlist("sub_trade")
+        companies = request.form.getlist("sub_company")
+        contacts = request.form.getlist("sub_contact")
+        for trade, company, contact in zip(trades, companies, contacts):
+            if (trade or "").strip() or (company or "").strip() or (contact or "").strip():
+                db.execute(
+                    "INSERT INTO project_deployment_subcontractors (deployment_id, trade, company, contact, created_at) VALUES (?,?,?,?,?)",
+                    (deployment_id, (trade or "").strip() or None, (company or "").strip() or None, (contact or "").strip() or None, now)
+                )
+
+        db.commit()
+        log_activity("project_deployment", "deployment", deployment_id, "checklist_updated", field="header_fields", new_value="updated")
         db.commit()
         flash("Checklist saved.")
         return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
@@ -3617,6 +3708,57 @@ def project_deployment_reopen(deployment_id):
                  old_value=deployment["status"], new_value=f"In Preparation (reason: {reason})")
     db.commit()
     flash("Deployment reopened.")
+    return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+
+
+@app.route("/deployment/<int:deployment_id>/reset", methods=["POST"])
+@login_required
+def project_deployment_reset(deployment_id):
+    """RESET CHECKLIST (approved semantics -- NOT a delete). Preserves
+    the project_deployments row/id/relationship and, critically, the
+    project's SitePulse eligibility (which keys off row existence, not
+    status) -- clears every checklist-owned answer back to a blank
+    slate and puts status back to Not Started. Never touches
+    tracker_projects, Concrete, Purchase, Equipment, or Reporting data."""
+    if not _authorized("action:project_deployment:manage"):
+        flash("You don't have permission to reset this checklist.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    db = get_db()
+    deployment = db.execute("SELECT * FROM project_deployments WHERE id = ?", (deployment_id,)).fetchone()
+    if not deployment:
+        flash("Deployment not found.", "error")
+        return redirect(url_for("project_deployment_dashboard"))
+    if request.form.get("confirm") != "yes":
+        flash("Reset was not confirmed.", "error")
+        return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
+    now = datetime.utcnow().isoformat()
+
+    header_clear_fields = DEPLOYMENT_HEADER_FORM_FIELDS
+    set_clauses = [f"{f} = NULL" for f in header_clear_fields] + [f"{f} = 0" for f in DEPLOYMENT_HEADER_CHECKBOX_FIELDS]
+    set_clauses += ["status = 'Not Started'", "started_by = NULL", "started_at = NULL", "deployed_at = NULL", "updated_at = ?"]
+    db.execute(f"UPDATE project_deployments SET {', '.join(set_clauses)} WHERE id = ?", [now, deployment_id])
+
+    db.execute(
+        """UPDATE project_deployment_items SET status='Not Started', notes=NULL, owner=NULL, due_date=NULL,
+           completed_at=NULL, completed_by=NULL, reopened_at=NULL, reopened_by=NULL,
+           override_reason=NULL, override_by=NULL, override_at=NULL, updated_at=?
+           WHERE deployment_id = ?""",
+        (now, deployment_id)
+    )
+    # applies must reset to each item's own DEFAULT state, not a blanket
+    # 1 -- conditional items (permit/plans, the five "needed?"
+    # coordination items) start life as NOT applicable until their
+    # trigger question is answered Yes again; a blanket reset to 1 would
+    # incorrectly mark them all applicable regardless of that logic.
+    for code, label, category, required, readiness_scored, conditional in DEPLOYMENT_ITEM_CODES:
+        default_applies = 0 if conditional else 1
+        db.execute("UPDATE project_deployment_items SET applies=? WHERE deployment_id=? AND item_code=?", (default_applies, deployment_id, code))
+    db.execute("DELETE FROM project_deployment_subcontractors WHERE deployment_id = ?", (deployment_id,))
+
+    log_activity("project_deployment", "deployment", deployment_id, "checklist_reset", field="status",
+                 old_value=deployment["status"], new_value="Not Started (checklist reset)")
+    db.commit()
+    flash("Checklist reset. The project itself was not deleted.")
     return redirect(url_for("project_deployment_detail", deployment_id=deployment_id))
 
 
