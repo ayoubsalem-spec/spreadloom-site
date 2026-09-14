@@ -555,6 +555,201 @@ def build_field_report_pdf(report_info, photos, version_number):
     return buf.read(), missing_photo_ids
 
 
+def build_deployment_checklist_pdf(deployment_info, items_by_code, subcontractors):
+    """Professional, printable Project Deployment Checklist PDF --
+    deliberately a DIFFERENT visual style from the field report PDF
+    above (white background, navy headings, gold accent, black body
+    text) since this is meant to read as a completed company document,
+    not a dark-theme screenshot. Single generation path used by both
+    Download and Share so they can never diverge. Follows the exact
+    binding section order: Project Checklist -> Job Essentials ->
+    Plans/Permits -> Site Logistics -> Subcontractors -> Reminders."""
+    buf = io.BytesIO()
+    c = pdf_canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    navy = colors.HexColor("#0B1220")
+    gold = colors.HexColor("#B8860B")
+    black = colors.HexColor("#1A1A1A")
+    gray = colors.HexColor("#666666")
+    x = 0.75 * inch
+    top_margin = height - 0.9 * inch
+    bottom_margin = 0.75 * inch
+    page_num = [1]
+
+    def header(title_suffix=""):
+        c.setFillColor(navy)
+        c.rect(0, height - 1.0 * inch, width, 1.0 * inch, fill=1, stroke=0)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(x, height - 0.55 * inch, f"Project Deployment Checklist{title_suffix}")
+        c.setFont("Helvetica", 9)
+        c.drawString(x, height - 0.78 * inch, f"{deployment_info.get('project_name') or ''}  |  {deployment_info.get('project_client') or ''}")
+        return height - 1.35 * inch
+
+    def footer():
+        c.setFont("Helvetica-Oblique", 8)
+        c.setFillColor(gray)
+        c.drawString(x, 0.5 * inch, "Generated automatically by BuildIQ / Project Deployment")
+        c.drawRightString(width - x, 0.5 * inch, f"Page {page_num[0]}")
+
+    def new_page():
+        footer()
+        c.showPage()
+        page_num[0] += 1
+        return header(" (continued)")
+
+    y = header()
+    c.setFont("Helvetica", 9)
+    c.setFillColor(gray)
+    c.drawString(x, y, f"Job Address: {deployment_info.get('project_address') or '\u2014'}")
+    y -= 22
+
+    def ensure_space(needed):
+        nonlocal y
+        if y - needed < bottom_margin:
+            y = new_page()
+
+    def section(title):
+        nonlocal y
+        ensure_space(30)
+        y -= 6
+        c.setFillColor(gold)
+        c.setFont("Helvetica-Bold", 13)
+        c.drawString(x, y, title.upper())
+        c.setStrokeColor(gold)
+        c.line(x, y - 4, width - x, y - 4)
+        c.setFillColor(black)
+        y -= 22
+
+    def field_line(label, value):
+        nonlocal y
+        ensure_space(28)
+        c.setFont("Helvetica-Bold", 9.5)
+        c.setFillColor(black)
+        label_text = f"{label}:"
+        label_width = c.stringWidth(label_text, "Helvetica-Bold", 9.5)
+        min_offset = 1.9 * inch
+        c.drawString(x, y, label_text)
+        c.setFont("Helvetica", 9.5)
+        value_text = str(value) if value not in (None, "") else "\u2014"
+        if label_width + 0.15 * inch <= min_offset:
+            # Short label -- value sits on the same line at a fixed
+            # column, matching the original compact business-form look.
+            c.drawString(x + min_offset, y, value_text)
+            y -= 15
+        else:
+            # PDF FIX: a long label (e.g. "Preconstruction Meeting
+            # Date", "Who is responsible for scheduling inspections")
+            # was previously colliding/overlapping with its own value
+            # at the fixed 1.8" column -- confirmed visually in the
+            # rendered PDF. Long labels now drop the value to its own
+            # indented line instead of forcing a fixed column that
+            # doesn't fit.
+            y -= 13
+            c.drawString(x + 0.2 * inch, y, value_text)
+            y -= 15
+
+    def yn_line(label, item, extra_note=None):
+        nonlocal y
+        ensure_space(16)
+        answer = "\u2014"
+        if item:
+            if item["status"] == "Completed":
+                answer = "Yes"
+            elif item["status"] == "In Progress":
+                answer = "No"
+        c.setFont("Helvetica-Bold", 9.5)
+        c.setFillColor(black)
+        c.drawString(x, y, f"{label}")
+        c.setFont("Helvetica-Bold", 9.5)
+        c.drawRightString(width - x, y, answer)
+        y -= 13
+        note = extra_note if extra_note is not None else (item["notes"] if item and item["notes"] else None)
+        if note:
+            c.setFont("Helvetica-Oblique", 8.5)
+            c.setFillColor(gray)
+            y = _pdf_write_wrapped(c, f"Note: {note}", x + 0.15 * inch, y, width - 1.5 * inch, size=8.5)
+            c.setFillColor(black)
+        y -= 6
+
+    # 1. PROJECT CHECKLIST
+    section("Project Checklist")
+    field_line("Preconstruction Meeting Date", deployment_info.get("preconstruction_meeting_date"))
+    field_line("Job Description", deployment_info.get("job_description"))
+    field_line("Job Address", deployment_info.get("project_address"))
+
+    # 2. JOB ESSENTIALS
+    section("Job Essentials")
+    field_line("Start Date", deployment_info.get("start_date"))
+    field_line("Expected Completion Date", deployment_info.get("expected_completion_date"))
+    field_line("Job Supervisor", " ".join(filter(None, [deployment_info.get("supervisor_name"), deployment_info.get("supervisor_phone"), deployment_info.get("supervisor_email")])) or None)
+    field_line("Client Main Contact", " ".join(filter(None, [deployment_info.get("client_contact_name"), deployment_info.get("client_contact_phone"), deployment_info.get("client_contact_email")])) or None)
+
+    # 3. PLANS, PERMITS & APPROVALS
+    section("Plans, Permits & Approvals")
+    yn_line("Are all drawings and specifications finalized and approved?", items_by_code.get("drawings_specs_approved"))
+    yn_line("If Yes, have 1 permit copy and 2 plan copies been printed?", items_by_code.get("permit_plans_printed"))
+    field_line("Which City or County", deployment_info.get("city_county"))
+    field_line("Phone", deployment_info.get("city_county_phone"))
+    yn_line("Are inspections required?", items_by_code.get("inspections_responsibility_assigned"))
+    field_line("Who is responsible for scheduling inspections", deployment_info.get("inspections_required_list"))
+
+    # 4. SITE LOGISTICS
+    section("Site Logistics")
+    field_line("Office Needed", "Yes" if deployment_info.get("office_needed") else "No")
+    field_line("Storage Container Needed", "Yes" if deployment_info.get("storage_container_needed") else "No")
+    field_line("Working Hours", deployment_info.get("working_hours"))
+    if deployment_info.get("dumpster_needed"):
+        field_line("Dumpster", f"Yes \u2014 {deployment_info.get('dumpster_size') or '?'}, needed by {deployment_info.get('dumpster_date') or '?'}")
+    else:
+        field_line("Dumpster Needed", "No")
+    if deployment_info.get("toilets_needed"):
+        field_line("Portable Toilets", f"Yes \u2014 Qty {deployment_info.get('toilets_qty') or '?'}, needed by {deployment_info.get('toilets_date') or '?'}")
+    else:
+        field_line("Portable Toilets Needed", "No")
+    if deployment_info.get("fence_needed"):
+        field_line("Temp Fence", f"Yes \u2014 {deployment_info.get('fence_linear_feet') or '?'} ln ft, needed by {deployment_info.get('fence_date') or '?'}")
+    else:
+        field_line("Temp Fence Needed", "No")
+    field_line("Site Access Points", deployment_info.get("site_access_points"))
+    field_line("Parking Rules", deployment_info.get("parking_rules"))
+
+    # 5. SUBCONTRACTORS
+    section("Subcontractors")
+    yn_line("Have subcontractors been assigned?", items_by_code.get("subcontractors_assigned"))
+    if subcontractors:
+        ensure_space(16)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(x, y, "Trade")
+        c.drawString(x + 2.0 * inch, y, "Company")
+        c.drawString(x + 4.2 * inch, y, "Contact")
+        y -= 13
+        c.setFont("Helvetica", 9)
+        for s in subcontractors:
+            ensure_space(14)
+            c.drawString(x, y, s["trade"] or "\u2014")
+            c.drawString(x + 2.0 * inch, y, s["company"] or "\u2014")
+            c.drawString(x + 4.2 * inch, y, s["contact"] or "\u2014")
+            y -= 14
+        y -= 6
+
+    # 6. REMINDERS
+    section("Reminders")
+    yn_line("Change Order requirements reviewed?", items_by_code.get("change_orders_approval_required"))
+    yn_line("Site Meetings coordinated?", items_by_code.get("site_meetings_conducted"))
+    yn_line("Safety Meeting / enforcement requirements reviewed?", items_by_code.get("safety_meeting_enforcement"))
+    yn_line("No Client / Subcontractor direct interaction requirement reviewed?", items_by_code.get("no_client_subs_interaction"))
+    yn_line("Preconstruction Pictures complete?", items_by_code.get("preconstruction_pictures"))
+    yn_line("Required RFI Submittals complete?", items_by_code.get("rfi_submittals_confirmed"))
+    yn_line("Required Purchase Orders in place?", items_by_code.get("purchase_orders_confirmed"))
+    yn_line("Required Concrete Forms complete?", items_by_code.get("concrete_forms_confirmed"))
+
+    footer()
+    c.save()
+    buf.seek(0)
+    return buf.read()
+
+
 def save_generated_pdf(pdf_bytes):
     """Stores a SERVER-GENERATED PDF (never a user upload) under a safe,
     random, server-controlled filename -- deliberately NOT save_photo(),
@@ -3405,6 +3600,40 @@ def project_deployment_detail(deployment_id):
         can_manage=can_manage,
         statuses=DEPLOYMENT_STATUS_OPTIONS,
     )
+
+
+@app.route("/deployment/<int:deployment_id>/pdf")
+@login_required
+def project_deployment_pdf(deployment_id):
+    """The single PDF generation path for Project Deployment -- Download
+    and Share both hit this exact route and receive identical bytes,
+    generated fresh from the current saved checklist state each time
+    (Deployment has no versioning model, unlike SitePulse Reporting --
+    this always represents "the checklist as saved right now")."""
+    if not _authorized("module:project_deployment:view"):
+        return ("Forbidden", 403)
+    db = get_db()
+    deployment = db.execute(
+        """SELECT pd.*, tp.name AS project_name, tp.client AS project_client, tp.address AS project_address
+           FROM project_deployments pd JOIN tracker_projects tp ON tp.id = pd.project_id
+           WHERE pd.id = ?""",
+        (deployment_id,)
+    ).fetchone()
+    if not deployment:
+        return ("Not found", 404)
+    items = db.execute("SELECT * FROM project_deployment_items WHERE deployment_id = ?", (deployment_id,)).fetchall()
+    items_by_code = {i["item_code"]: i for i in items}
+    subcontractors = db.execute("SELECT * FROM project_deployment_subcontractors WHERE deployment_id = ? ORDER BY id", (deployment_id,)).fetchall()
+    pdf_bytes = build_deployment_checklist_pdf(dict(deployment), items_by_code, subcontractors)
+    safe_name = secure_filename(f"{deployment['project_name']}_Project_Deployment_Checklist.pdf".replace(" ", "_"))
+    # Same single generator either way -- only the response disposition
+    # differs. Default is a real download (attachment), matching what
+    # the "Download PDF" button promises. Share's JS fetches this same
+    # route to build a File() for navigator.share() -- disposition
+    # doesn't matter for that fetch-based path, so no separate mode is
+    # needed there; this stays one route, one generator.
+    disposition = "inline" if request.args.get("disposition") == "inline" else "attachment"
+    return Response(pdf_bytes, mimetype="application/pdf", headers={"Content-Disposition": f"{disposition}; filename={safe_name}"})
 
 
 def _get_deployment_item_or_none(db, deployment_id, item_id):

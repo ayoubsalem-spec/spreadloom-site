@@ -1,28 +1,38 @@
 {% extends "base.html" %}
 {% block content %}
 <style>
-    .dep-section { margin-top:28px; }
+    .dep-section { margin-top:26px; }
     .dep-section:first-of-type { margin-top:16px; }
-    .dep-section-title { font-size:16px; font-weight:700; letter-spacing:0.5px; color:var(--gold); text-transform:uppercase; margin-bottom:14px; padding-bottom:8px; border-bottom:2px solid var(--line); }
-    .dep-question { margin-bottom:20px; }
-    .dep-question-label { font-size:15px; font-weight:600; margin-bottom:8px; display:block; }
-    .dep-yesno { display:flex; gap:10px; margin-bottom:8px; }
-    .dep-yesno button { flex:1; padding:12px; border-radius:8px; border:2px solid var(--line); background:var(--surface-2); color:var(--text); font-size:15px; font-weight:600; cursor:pointer; max-width:120px; }
-    .dep-yesno button.selected-yes { border-color:var(--teal); background:rgba(94,234,212,0.14); color:var(--teal); }
-    .dep-yesno button.selected-no { border-color:#F87171; background:rgba(248,113,113,0.14); color:#F87171; }
-    .dep-notes { width:100%; font-size:15px; padding:10px; box-sizing:border-box; margin-top:6px; }
-    .dep-field { width:100%; font-size:15px; padding:12px; box-sizing:border-box; }
-    .dep-view-answer { font-size:15px; padding:6px 0; }
-    .dep-view-answer .dep-view-yn { font-weight:700; }
-    .dep-view-yn.yn-yes { color:var(--teal); }
-    .dep-view-yn.yn-no { color:#F87171; }
-    .dep-view-notes { color:var(--text-dim); font-size:13px; margin-top:2px; }
-    .dep-conditional { margin-top:10px; padding-left:2px; }
-    .dep-sub-card { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; }
-    .dep-sub-row { display:flex; gap:8px; flex-wrap:wrap; }
-    .dep-sub-row input { flex:1; min-width:140px; }
-    @media (max-width:600px) { .dep-sub-row { flex-direction:column; } .dep-sub-row input { min-width:0; } }
-    .dep-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; }
+    .dep-section-title { font-size:15px; font-weight:700; letter-spacing:0.5px; color:var(--gold); text-transform:uppercase; margin-bottom:12px; padding-bottom:6px; border-bottom:2px solid var(--line); }
+    .dep-row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--line-faint); flex-wrap:wrap; }
+    .dep-row-label { flex:2; min-width:220px; font-size:14px; }
+    .dep-row-select { width:130px; font-size:14px; padding:6px; }
+    .dep-row-notes { flex:2; min-width:180px; font-size:13px; padding:6px; }
+    .dep-field-inline { font-size:14px; padding:8px; width:100%; box-sizing:border-box; }
+    .dep-field-row { display:flex; gap:14px; flex-wrap:wrap; margin-bottom:10px; }
+    .dep-field-row > div { flex:1; min-width:180px; }
+    .dep-field-row label { font-size:12px; color:var(--text-dim); display:block; margin-bottom:3px; }
+    .dep-conditional { margin-top:6px; padding-left:2px; }
+    .dep-sub-table { width:100%; border-collapse:collapse; table-layout:fixed; }
+    .dep-sub-table th { text-align:left; font-size:11px; color:var(--text-dim); text-transform:uppercase; padding:4px 6px; border-bottom:1px solid var(--line); }
+    .dep-sub-table td { padding:4px; overflow:hidden; }
+    .dep-sub-table input { width:100%; font-size:13px; padding:6px; box-sizing:border-box; min-width:0; }
+    @media (max-width:480px) {
+        .dep-sub-table, .dep-sub-table thead, .dep-sub-table tbody, .dep-sub-table th, .dep-sub-table td, .dep-sub-table tr { display:block; width:100%; }
+        .dep-sub-table thead { display:none; }
+        .dep-sub-table tr { margin-bottom:10px; border:1px solid var(--line); border-radius:8px; padding:8px; }
+        .dep-sub-table td { padding:4px 0; }
+    }
+    .dep-btn-lg { font-size:15px; padding:12px 18px; min-height:44px; }
+    .dep-view-row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line-faint); font-size:14px; gap:10px; flex-wrap:wrap; }
+    .dep-view-row .lbl { color:var(--text-dim); }
+    .dep-view-note { font-size:12px; color:var(--text-dim); font-style:italic; margin-top:-4px; margin-bottom:6px; }
+    @media (max-width:600px) {
+        .dep-row { flex-direction:column; align-items:stretch; }
+        .dep-row-select, .dep-row-notes, .dep-row-label { width:100%; min-width:0; box-sizing:border-box; }
+        .dep-field-row { display:block; }
+        .dep-field-row > div { min-width:0; width:100%; box-sizing:border-box; margin-bottom:10px; }
+    }
 </style>
 
 <span class="rc-eyebrow">Project Deployment</span>
@@ -35,12 +45,72 @@
 <div style="display:flex; gap:10px; flex-wrap:wrap; margin:14px 0 20px;">
     {% if mode == 'view' %}
         {% if can_manage %}
-        <a href="{{ url_for('project_deployment_detail', deployment_id=deployment['id']) }}?mode=edit" class="btn btn-gold dep-btn-lg">Edit Checklist</a>
-        <button type="button" class="btn dep-btn-lg" onclick="document.getElementById('resetModal').style.display='flex'">Reset Checklist</button>
+        <a href="{{ url_for('project_deployment_detail', deployment_id=deployment['id']) }}?mode=edit" class="btn btn-gold dep-btn-lg">Edit</a>
+        {% endif %}
+        <a href="{{ url_for('project_deployment_pdf', deployment_id=deployment['id']) }}" download="{{ deployment['project_name'] }}_Project_Deployment_Checklist.pdf" class="btn dep-btn-lg">Download PDF</a>
+        <button type="button" class="btn btn-gold dep-btn-lg share-pdf-btn"
+            data-pdf-url="{{ url_for('project_deployment_pdf', deployment_id=deployment['id']) }}"
+            data-filename="{{ deployment['project_name'] }}_Project_Deployment_Checklist.pdf"
+            data-title="{{ deployment['project_name'] }} Project Deployment Checklist">Share</button>
+        <a href="{{ url_for('project_deployment_activity', deployment_id=deployment['id']) }}" class="btn btn-sm">History</a>
+        {% if can_manage %}
+        <button type="button" class="btn btn-sm" onclick="document.getElementById('resetModal').style.display='flex'">Reset</button>
         {% endif %}
     {% endif %}
-    <a href="{{ url_for('project_deployment_activity', deployment_id=deployment['id']) }}" class="btn btn-sm">History</a>
 </div>
+
+<script>
+document.querySelectorAll(".share-pdf-btn").forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+        var pdfUrl = btn.getAttribute("data-pdf-url");
+        var filename = btn.getAttribute("data-filename");
+        var title = btn.getAttribute("data-title");
+
+        function downloadPdf() {
+            // Fallback path -- never shares the authenticated URL
+            // itself. A plain navigation to the PDF route triggers the
+            // browser's normal download/save behavior (the route now
+            // defaults to Content-Disposition: attachment).
+            var a = document.createElement("a");
+            a.href = pdfUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        if (!navigator.share || !navigator.canShare) {
+            // No native share capability at all -- download is the
+            // only correct fallback. Never share the protected URL.
+            downloadPdf();
+            return;
+        }
+
+        try {
+            var resp = await fetch(pdfUrl + "?disposition=inline");
+            var blob = await resp.blob();
+            var file = new File([blob], filename, { type: "application/pdf" });
+            if (navigator.canShare({ files: [file] })) {
+                await navigator.share({ files: [file], title: title });
+                return;
+            }
+            // File sharing isn't supported on this device/browser even
+            // though navigator.share exists -- download, do NOT fall
+            // back to sharing the authenticated URL as a substitute.
+            downloadPdf();
+        } catch (err) {
+            // Distinguish a deliberate user cancellation (AbortError)
+            // from a genuine capability/fetch failure -- a cancelled
+            // share should just return the user to the checklist, not
+            // trigger an unwanted download.
+            if (err && err.name === "AbortError") {
+                return;
+            }
+            downloadPdf();
+        }
+    });
+});
+</script>
 
 {% if can_manage %}
 <div id="resetModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:999; align-items:center; justify-content:center; padding:20px;">
@@ -57,29 +127,25 @@
 </div>
 {% endif %}
 
-{% macro yesno_field(code, question, item, editable) %}
-<div class="dep-question">
-    <label class="dep-question-label">{{ question }}</label>
-    {% if editable %}
-    <div class="dep-yesno">
-        <button type="button" class="{{ 'selected-yes' if item and item['status']=='Completed' }}" onclick="setYesNo('{{ code }}', 'yes')">YES</button>
-        <button type="button" class="{{ 'selected-no' if item and item['status']=='In Progress' }}" onclick="setYesNo('{{ code }}', 'no')">NO</button>
-    </div>
-    <input type="hidden" id="yesno_{{ code }}_input" name="yesno_{{ code }}" value="{{ 'yes' if item and item['status']=='Completed' else ('no' if item and item['status']=='In Progress' else '') }}">
-    <textarea class="dep-notes" name="notes_{{ code }}" rows="2" placeholder="Notes (optional)">{{ (item['notes'] if item else '') or '' }}</textarea>
-    {% else %}
-    <div class="dep-view-answer">
-        {% if item and item['status'] == 'Completed' %}
-        <span class="dep-view-yn yn-yes">YES</span>
-        {% elif item and item['status'] == 'In Progress' %}
-        <span class="dep-view-yn yn-no">NO</span>
-        {% else %}
-        <span class="dep-view-yn">&mdash;</span>
-        {% endif %}
-        {% if item and item['notes'] %}<div class="dep-view-notes">{{ item['notes'] }}</div>{% endif %}
-    </div>
-    {% endif %}
+{% macro yn_answer(item) %}
+    {% if item and item['status'] == 'Completed' %}Yes{% elif item and item['status'] == 'In Progress' %}No{% else %}&mdash;{% endif %}
+{% endmacro %}
+
+{% macro yn_row(code, question, item, editable) %}
+{% if editable %}
+<div class="dep-row">
+    <div class="dep-row-label">{{ question }}</div>
+    <select class="dep-row-select" name="yesno_{{ code }}">
+        <option value="" {{ 'selected' if not item or item['status'] not in ('Completed','In Progress') }}>Select&hellip;</option>
+        <option value="yes" {{ 'selected' if item and item['status']=='Completed' }}>Yes</option>
+        <option value="no" {{ 'selected' if item and item['status']=='In Progress' }}>No</option>
+    </select>
+    <input class="dep-row-notes" type="text" name="notes_{{ code }}" value="{{ (item['notes'] if item else '') or '' }}" placeholder="Notes (optional)">
 </div>
+{% else %}
+<div class="dep-view-row"><span class="lbl">{{ question }}</span><span>{{ yn_answer(item) }}</span></div>
+{% if item and item['notes'] %}<div class="dep-view-note">{{ item['notes'] }}</div>{% endif %}
+{% endif %}
 {% endmacro %}
 
 {% if mode == 'edit' %}
@@ -90,188 +156,163 @@
 <div class="dep-section">
     <div class="dep-section-title">Project Checklist</div>
     {% if mode == 'edit' %}
-    <label class="dep-question-label">Preconstruction Meeting Date</label>
-    <input class="dep-field" type="date" name="preconstruction_meeting_date" value="{{ deployment['preconstruction_meeting_date'] or '' }}">
-    <label class="dep-question-label" style="margin-top:14px;">Job Description</label>
-    <input class="dep-field" type="text" name="job_description" value="{{ deployment['job_description'] or '' }}">
-    <label class="dep-question-label" style="margin-top:14px;">Job Address</label>
-    <input class="dep-field" type="text" value="{{ deployment['project_address'] or '' }}" disabled>
-    <p class="sub" style="margin-top:4px;">Shared from Project Hunt.</p>
+    <div class="dep-field-row">
+        <div><label>Preconstruction Meeting Date</label><input class="dep-field-inline" type="date" name="preconstruction_meeting_date" value="{{ deployment['preconstruction_meeting_date'] or '' }}"></div>
+        <div><label>Job Description</label><input class="dep-field-inline" type="text" name="job_description" value="{{ deployment['job_description'] or '' }}"></div>
+    </div>
+    <div class="sub">Job Address: {{ deployment['project_address'] or '—' }} (shared from Project Hunt)</div>
     {% else %}
-    <div class="dep-view-answer"><strong>Preconstruction Meeting Date:</strong> {{ deployment['preconstruction_meeting_date'] or '—' }}</div>
-    <div class="dep-view-answer"><strong>Job Description:</strong> {{ deployment['job_description'] or '—' }}</div>
-    <div class="dep-view-answer"><strong>Job Address:</strong> {{ deployment['project_address'] or '—' }}</div>
+    <div class="dep-view-row"><span class="lbl">Preconstruction Meeting Date</span><span>{{ deployment['preconstruction_meeting_date'] or '—' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Job Description</span><span>{{ deployment['job_description'] or '—' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Job Address</span><span>{{ deployment['project_address'] or '—' }}</span></div>
     {% endif %}
 </div>
 
 <div class="dep-section">
     <div class="dep-section-title">Job Essentials</div>
     {% if mode == 'edit' %}
-    <div class="dep-sub-row">
-        <div><label class="dep-question-label">Start Date</label><input class="dep-field" type="date" name="start_date" value="{{ deployment['start_date'] or '' }}"></div>
-        <div><label class="dep-question-label">Expected Completion Date</label><input class="dep-field" type="date" name="expected_completion_date" value="{{ deployment['expected_completion_date'] or '' }}"></div>
+    <div class="dep-field-row">
+        <div><label>Start Date</label><input class="dep-field-inline" type="date" name="start_date" value="{{ deployment['start_date'] or '' }}"></div>
+        <div><label>Expected Completion Date</label><input class="dep-field-inline" type="date" name="expected_completion_date" value="{{ deployment['expected_completion_date'] or '' }}"></div>
     </div>
-    <div class="dep-sub-row" style="margin-top:14px;">
-        <div><label class="dep-question-label">Job Supervisor</label><input class="dep-field" type="text" name="supervisor_name" value="{{ deployment['supervisor_name'] or '' }}"></div>
-        <div><label class="dep-question-label">Phone</label><input class="dep-field" type="text" name="supervisor_phone" value="{{ deployment['supervisor_phone'] or '' }}"></div>
-        <div><label class="dep-question-label">Email</label><input class="dep-field" type="text" name="supervisor_email" value="{{ deployment['supervisor_email'] or '' }}"></div>
+    <div class="dep-field-row">
+        <div><label>Job Supervisor</label><input class="dep-field-inline" type="text" name="supervisor_name" value="{{ deployment['supervisor_name'] or '' }}"></div>
+        <div><label>Phone</label><input class="dep-field-inline" type="text" name="supervisor_phone" value="{{ deployment['supervisor_phone'] or '' }}"></div>
+        <div><label>Email</label><input class="dep-field-inline" type="text" name="supervisor_email" value="{{ deployment['supervisor_email'] or '' }}"></div>
     </div>
-    <div class="dep-sub-row" style="margin-top:14px;">
-        <div><label class="dep-question-label">Client Main Contact</label><input class="dep-field" type="text" name="client_contact_name" value="{{ deployment['client_contact_name'] or '' }}"></div>
-        <div><label class="dep-question-label">Phone</label><input class="dep-field" type="text" name="client_contact_phone" value="{{ deployment['client_contact_phone'] or '' }}"></div>
-        <div><label class="dep-question-label">Email</label><input class="dep-field" type="text" name="client_contact_email" value="{{ deployment['client_contact_email'] or '' }}"></div>
+    <div class="dep-field-row">
+        <div><label>Client Main Contact</label><input class="dep-field-inline" type="text" name="client_contact_name" value="{{ deployment['client_contact_name'] or '' }}"></div>
+        <div><label>Phone</label><input class="dep-field-inline" type="text" name="client_contact_phone" value="{{ deployment['client_contact_phone'] or '' }}"></div>
+        <div><label>Email</label><input class="dep-field-inline" type="text" name="client_contact_email" value="{{ deployment['client_contact_email'] or '' }}"></div>
     </div>
     {% else %}
-    <div class="dep-view-answer"><strong>Start Date:</strong> {{ deployment['start_date'] or '—' }}</div>
-    <div class="dep-view-answer"><strong>Expected Completion:</strong> {{ deployment['expected_completion_date'] or '—' }}</div>
-    <div class="dep-view-answer"><strong>Job Supervisor:</strong> {{ deployment['supervisor_name'] or '—' }} {{ deployment['supervisor_phone'] or '' }} {{ deployment['supervisor_email'] or '' }}</div>
-    <div class="dep-view-answer"><strong>Client Contact:</strong> {{ deployment['client_contact_name'] or '—' }} {{ deployment['client_contact_phone'] or '' }} {{ deployment['client_contact_email'] or '' }}</div>
+    <div class="dep-view-row"><span class="lbl">Start Date</span><span>{{ deployment['start_date'] or '—' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Expected Completion</span><span>{{ deployment['expected_completion_date'] or '—' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Job Supervisor</span><span>{{ deployment['supervisor_name'] or '—' }} {{ deployment['supervisor_phone'] or '' }} {{ deployment['supervisor_email'] or '' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Client Contact</span><span>{{ deployment['client_contact_name'] or '—' }} {{ deployment['client_contact_phone'] or '' }} {{ deployment['client_contact_email'] or '' }}</span></div>
     {% endif %}
 </div>
 
 <div class="dep-section">
     <div class="dep-section-title">Plans, Permits &amp; Approvals</div>
-    {{ yesno_field('drawings_specs_approved', 'Are all drawings and specifications finalized and approved?', items_by_code.get('drawings_specs_approved'), mode=='edit') }}
-    {{ yesno_field('permit_plans_printed', 'If Yes, have 1 permit copy and 2 plan copies been printed?', items_by_code.get('permit_plans_printed'), mode=='edit') }}
+    {{ yn_row('drawings_specs_approved', 'Are all drawings and specifications finalized and approved?', items_by_code.get('drawings_specs_approved'), mode=='edit') }}
+    {{ yn_row('permit_plans_printed', 'If Yes, have 1 permit copy and 2 plan copies been printed?', items_by_code.get('permit_plans_printed'), mode=='edit') }}
     {% if mode == 'edit' %}
-    <div class="dep-sub-row">
-        <div><label class="dep-question-label">Which City or County?</label><input class="dep-field" type="text" name="city_county" value="{{ deployment['city_county'] or '' }}"></div>
-        <div><label class="dep-question-label">Phone</label><input class="dep-field" type="text" name="city_county_phone" value="{{ deployment['city_county_phone'] or '' }}"></div>
+    <div class="dep-field-row" style="margin-top:10px;">
+        <div><label>Which City or County?</label><input class="dep-field-inline" type="text" name="city_county" value="{{ deployment['city_county'] or '' }}"></div>
+        <div><label>Phone</label><input class="dep-field-inline" type="text" name="city_county_phone" value="{{ deployment['city_county_phone'] or '' }}"></div>
     </div>
     {% else %}
-    <div class="dep-view-answer"><strong>City/County:</strong> {{ deployment['city_county'] or '—' }} {{ deployment['city_county_phone'] or '' }}</div>
+    <div class="dep-view-row"><span class="lbl">City/County</span><span>{{ deployment['city_county'] or '—' }} {{ deployment['city_county_phone'] or '' }}</span></div>
     {% endif %}
-    {{ yesno_field('inspections_responsibility_assigned', 'Are inspections required?', items_by_code.get('inspections_responsibility_assigned'), mode=='edit') }}
+    {{ yn_row('inspections_responsibility_assigned', 'Are inspections required?', items_by_code.get('inspections_responsibility_assigned'), mode=='edit') }}
     {% if mode == 'edit' %}
-    <label class="dep-question-label">Who is responsible for scheduling inspections?</label>
-    <input class="dep-field" type="text" name="inspections_required_list" value="{{ deployment['inspections_required_list'] or '' }}">
+    <div style="margin-top:8px;"><label style="font-size:12px; color:var(--text-dim); display:block; margin-bottom:3px;">Who is responsible for scheduling inspections?</label>
+    <input class="dep-field-inline" type="text" name="inspections_required_list" value="{{ deployment['inspections_required_list'] or '' }}"></div>
     {% else %}
-    <div class="dep-view-answer"><strong>Who's Responsible:</strong> {{ deployment['inspections_required_list'] or '—' }}</div>
+    <div class="dep-view-row"><span class="lbl">Who's Responsible</span><span>{{ deployment['inspections_required_list'] or '—' }}</span></div>
     {% endif %}
 </div>
 
 <div class="dep-section">
     <div class="dep-section-title">Site Logistics</div>
     {% if mode == 'edit' %}
-    <div class="dep-question">
-        <label class="dep-question-label">Office needed?</label>
-        <select class="dep-field" name="office_needed" style="max-width:200px;">
-            <option value="no" {{ 'selected' if not deployment['office_needed'] }}>No</option>
-            <option value="yes" {{ 'selected' if deployment['office_needed'] }}>Yes</option>
-        </select>
+    <div class="dep-row"><div class="dep-row-label">Office needed?</div>
+        <select class="dep-row-select" name="office_needed"><option value="no" {{ 'selected' if not deployment['office_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['office_needed'] }}>Yes</option></select>
     </div>
-    <div class="dep-question">
-        <label class="dep-question-label">Storage Container needed?</label>
-        <select class="dep-field" name="storage_container_needed" style="max-width:200px;">
-            <option value="no" {{ 'selected' if not deployment['storage_container_needed'] }}>No</option>
-            <option value="yes" {{ 'selected' if deployment['storage_container_needed'] }}>Yes</option>
-        </select>
+    <div class="dep-row"><div class="dep-row-label">Storage Container needed?</div>
+        <select class="dep-row-select" name="storage_container_needed"><option value="no" {{ 'selected' if not deployment['storage_container_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['storage_container_needed'] }}>Yes</option></select>
     </div>
-    <label class="dep-question-label">Working Hours</label>
-    <input class="dep-field" type="text" name="working_hours" value="{{ deployment['working_hours'] or '' }}">
+    <div class="dep-field-row" style="margin-top:8px;"><div><label>Working Hours</label><input class="dep-field-inline" type="text" name="working_hours" value="{{ deployment['working_hours'] or '' }}"></div></div>
 
-    <div class="dep-question" style="margin-top:20px;">
-        <label class="dep-question-label">Dumpster needed?</label>
-        <select class="dep-field" name="dumpster_needed" style="max-width:200px;" onchange="toggleCond('dumpster', this.value)">
-            <option value="no" {{ 'selected' if not deployment['dumpster_needed'] }}>No</option>
-            <option value="yes" {{ 'selected' if deployment['dumpster_needed'] }}>Yes</option>
-        </select>
-        <div id="dumpster_cond" class="dep-conditional" style="display:{{ 'block' if deployment['dumpster_needed'] else 'none' }};">
-            <div class="dep-sub-row">
-                <div><label class="dep-question-label">Dumpster Size</label><input class="dep-field" type="text" name="dumpster_size" value="{{ deployment['dumpster_size'] or '' }}"></div>
-                <div><label class="dep-question-label">Required Date</label><input class="dep-field" type="date" name="dumpster_date" value="{{ deployment['dumpster_date'] or '' }}"></div>
-            </div>
+    <div class="dep-row"><div class="dep-row-label">Dumpster needed?</div>
+        <select class="dep-row-select" name="dumpster_needed" onchange="toggleCond('dumpster', this.value)"><option value="no" {{ 'selected' if not deployment['dumpster_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['dumpster_needed'] }}>Yes</option></select>
+    </div>
+    <div id="dumpster_cond" class="dep-conditional" style="display:{{ 'block' if deployment['dumpster_needed'] else 'none' }};">
+        <div class="dep-field-row">
+            <div><label>Size</label><input class="dep-field-inline" type="text" name="dumpster_size" value="{{ deployment['dumpster_size'] or '' }}"></div>
+            <div><label>Needed By</label><input class="dep-field-inline" type="date" name="dumpster_date" value="{{ deployment['dumpster_date'] or '' }}"></div>
         </div>
     </div>
 
-    <div class="dep-question">
-        <label class="dep-question-label">Portable Toilets needed?</label>
-        <select class="dep-field" name="toilets_needed" style="max-width:200px;" onchange="toggleCond('toilets', this.value)">
-            <option value="no" {{ 'selected' if not deployment['toilets_needed'] }}>No</option>
-            <option value="yes" {{ 'selected' if deployment['toilets_needed'] }}>Yes</option>
-        </select>
-        <div id="toilets_cond" class="dep-conditional" style="display:{{ 'block' if deployment['toilets_needed'] else 'none' }};">
-            <div class="dep-sub-row">
-                <div><label class="dep-question-label">Quantity</label><input class="dep-field" type="text" name="toilets_qty" value="{{ deployment['toilets_qty'] or '' }}"></div>
-                <div><label class="dep-question-label">Required Date</label><input class="dep-field" type="date" name="toilets_date" value="{{ deployment['toilets_date'] or '' }}"></div>
-            </div>
+    <div class="dep-row"><div class="dep-row-label">Portable Toilets needed?</div>
+        <select class="dep-row-select" name="toilets_needed" onchange="toggleCond('toilets', this.value)"><option value="no" {{ 'selected' if not deployment['toilets_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['toilets_needed'] }}>Yes</option></select>
+    </div>
+    <div id="toilets_cond" class="dep-conditional" style="display:{{ 'block' if deployment['toilets_needed'] else 'none' }};">
+        <div class="dep-field-row">
+            <div><label>Qty</label><input class="dep-field-inline" type="text" name="toilets_qty" value="{{ deployment['toilets_qty'] or '' }}"></div>
+            <div><label>Needed By</label><input class="dep-field-inline" type="date" name="toilets_date" value="{{ deployment['toilets_date'] or '' }}"></div>
         </div>
     </div>
 
-    <div class="dep-question">
-        <label class="dep-question-label">Temp Fence needed?</label>
-        <select class="dep-field" name="fence_needed" style="max-width:200px;" onchange="toggleCond('fence', this.value)">
-            <option value="no" {{ 'selected' if not deployment['fence_needed'] }}>No</option>
-            <option value="yes" {{ 'selected' if deployment['fence_needed'] }}>Yes</option>
-        </select>
-        <div id="fence_cond" class="dep-conditional" style="display:{{ 'block' if deployment['fence_needed'] else 'none' }};">
-            <div class="dep-sub-row">
-                <div><label class="dep-question-label">Linear Feet</label><input class="dep-field" type="text" name="fence_linear_feet" value="{{ deployment['fence_linear_feet'] or '' }}"></div>
-                <div><label class="dep-question-label">Required Date</label><input class="dep-field" type="date" name="fence_date" value="{{ deployment['fence_date'] or '' }}"></div>
-            </div>
+    <div class="dep-row"><div class="dep-row-label">Temp Fence needed?</div>
+        <select class="dep-row-select" name="fence_needed" onchange="toggleCond('fence', this.value)"><option value="no" {{ 'selected' if not deployment['fence_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['fence_needed'] }}>Yes</option></select>
+    </div>
+    <div id="fence_cond" class="dep-conditional" style="display:{{ 'block' if deployment['fence_needed'] else 'none' }};">
+        <div class="dep-field-row">
+            <div><label>Linear Feet</label><input class="dep-field-inline" type="text" name="fence_linear_feet" value="{{ deployment['fence_linear_feet'] or '' }}"></div>
+            <div><label>Needed By</label><input class="dep-field-inline" type="date" name="fence_date" value="{{ deployment['fence_date'] or '' }}"></div>
         </div>
     </div>
 
-    <label class="dep-question-label" style="margin-top:14px;">Site Access Points</label>
-    <textarea class="dep-field" name="site_access_points" rows="2">{{ deployment['site_access_points'] or '' }}</textarea>
-    <label class="dep-question-label" style="margin-top:14px;">Parking Rules</label>
-    <textarea class="dep-field" name="parking_rules" rows="2">{{ deployment['parking_rules'] or '' }}</textarea>
+    <div class="dep-field-row" style="margin-top:10px;">
+        <div><label>Site Access Points</label><textarea class="dep-field-inline" name="site_access_points" rows="2">{{ deployment['site_access_points'] or '' }}</textarea></div>
+        <div><label>Parking Rules</label><textarea class="dep-field-inline" name="parking_rules" rows="2">{{ deployment['parking_rules'] or '' }}</textarea></div>
+    </div>
     {% else %}
-    <div class="dep-view-answer"><strong>Office needed:</strong> {{ 'Yes' if deployment['office_needed'] else 'No' }}</div>
-    <div class="dep-view-answer"><strong>Storage Container needed:</strong> {{ 'Yes' if deployment['storage_container_needed'] else 'No' }}</div>
-    <div class="dep-view-answer"><strong>Working Hours:</strong> {{ deployment['working_hours'] or '—' }}</div>
-    <div class="dep-view-answer"><strong>Dumpster:</strong> {{ 'Yes — ' ~ (deployment['dumpster_size'] or '—') ~ ' by ' ~ (deployment['dumpster_date'] or '—') if deployment['dumpster_needed'] else 'No' }}</div>
-    <div class="dep-view-answer"><strong>Portable Toilets:</strong> {{ 'Yes — Qty ' ~ (deployment['toilets_qty'] or '—') ~ ' by ' ~ (deployment['toilets_date'] or '—') if deployment['toilets_needed'] else 'No' }}</div>
-    <div class="dep-view-answer"><strong>Temp Fence:</strong> {{ 'Yes — ' ~ (deployment['fence_linear_feet'] or '—') ~ ' ln ft by ' ~ (deployment['fence_date'] or '—') if deployment['fence_needed'] else 'No' }}</div>
-    <div class="dep-view-answer"><strong>Site Access Points:</strong> {{ deployment['site_access_points'] or '—' }}</div>
-    <div class="dep-view-answer"><strong>Parking Rules:</strong> {{ deployment['parking_rules'] or '—' }}</div>
+    <div class="dep-view-row"><span class="lbl">Office needed</span><span>{{ 'Yes' if deployment['office_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Storage Container needed</span><span>{{ 'Yes' if deployment['storage_container_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Working Hours</span><span>{{ deployment['working_hours'] or '—' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Dumpster</span><span>{{ 'Yes — ' ~ (deployment['dumpster_size'] or '—') ~ ' by ' ~ (deployment['dumpster_date'] or '—') if deployment['dumpster_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Portable Toilets</span><span>{{ 'Yes — Qty ' ~ (deployment['toilets_qty'] or '—') ~ ' by ' ~ (deployment['toilets_date'] or '—') if deployment['toilets_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Temp Fence</span><span>{{ 'Yes — ' ~ (deployment['fence_linear_feet'] or '—') ~ ' ln ft by ' ~ (deployment['fence_date'] or '—') if deployment['fence_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Site Access Points</span><span>{{ deployment['site_access_points'] or '—' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Parking Rules</span><span>{{ deployment['parking_rules'] or '—' }}</span></div>
     {% endif %}
 </div>
 
 <div class="dep-section">
     <div class="dep-section-title">Subcontractors</div>
-    {{ yesno_field('subcontractors_assigned', 'Have subcontractors been assigned?', items_by_code.get('subcontractors_assigned'), mode=='edit') }}
+    {{ yn_row('subcontractors_assigned', 'Have subcontractors been assigned?', items_by_code.get('subcontractors_assigned'), mode=='edit') }}
     {% if mode == 'edit' %}
-    <div id="subRows">
+    <table class="dep-sub-table" id="subTable">
+        <tr><th>Trade</th><th>Company</th><th>Contact</th></tr>
+        <tbody id="subRows">
         {% for s in subcontractors %}
-        <div class="dep-sub-card">
-            <div class="dep-sub-row">
-                <input type="text" name="sub_trade" value="{{ s['trade'] or '' }}" placeholder="Trade (e.g. Mechanical)">
-                <input type="text" name="sub_company" value="{{ s['company'] or '' }}" placeholder="Company">
-                <input type="text" name="sub_contact" value="{{ s['contact'] or '' }}" placeholder="Contact / Phone">
-            </div>
-        </div>
+        <tr><td><input type="text" name="sub_trade" value="{{ s['trade'] or '' }}"></td><td><input type="text" name="sub_company" value="{{ s['company'] or '' }}"></td><td><input type="text" name="sub_contact" value="{{ s['contact'] or '' }}"></td></tr>
         {% endfor %}
         {% if not subcontractors %}
-        <div class="dep-sub-card"><div class="dep-sub-row">
-            <input type="text" name="sub_trade" placeholder="Trade (e.g. Mechanical)">
-            <input type="text" name="sub_company" placeholder="Company">
-            <input type="text" name="sub_contact" placeholder="Contact / Phone">
-        </div></div>
+        <tr><td><input type="text" name="sub_trade" placeholder="Mechanical"></td><td><input type="text" name="sub_company"></td><td><input type="text" name="sub_contact"></td></tr>
         {% endif %}
-    </div>
-    <button type="button" class="btn btn-sm" onclick="addSubRow()">+ Add Subcontractor</button>
+        </tbody>
+    </table>
+    <button type="button" class="btn btn-sm" style="margin-top:8px;" onclick="addSubRow()">+ Add Subcontractor</button>
     {% else %}
-    {% for s in subcontractors %}
-    <div class="dep-view-answer">{{ s['trade'] or 'Subcontractor' }}: {{ s['company'] or '—' }} {{ s['contact'] or '' }}</div>
+    {% if subcontractors %}
+    <table class="dep-sub-table">
+        <tr><th>Trade</th><th>Company</th><th>Contact</th></tr>
+        {% for s in subcontractors %}
+        <tr><td>{{ s['trade'] or '—' }}</td><td>{{ s['company'] or '—' }}</td><td>{{ s['contact'] or '—' }}</td></tr>
+        {% endfor %}
+    </table>
     {% else %}
-    <div class="dep-view-answer">No subcontractors recorded.</div>
-    {% endfor %}
+    <div class="dep-view-row"><span class="lbl">Subcontractors</span><span>None recorded</span></div>
+    {% endif %}
     {% endif %}
 </div>
 
 <div class="dep-section">
     <div class="dep-section-title">Reminders</div>
-    {{ yesno_field('change_orders_approval_required', 'Have Change Order requirements been reviewed?', items_by_code.get('change_orders_approval_required'), mode=='edit') }}
-    {{ yesno_field('site_meetings_conducted', 'Are Site Meetings coordinated?', items_by_code.get('site_meetings_conducted'), mode=='edit') }}
-    {{ yesno_field('safety_meeting_enforcement', 'Have Safety Meeting / enforcement requirements been reviewed?', items_by_code.get('safety_meeting_enforcement'), mode=='edit') }}
-    {{ yesno_field('no_client_subs_interaction', 'Has the No Client / Subcontractor direct interaction requirement been reviewed?', items_by_code.get('no_client_subs_interaction'), mode=='edit') }}
-    {{ yesno_field('preconstruction_pictures', 'Are Preconstruction Pictures complete?', items_by_code.get('preconstruction_pictures'), mode=='edit') }}
-    {{ yesno_field('rfi_submittals_confirmed', 'Are required RFI Submittals complete?', items_by_code.get('rfi_submittals_confirmed'), mode=='edit') }}
-    {{ yesno_field('purchase_orders_confirmed', 'Are required Purchase Orders in place?', items_by_code.get('purchase_orders_confirmed'), mode=='edit') }}
-    <p class="sub"><a href="{{ url_for('inventory_purchase_list') }}">View Linked Purchase Requests ({{ open_purchases }})</a></p>
-    {{ yesno_field('concrete_forms_confirmed', 'Are required Concrete Forms complete?', items_by_code.get('concrete_forms_confirmed'), mode=='edit') }}
-    <p class="sub"><a href="{{ url_for('inventory_concrete_list') }}">View Linked Concrete Requests ({{ open_concrete }})</a></p>
+    {{ yn_row('change_orders_approval_required', 'Change Order requirements reviewed?', items_by_code.get('change_orders_approval_required'), mode=='edit') }}
+    {{ yn_row('site_meetings_conducted', 'Site Meetings coordinated?', items_by_code.get('site_meetings_conducted'), mode=='edit') }}
+    {{ yn_row('safety_meeting_enforcement', 'Safety Meeting / enforcement requirements reviewed?', items_by_code.get('safety_meeting_enforcement'), mode=='edit') }}
+    {{ yn_row('no_client_subs_interaction', 'No Client / Subcontractor direct interaction requirement reviewed?', items_by_code.get('no_client_subs_interaction'), mode=='edit') }}
+    {{ yn_row('preconstruction_pictures', 'Preconstruction Pictures complete?', items_by_code.get('preconstruction_pictures'), mode=='edit') }}
+    {{ yn_row('rfi_submittals_confirmed', 'Required RFI Submittals complete?', items_by_code.get('rfi_submittals_confirmed'), mode=='edit') }}
+    {{ yn_row('purchase_orders_confirmed', 'Required Purchase Orders in place?', items_by_code.get('purchase_orders_confirmed'), mode=='edit') }}
+    <p class="sub" style="margin:2px 0 8px;"><a href="{{ url_for('inventory_purchase_list') }}">View Linked Purchase Requests ({{ open_purchases }})</a></p>
+    {{ yn_row('concrete_forms_confirmed', 'Required Concrete Forms complete?', items_by_code.get('concrete_forms_confirmed'), mode=='edit') }}
+    <p class="sub" style="margin:2px 0 8px;"><a href="{{ url_for('inventory_concrete_list') }}">View Linked Concrete Requests ({{ open_concrete }})</a></p>
 </div>
 
 {% if mode == 'edit' %}
@@ -280,24 +321,14 @@
 {% endif %}
 
 <script>
-function setYesNo(code, value) {
-    document.getElementById('yesno_' + code + '_input').value = value;
-    var buttons = document.getElementById('yesno_' + code + '_input').previousElementSibling.querySelectorAll('button');
-    buttons[0].className = value === 'yes' ? 'selected-yes' : '';
-    buttons[1].className = value === 'no' ? 'selected-no' : '';
-}
 function toggleCond(prefix, value) {
     document.getElementById(prefix + '_cond').style.display = value === 'yes' ? 'block' : 'none';
 }
 function addSubRow() {
-    var container = document.getElementById('subRows');
-    var card = document.createElement('div');
-    card.className = 'dep-sub-card';
-    card.innerHTML = '<div class="dep-sub-row">' +
-        '<input type="text" name="sub_trade" placeholder="Trade (e.g. Electrical)">' +
-        '<input type="text" name="sub_company" placeholder="Company">' +
-        '<input type="text" name="sub_contact" placeholder="Contact / Phone"></div>';
-    container.appendChild(card);
+    var tbody = document.getElementById('subRows');
+    var row = document.createElement('tr');
+    row.innerHTML = '<td><input type="text" name="sub_trade"></td><td><input type="text" name="sub_company"></td><td><input type="text" name="sub_contact"></td>';
+    tbody.appendChild(row);
 }
 </script>
 {% endblock %}
