@@ -1,41 +1,53 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+    .rep-photo-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:14px; }
+    @media (max-width:480px) {
+        .rep-photo-grid { grid-template-columns:repeat(2, 1fr); gap:10px; }
+    }
+    .rep-photo-card img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; display:block; }
+    .rep-caption-input { width:100%; font-size:16px; padding:12px; min-height:44px; box-sizing:border-box; }
+    .rep-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; width:100%; box-sizing:border-box; }
+    .rep-upload-input { font-size:16px; padding:14px; min-height:48px; width:100%; box-sizing:border-box; }
+</style>
 <span class="rc-eyebrow">SitePulse</span>
-<h1>{{ project['name'] }} — Add Photos</h1>
-<p class="sub">{{ project['client'] or '' }}</p>
+<h1 style="word-break:break-word;">{{ project['name'] }}</h1>
+<p class="sub">{{ project['client'] or '' }} — Add Photos</p>
 <div style="display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 16px;">
-    <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">Reports</a>
+    <a href="{{ url_for('sitepulse_reports_select_project') }}" class="btn btn-sm">&larr; Back to Field Reports</a>
+    <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">View Reports</a>
 </div>
 
 {% if can_author %}
 <div class="card">
     <form method="POST" enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <label>Take or choose photos</label>
-        <input type="file" name="photos" accept="image/*" capture="environment" multiple required>
-        <p class="sub" style="margin-top:6px;">You can select multiple photos at once. Captions are optional and can be added after saving.</p>
-        <button type="submit" class="btn btn-gold" style="margin-top:10px;">Save Photos</button>
+        <label style="font-size:15px;">Take or Choose Photos</label>
+        <input class="rep-upload-input" type="file" name="photos" accept="image/*" capture="environment" multiple required>
+        <p class="sub" style="margin-top:8px;">Select as many photos as you need at once. Captions are optional — add them after saving.</p>
+        <button type="submit" class="btn btn-gold rep-btn-lg" style="margin-top:12px;">Save Photos</button>
     </form>
 </div>
 {% endif %}
 
-<div style="margin-top:16px; display:grid; grid-template-columns:repeat(auto-fill, minmax(160px, 1fr)); gap:12px;">
+<h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Project Photos</h3>
+<div class="rep-photo-grid">
     {% for p in photos %}
-    <div class="card" style="padding:8px;">
-        <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" style="width:100%; height:120px; object-fit:cover; border-radius:4px;" loading="lazy">
-        <div class="sub" style="margin-top:4px; font-size:11px;">{{ p['uploaded_by'] }} · {{ p['uploaded_at'][:10] if p['uploaded_at'] }}</div>
+    <div class="card rep-photo-card" style="padding:8px;">
+        <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" loading="lazy">
+        <div class="sub" style="margin-top:6px; font-size:11px;">{{ p['uploaded_by'] }} · {{ p['uploaded_at'][:10] if p['uploaded_at'] }}</div>
         {% if can_author %}
-        <form method="POST" action="{{ url_for('sitepulse_photo_caption', photo_id=p['id']) }}" style="margin-top:6px;">
+        <form method="POST" action="{{ url_for('sitepulse_photo_caption', photo_id=p['id']) }}" style="margin-top:8px;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="text" name="caption" value="{{ p['caption'] or '' }}" placeholder="Add a caption" style="font-size:12px; padding:6px;">
-            <button type="submit" class="btn btn-sm" style="margin-top:4px; width:100%;">Save Caption</button>
+            <input class="rep-caption-input" type="text" name="caption" value="{{ p['caption'] or '' }}" placeholder="Add a caption">
+            <button type="submit" class="btn btn-sm rep-btn-lg" style="margin-top:6px;">Save Caption</button>
         </form>
         {% elif p['caption'] %}
-        <div style="margin-top:6px; font-size:12px;">{{ p['caption'] }}</div>
+        <div style="margin-top:6px; font-size:13px;">{{ p['caption'] }}</div>
         {% endif %}
     </div>
     {% else %}
-    <p class="sub">No photos yet.</p>
+    <p class="sub">No photos yet — take the first one above.</p>
     {% endfor %}
 </div>
 {% endblock %}

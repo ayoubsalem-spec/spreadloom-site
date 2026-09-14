@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+    .rep-photo-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:12px; }
+    @media (max-width:480px) { .rep-photo-grid { grid-template-columns:repeat(2, 1fr); gap:10px; } }
+    .rep-photo-grid img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; display:block; }
+</style>
+<span class="rc-eyebrow">SitePulse</span>
+<h1 style="word-break:break-word;">{{ report['project_name'] }} — Version {{ version['version_number'] }}</h1>
+<p class="sub">Submitted by {{ version['submitted_by'] }} on {{ version['submitted_at'][:10] if version['submitted_at'] }}</p>
+<div style="display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 16px;">
+    <a href="{{ url_for('sitepulse_report_detail', report_id=report['id']) }}" class="btn btn-sm">&larr; Back to Report</a>
+    <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=version['id']) }}" class="btn btn-sm" target="_blank">Download PDF</a>
+</div>
+
+<div class="card">
+    <h3 style="font-size:15px; color:var(--gold);">Work Completed</h3>
+    <p>{{ snapshot['work_completed'] or '—' }}</p>
+    <h3 style="font-size:15px; color:var(--gold); margin-top:16px;">Issues / Blockers</h3>
+    <p>{{ snapshot['issues_blockers'] if snapshot['has_issues'] else 'No Issues' }}</p>
+    <h3 style="font-size:15px; color:var(--gold); margin-top:16px;">Next Steps</h3>
+    <p>{{ snapshot['next_steps'] or '—' }}</p>
+    {% if snapshot['general_notes'] %}
+    <h3 style="font-size:15px; color:var(--gold); margin-top:16px;">General Notes</h3>
+    <p>{{ snapshot['general_notes'] }}</p>
+    {% endif %}
+</div>
+
+{% if snapshot['photos'] %}
+<div class="card" style="margin-top:16px;">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Photos in This Version</h3>
+    <div class="rep-photo-grid">
+        {% for p in snapshot['photos'] %}
+        <div>
+            <img src="{{ url_for('sitepulse_photo_file', photo_id=p['photo_id']) }}" loading="lazy">
+            {% if p['caption'] %}<div class="sub" style="margin-top:4px; font-size:12px;">{{ p['caption'] }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

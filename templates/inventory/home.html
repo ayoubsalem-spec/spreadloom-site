@@ -1,13 +1,18 @@
 {% extends "inventory/base.html" %}
 {% block content %}
 <span class="rc-eyebrow">SitePulse</span>
-<h1>Materials &amp; Deliveries</h1>
-<p class="sub">Stay on top of materials from order to delivery. Track inventory, place material and concrete orders, monitor deliveries, and generate reports&mdash;all in one place.</p>
+<h1>Run the Field</h1>
+<p class="sub">Materials, procurement, and field reporting for active jobs&mdash;all in one place.</p>
+
+<h3 style="font-size:14px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin:20px 0 8px;">Materials &amp; Procurement</h3>
 <div class="stack-nav">
     <a href="{{ url_for('inventory_concrete_list') }}" class="btn-stack">Concrete Requests</a>
     <a href="{{ url_for('inventory_purchase_list') }}" class="btn-stack">Purchase Requests</a>
     <a href="{{ url_for('inventory_materials_list') }}" class="btn-stack">Inventory</a>
-    <a href="{{ url_for('sitepulse_procurement_rental_swaps') }}" class="btn-stack">Rental Swap Queue</a>
+</div>
+
+<h3 style="font-size:14px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin:24px 0 8px;">Field Operations</h3>
+<div class="stack-nav">
     <a href="{{ url_for('sitepulse_reports_select_project') }}" class="btn-stack">Field Reports</a>
 </div>
 {% endblock %}

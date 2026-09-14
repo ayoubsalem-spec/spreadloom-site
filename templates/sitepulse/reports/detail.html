@@ -1,39 +1,96 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+    .rep-field { width:100%; font-size:16px; padding:12px; box-sizing:border-box; }
+    .rep-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; }
+    .rep-photo-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:12px; }
+    @media (max-width:480px) { .rep-photo-grid { grid-template-columns:repeat(2, 1fr); gap:10px; } }
+    .rep-photo-tile { cursor:pointer; border:2px solid var(--line); border-radius:8px; padding:6px; display:block; }
+    .rep-photo-tile.selected { border-color:var(--gold); background:rgba(201,162,75,0.08); }
+    .rep-photo-tile img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:6px; display:block; }
+    .rep-photo-tile .rep-tile-check { display:flex; align-items:center; gap:6px; margin-top:6px; font-size:12px; }
+    .rep-photo-tile input[type=checkbox] { width:20px; height:20px; }
+    .rep-issue-toggle { display:flex; gap:10px; margin:8px 0 10px; }
+    .rep-issue-btn { flex:1; padding:14px; text-align:center; border-radius:8px; border:2px solid var(--line); cursor:pointer; font-size:15px; font-weight:600; }
+    .rep-issue-btn.active-no { border-color:var(--teal); background:rgba(94,234,212,0.12); color:var(--teal); }
+    .rep-issue-btn.active-yes { border-color:#F87171; background:rgba(248,113,113,0.12); color:#F87171; }
+    .rep-actions-bar { display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }
+    .rep-actions-bar form, .rep-actions-bar a, .rep-actions-bar button { flex:1; min-width:140px; }
+    .rep-display-photo { border-radius:8px; overflow:hidden; }
+    .rep-display-photo img { width:100%; aspect-ratio:4/3; object-fit:cover; display:block; }
+    .rep-readonly-section { margin-top:18px; }
+    .rep-readonly-section h4 { font-size:13px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px; }
+    .rep-readonly-section p { white-space:pre-wrap; }
+</style>
 <span class="rc-eyebrow">SitePulse</span>
-<h1>{{ report['project_name'] }} — Field Report</h1>
-<p class="sub">{{ report['project_client'] or '' }} — {{ report['project_address'] or '' }}</p>
+<div style="margin-bottom:10px;">
+    <a href="{{ url_for('sitepulse_project_reports', project_id=report['project_id']) }}" class="btn btn-sm">&larr; Back to Reports</a>
+</div>
+<h1 style="word-break:break-word;">{{ report['project_name'] }}</h1>
+<p class="sub">Field Report — {{ report['report_date'] or 'No date' }}</p>
 
+{% if report['status'] == 'Submitted' %}
 <div class="card">
-    <div style="display:flex; flex-wrap:wrap; gap:24px;">
-        <div><strong>Status:</strong> {{ report['status'] }}</div>
-        <div><strong>Created By:</strong> {{ report['created_by'] or '—' }}</div>
-        <div><strong>Last Edited By:</strong> {{ report['last_edited_by'] or '—' }}</div>
+    <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:14px;">
+        <div><strong>Status:</strong> Submitted</div>
+        {% if versions %}<div><strong>Current Version:</strong> V{{ versions[0]['version_number'] }}</div>{% endif %}
+        <div class="sub"><strong>Created By:</strong> {{ report['created_by'] or '—' }}</div>
+        {% if report['last_edited_by'] and report['last_edited_by'] != report['created_by'] %}<div class="sub"><strong>Last Edited By:</strong> {{ report['last_edited_by'] }}</div>{% endif %}
     </div>
-    <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <a href="{{ url_for('sitepulse_report_preview', report_id=report['id']) }}" target="_blank" class="btn btn-sm">Preview</a>
-        {% if report['status'] == 'Draft' and can_author %}
-        <form method="POST" action="{{ url_for('sitepulse_report_submit', report_id=report['id']) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-gold">Submit</button>
-        </form>
-        {% endif %}
-        {% if report['status'] == 'Submitted' and can_manage %}
-        <form method="POST" action="{{ url_for('sitepulse_report_reopen', report_id=report['id']) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-sm">Reopen</button>
-        </form>
+    <div class="rep-actions-bar">
+        {% if versions %}
+        <button type="button" class="btn btn-gold rep-btn-lg share-report-btn"
+            data-pdf-url="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=versions[0]['id']) }}"
+            data-filename="{{ report['project_name'] }} Field Report v{{ versions[0]['version_number'] }}.pdf"
+            data-title="{{ report['project_name'] }} Field Report">Share</button>
+        <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=versions[0]['id']) }}" class="btn rep-btn-lg" target="_blank">Download PDF</a>
         {% endif %}
     </div>
 </div>
 
+<div class="card" style="margin-top:16px;">
+    <div class="rep-readonly-section" style="margin-top:0;">
+        <h4>Work Completed</h4>
+        <p>{{ report['work_completed'] or '—' }}</p>
+    </div>
+    <div class="rep-readonly-section">
+        <h4>Issues / Blockers</h4>
+        <p>{{ report['issues_blockers'] if report['has_issues'] else 'No Issues' }}</p>
+    </div>
+    <div class="rep-readonly-section">
+        <h4>Next Steps</h4>
+        <p>{{ report['next_steps'] or '—' }}</p>
+    </div>
+    {% if report['general_notes'] %}
+    <div class="rep-readonly-section">
+        <h4>General Notes</h4>
+        <p>{{ report['general_notes'] }}</p>
+    </div>
+    {% endif %}
+</div>
+
+{% if display_photos %}
+<div class="card" style="margin-top:16px;">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Report Photos</h3>
+    <div class="rep-photo-grid">
+        {% for p in display_photos %}
+        <div class="rep-display-photo">
+            <img src="{{ url_for('sitepulse_photo_file', photo_id=p['photo_id']) }}" loading="lazy">
+            {% if p['caption'] %}<div class="sub" style="margin-top:4px; font-size:12px;">{{ p['caption'] }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
 {% if versions %}
 <div class="card" style="margin-top:16px;">
-    <h3 style="font-size:15px; color:var(--gold);">Version History</h3>
+    <h3 style="font-size:14px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px;">Version History</h3>
     {% for v in versions %}
-    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-top:1px solid var(--line); flex-wrap:wrap; gap:8px;">
-        <div>Version {{ v['version_number'] }} — submitted by {{ v['submitted_by'] }} on {{ v['submitted_at'][:10] if v['submitted_at'] }}</div>
-        <div style="display:flex; gap:8px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid var(--line); flex-wrap:wrap; gap:8px;">
+        <div style="font-size:13px;">V{{ v['version_number'] }} — {{ v['submitted_by'] }} · {{ v['submitted_at'][:10] if v['submitted_at'] }}</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <a href="{{ url_for('sitepulse_report_version_view', report_id=report['id'], version_id=v['id']) }}" class="btn btn-sm">View</a>
             <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=v['id']) }}" class="btn btn-sm" target="_blank">Download PDF</a>
             <button type="button" class="btn btn-sm share-report-btn"
                 data-pdf-url="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=v['id']) }}"
@@ -45,16 +102,103 @@
 </div>
 {% endif %}
 
+{% if can_manage %}
+<div style="margin-top:16px;">
+    <form method="POST" action="{{ url_for('sitepulse_report_reopen', report_id=report['id']) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-sm">Reopen for Editing</button>
+    </form>
+</div>
+{% endif %}
+
+{% else %}
+<div class="card">
+    <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:14px;">
+        <div><strong>Status:</strong> Draft</div>
+        <div><strong>Report Date:</strong> {{ report['report_date'] or '—' }}</div>
+    </div>
+    <div class="rep-actions-bar">
+        <a href="{{ url_for('sitepulse_report_preview', report_id=report['id']) }}" target="_blank" class="btn rep-btn-lg">Preview</a>
+        {% if can_author %}
+        <form method="POST" action="{{ url_for('sitepulse_report_submit', report_id=report['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-gold rep-btn-lg" style="width:100%;">Submit Report</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
 <script>
-// Progressive enhancement: use the real Web Share API (with actual file
-// sharing) where the browser/device supports it -- fetches the SAME
-// authorized PDF URL the Download button uses (no separate/weaker
-// authorization path, no public URL), shares the file blob directly if
-// navigator.canShare({files:[...]}) says the browser supports file
-// sharing. Falls back cleanly to just opening the authorized download
-// URL (identical behavior to clicking Download PDF) on any browser
-// without Web Share support, or if share/fetch fails for any reason --
-// never leaves the button non-functional.
+function toggleIssues(hasIssues) {
+    document.getElementById("has_issues_input").value = hasIssues ? "yes" : "no";
+    document.getElementById("issue_text_area").style.display = hasIssues ? "block" : "none";
+    document.getElementById("no_issues_btn").className = "rep-issue-btn" + (hasIssues ? "" : " active-no");
+    document.getElementById("add_issue_btn").className = "rep-issue-btn" + (hasIssues ? " active-yes" : "");
+}
+document.querySelectorAll(".rep-photo-checkbox").forEach(function (cb) {
+    var tile = cb.closest(".rep-photo-tile");
+    cb.addEventListener("change", function () {
+        tile.classList.toggle("selected", cb.checked);
+    });
+});
+</script>
+
+{% if can_author %}
+<form method="POST">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+{% endif %}
+
+    <div class="card" style="margin-top:16px;">
+        <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Select Photos</h3>
+        <div class="rep-photo-grid">
+            {% for p in recent_photos %}
+            <label class="rep-photo-tile {{ 'selected' if p['id'] in selected_ids }}">
+                <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" loading="lazy">
+                <div class="rep-tile-check">
+                    <input type="checkbox" class="rep-photo-checkbox" name="selected_photos" value="{{ p['id'] }}" {{ 'checked' if p['id'] in selected_ids }} {{ 'disabled' if not can_author }}>
+                    <span>{{ p['caption'] or 'No caption' }}</span>
+                </div>
+            </label>
+            {% else %}
+            <p class="sub">No project photos yet. <a href="{{ url_for('sitepulse_project_photos', project_id=report['project_id']) }}">Add photos first</a>.</p>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+        <label style="font-size:15px;">Report Date</label>
+        <input class="rep-field" type="date" name="report_date" value="{{ report['report_date'] or '' }}" {{ 'disabled' if not can_author }}>
+
+        <label style="font-size:15px; margin-top:16px; display:block;">Work Completed</label>
+        <textarea class="rep-field" name="work_completed" rows="4" {{ 'disabled' if not can_author }}>{{ report['work_completed'] or '' }}</textarea>
+
+        <label style="font-size:15px; margin-top:16px; display:block;">Issues / Blockers</label>
+        <div class="rep-issue-toggle">
+            <div id="no_issues_btn" class="rep-issue-btn {{ 'active-no' if not report['has_issues'] }}" onclick="toggleIssues(false)">No Issues</div>
+            <div id="add_issue_btn" class="rep-issue-btn {{ 'active-yes' if report['has_issues'] }}" onclick="toggleIssues(true)">Add Issue</div>
+        </div>
+        <input type="hidden" id="has_issues_input" name="has_issues" value="{{ 'yes' if report['has_issues'] else 'no' }}">
+        <div id="issue_text_area" style="display:{{ 'block' if report['has_issues'] else 'none' }};">
+            <textarea class="rep-field" name="issues_blockers" rows="3" placeholder="Describe the issue/blocker" {{ 'disabled' if not can_author }}>{{ report['issues_blockers'] or '' }}</textarea>
+        </div>
+
+        <label style="font-size:15px; margin-top:16px; display:block;">Next Steps</label>
+        <textarea class="rep-field" name="next_steps" rows="3" {{ 'disabled' if not can_author }}>{{ report['next_steps'] or '' }}</textarea>
+
+        <label style="font-size:15px; margin-top:16px; display:block;">General Notes <span class="sub">(optional)</span></label>
+        <textarea class="rep-field" name="general_notes" rows="2" {{ 'disabled' if not can_author }}>{{ report['general_notes'] or '' }}</textarea>
+
+        {% if can_author %}
+        <button type="submit" class="btn btn-gold rep-btn-lg" style="width:100%; margin-top:18px;">Save Report</button>
+        {% endif %}
+    </div>
+
+{% if can_author %}
+</form>
+{% endif %}
+{% endif %}
+
+<script>
 document.querySelectorAll(".share-report-btn").forEach(function (btn) {
     btn.addEventListener("click", async function () {
         var pdfUrl = btn.getAttribute("data-pdf-url");
@@ -71,68 +215,12 @@ document.querySelectorAll(".share-report-btn").forEach(function (btn) {
                         return;
                     }
                 }
-                // Web Share exists but file sharing isn't supported here --
-                // share the authorized URL itself instead of a raw file.
                 await navigator.share({ title: title, url: pdfUrl });
                 return;
             }
-        } catch (err) {
-            // User cancelled, or share/fetch failed -- fall through to
-            // the plain download fallback below rather than leaving the
-            // user with nothing.
-        }
+        } catch (err) { /* fall through to plain download below */ }
         window.open(pdfUrl, "_blank");
     });
 });
 </script>
-
-<div class="card" style="margin-top:16px;">
-    {% if report['status'] == 'Draft' and can_author %}
-    <form method="POST">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    {% endif %}
-
-        <label>Report Date</label>
-        <input type="date" name="report_date" value="{{ report['report_date'] or '' }}" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>
-
-        <label style="margin-top:10px;">Work Completed</label>
-        <textarea name="work_completed" rows="3" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['work_completed'] or '' }}</textarea>
-
-        <label style="margin-top:10px;">Issues / Blockers</label>
-        <div style="display:flex; gap:16px; margin:4px 0 8px;">
-            <label style="display:flex; align-items:center; gap:6px; font-size:13px;">
-                <input type="radio" name="has_issues" value="no" {{ 'checked' if not report['has_issues'] }} {{ 'disabled' if not (report['status']=='Draft' and can_author) }}> No Issues
-            </label>
-            <label style="display:flex; align-items:center; gap:6px; font-size:13px;">
-                <input type="radio" name="has_issues" value="yes" {{ 'checked' if report['has_issues'] }} {{ 'disabled' if not (report['status']=='Draft' and can_author) }}> Add Issue
-            </label>
-        </div>
-        <textarea name="issues_blockers" rows="3" placeholder="Describe the issue/blocker" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['issues_blockers'] or '' }}</textarea>
-
-        <label style="margin-top:10px;">Next Steps</label>
-        <textarea name="next_steps" rows="3" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['next_steps'] or '' }}</textarea>
-
-        <label style="margin-top:10px;">General Notes (optional)</label>
-        <textarea name="general_notes" rows="2" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['general_notes'] or '' }}</textarea>
-
-        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Photos</h3>
-        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:10px;">
-            {% for p in recent_photos %}
-            <label style="cursor:pointer;">
-                <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" style="width:100%; height:100px; object-fit:cover; border-radius:4px; {{ 'outline:3px solid var(--gold);' if p['id'] in selected_ids }}" loading="lazy">
-                <div style="display:flex; align-items:center; gap:4px; margin-top:4px; font-size:12px;">
-                    <input type="checkbox" name="selected_photos" value="{{ p['id'] }}" {{ 'checked' if p['id'] in selected_ids }} {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>
-                    {{ p['caption'] or 'No caption' }}
-                </div>
-            </label>
-            {% else %}
-            <p class="sub">No Daily Capture photos yet for this project.</p>
-            {% endfor %}
-        </div>
-
-    {% if report['status'] == 'Draft' and can_author %}
-        <button type="submit" class="btn btn-gold" style="margin-top:16px;">Save Report</button>
-    </form>
-    {% endif %}
-</div>
 {% endblock %}

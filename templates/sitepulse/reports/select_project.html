@@ -1,18 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+    .rep-project-row { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid var(--line); gap:12px; }
+    @media (max-width:480px) { .rep-project-row { flex-direction:column; align-items:stretch; } }
+    .rep-search-input { width:100%; font-size:16px; padding:12px; box-sizing:border-box; margin-bottom:16px; }
+</style>
 <span class="rc-eyebrow">SitePulse</span>
-<h1>Field Reports — Select a Project</h1>
+<h1>Field Reports</h1>
+<div style="margin:10px 0 16px;">
+    <a href="{{ url_for('inventory_home') }}" class="btn btn-sm">&larr; Back to SitePulse</a>
+</div>
+
+<form method="GET">
+    <input class="rep-search-input" type="text" name="q" value="{{ search or '' }}" placeholder="Search projects by name or client&hellip;">
+</form>
+
 <div class="card">
     {% for p in projects %}
-    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--line);">
-        <div>{{ p['name'] }} <span class="sub">{{ p['client'] or '' }}</span></div>
-        <div style="display:flex; gap:8px;">
+    <div class="rep-project-row">
+        <div>
+            <div style="font-weight:600; font-size:15px;">{{ p['name'] }}</div>
+            <div class="sub" style="margin-top:2px;">
+                {{ p['client'] or '' }}{% if p['address'] %} &middot; {{ p['address'] }}{% endif %}
+            </div>
+            <div class="sub" style="margin-top:2px; font-size:12px;">
+                {% if p['last_report_date'] %}Last Report: {{ p['last_report_date'] }}{% else %}No reports yet{% endif %}
+            </div>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <a href="{{ url_for('sitepulse_project_photos', project_id=p['id']) }}" class="btn btn-sm">Add Photos</a>
             <a href="{{ url_for('sitepulse_project_reports', project_id=p['id']) }}" class="btn btn-sm">Reports</a>
         </div>
     </div>
     {% else %}
-    <p class="sub">No projects available.</p>
+    <p class="sub">No operational projects found{% if search %} matching "{{ search }}"{% endif %}.</p>
     {% endfor %}
 </div>
 {% endblock %}

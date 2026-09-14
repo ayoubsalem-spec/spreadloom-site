@@ -197,8 +197,8 @@
         <nav>
             <div class="nav-primary">
                 {% if has_project_hunt_access %}<a href="{{ url_for('tracker_dashboard') }}" class="{{ 'active' if request.path.startswith('/tracker') }}">Project Hunt</a>{% endif %}
-                <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') }}">Equipment Center</a>
-                <a href="{{ url_for('inventory_home') }}" class="{{ 'active' if request.path.startswith('/inventory') }}">SitePulse</a>
+                <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') and not (request.path.startswith('/sitepulse/reports') or request.path.startswith('/sitepulse/project') or request.path.startswith('/sitepulse/photos')) }}">Equipment Center</a>
+                <a href="{{ url_for('inventory_home') }}" class="{{ 'active' if request.path.startswith('/inventory') or request.path.startswith('/sitepulse/reports') or request.path.startswith('/sitepulse/project') or request.path.startswith('/sitepulse/photos') }}">SitePulse</a>
                 {% if has_atlas_access %}
                 <a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>
                 {% endif %}

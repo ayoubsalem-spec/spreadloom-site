@@ -1,46 +1,40 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+    .rep-history-row { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid var(--line); gap:12px; }
+    .rep-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; }
+    @media (max-width:480px) {
+        .rep-history-row { flex-direction:column; align-items:stretch; gap:8px; }
+    }
+</style>
 <span class="rc-eyebrow">SitePulse</span>
-<h1>{{ project['name'] }} — Reports</h1>
-<p class="sub">{{ project['client'] or '' }}</p>
+<h1 style="word-break:break-word;">{{ project['name'] }}</h1>
+<p class="sub">{{ project['client'] or '' }} — Field Reports</p>
 <div style="display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 16px;">
+    <a href="{{ url_for('sitepulse_reports_select_project') }}" class="btn btn-sm">&larr; Back to Field Reports</a>
     <a href="{{ url_for('sitepulse_project_photos', project_id=project['id']) }}" class="btn btn-sm">Add Photos</a>
     {% if can_author %}
     <form method="POST" action="{{ url_for('sitepulse_report_create', project_id=project['id']) }}" style="display:inline;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="btn btn-gold">Create Report</button>
+        <button type="submit" class="btn btn-gold rep-btn-lg">+ Create Report</button>
     </form>
     {% endif %}
 </div>
 
-<div class="card desktop-only" style="padding:0; overflow-x:auto;">
-    <table>
-        <tr><th>Date</th><th>Status</th><th>Current Version</th><th>Created By</th><th></th></tr>
-        {% for r in reports %}
-        <tr>
-            <td>{{ r['report_date'] or '—' }}</td>
-            <td>{{ r['status'] }}</td>
-            <td>{{ 'V' ~ r['current_version_number'] if r['current_version_number'] else '—' }}</td>
-            <td>{{ r['created_by'] or '—' }}</td>
-            <td><a href="{{ url_for('sitepulse_report_detail', report_id=r['id']) }}" class="btn btn-sm">Open</a></td>
-        </tr>
-        {% else %}
-        <tr><td colspan="5" class="sub">No reports yet.</td></tr>
-        {% endfor %}
-    </table>
-</div>
-
-<div class="mobile-only" style="display:flex; flex-direction:column; gap:10px;">
+<div class="card">
     {% for r in reports %}
-    <div class="card" style="padding:12px;">
-        <div style="font-weight:600;">{{ r['report_date'] or '—' }} — {{ r['status'] }}</div>
-        <div class="sub" style="margin-top:4px;">
-            {{ 'Version ' ~ r['current_version_number'] if r['current_version_number'] else 'No version yet' }} · {{ r['created_by'] or '—' }}
+    <div class="rep-history-row">
+        <div>
+            <div style="font-weight:600; font-size:15px;">{{ r['report_date'] or 'No date' }}</div>
+            <div class="sub" style="margin-top:2px;">
+                {{ r['status'] }}{% if r['current_version_number'] %} · Version {{ r['current_version_number'] }}{% endif %}
+                {% if r['created_by'] %} · {{ r['created_by'] }}{% endif %}
+            </div>
         </div>
-        <a href="{{ url_for('sitepulse_report_detail', report_id=r['id']) }}" class="btn btn-sm" style="margin-top:8px;">Open</a>
+        <a href="{{ url_for('sitepulse_report_detail', report_id=r['id']) }}" class="btn btn-sm">Open</a>
     </div>
     {% else %}
-    <p class="sub">No reports yet.</p>
+    <p class="sub">No reports yet for this project.</p>
     {% endfor %}
 </div>
 {% endblock %}

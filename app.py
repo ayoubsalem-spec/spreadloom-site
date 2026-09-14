@@ -616,15 +616,6 @@ MAX_PHOTO_SIZE_MB = 10
 
 ADMIN_EMAILS = ["ayoub@darycet.com", "rebecca@darycet.com"]
 
-# ---------------------------------------------------------------------------
-# TEMPORARY TEST ADMIN -- remove when testing is done.
-# To remove: delete this block, delete the user row (see
-# scripts/manage_temp_admin.py's --remove command), and remove this email
-# from the nav dropdown checks in templates/base.html.
-# ---------------------------------------------------------------------------
-TEMP_TEST_ADMIN_EMAIL = "test-admin@darycet.com"
-ADMIN_EMAILS.append(TEMP_TEST_ADMIN_EMAIL)
-
 # Domains allowed to sign up. Being on this list only grants basic access
 # (Equipment Center / SitePulse) -- Project Hunt and admin tooling stay
 # gated per-email below, never per-domain.
@@ -634,7 +625,7 @@ ALLOWED_SIGNUP_DOMAINS = ["@darycet.com", "@nomaengineering.com"]
 EXTRA_ALLOWED_SIGNUP_EMAILS = set()
 # Full access to every section, including Project Hunt -- named
 # individuals only, never a whole domain.
-FULL_ACCESS_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", "hghuneim@nomaengineering.com", TEMP_TEST_ADMIN_EMAIL}
+FULL_ACCESS_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", "hghuneim@nomaengineering.com"}
 # Atlas (voice assistant) access -- separate from Project Hunt so someone
 # can get Atlas without also getting Project Hunt. Everyone in
 # FULL_ACCESS_EMAILS gets it too, plus anyone listed here individually.
@@ -642,10 +633,10 @@ ATLAS_ACCESS_EMAILS = FULL_ACCESS_EMAILS | {"rebecca@nomaengineering.com"}
 # Only these can actually place a concrete/material order -- everyone else
 # can submit a request, but "Scheduled/Ordered" plus the vendor/contact
 # details is procurement's call.
-PROCUREMENT_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com", TEMP_TEST_ADMIN_EMAIL}
+PROCUREMENT_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", "marilu@darycet.com"}
 # Who can manage the WhatsApp site-group routing -- narrower than full
 # admin, but wider than just Ayoub.
-WHATSAPP_ADMIN_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com", TEMP_TEST_ADMIN_EMAIL}
+WHATSAPP_ADMIN_EMAILS = {"ayoub@darycet.com", "rebecca@darycet.com"}
 
 
 def is_project_hunt_allowed():
@@ -4138,18 +4129,34 @@ def sitepulse_delete_rental(rental_id):
 @app.route("/sitepulse/reports/select-project")
 @login_required
 def sitepulse_reports_select_project():
-    """Lightweight project picker -- Reporting is inherently per-project
-    (Daily Capture/Reports need a project first), reusing the exact same
-    inclusive project query already proven safe by the existing
-    Concrete/Purchase/Rental "new" forms, not a new filtering rule."""
+    """Project picker for Field Reports -- SitePulse-eligible operational
+    projects only, using the strongest existing canonical lifecycle
+    signal rather than a new flag: a project qualifies once it has
+    genuinely crossed from Project Hunt pursuit into operations, shown
+    by either Awarded status OR the existence of a project_deployments
+    record. The OR matters: a project that already has a Deployment
+    record must never lose SitePulse eligibility merely because its
+    Project Hunt status later changed for some unrelated reason --
+    exactly the same no-stranding principle already established for
+    Project Deployment's own Open Deployment behavior."""
     if not _authorized("module:sitepulse:view"):
         flash("You don't have access to SitePulse.", "error")
         return redirect(url_for("home"))
     db = get_db()
-    projects = db.execute(
-        "SELECT id, name, client FROM tracker_projects WHERE status NOT IN ('Archived','Cancelled') ORDER BY name"
-    ).fetchall()
-    return render_template("sitepulse/reports/select_project.html", projects=projects)
+    search = (request.args.get("q") or "").strip()
+    query = """
+        SELECT tp.id, tp.name, tp.client, tp.address,
+               (SELECT MAX(fr.report_date) FROM field_reports fr WHERE fr.project_id = tp.id) AS last_report_date
+        FROM tracker_projects tp
+        WHERE (tp.status = 'Awarded' OR tp.id IN (SELECT project_id FROM project_deployments))
+    """
+    params = []
+    if search:
+        query += " AND (tp.name LIKE ? OR tp.client LIKE ?)"
+        params += [f"%{search}%", f"%{search}%"]
+    query += " ORDER BY tp.name"
+    projects = db.execute(query, params).fetchall()
+    return render_template("sitepulse/reports/select_project.html", projects=projects, search=search)
 
 
 @app.route("/inventory/")
