@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<span class="rc-eyebrow">SitePulse</span>
+<h1>{{ project['name'] }} — Reports</h1>
+<p class="sub">{{ project['client'] or '' }}</p>
+<div style="display:flex; gap:10px; flex-wrap:wrap; margin:10px 0 16px;">
+    <a href="{{ url_for('sitepulse_project_photos', project_id=project['id']) }}" class="btn btn-sm">Add Photos</a>
+    {% if can_author %}
+    <form method="POST" action="{{ url_for('sitepulse_report_create', project_id=project['id']) }}" style="display:inline;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-gold">Create Report</button>
+    </form>
+    {% endif %}
+</div>
+
+<div class="card desktop-only" style="padding:0; overflow-x:auto;">
+    <table>
+        <tr><th>Date</th><th>Status</th><th>Current Version</th><th>Created By</th><th></th></tr>
+        {% for r in reports %}
+        <tr>
+            <td>{{ r['report_date'] or '—' }}</td>
+            <td>{{ r['status'] }}</td>
+            <td>{{ 'V' ~ r['current_version_number'] if r['current_version_number'] else '—' }}</td>
+            <td>{{ r['created_by'] or '—' }}</td>
+            <td><a href="{{ url_for('sitepulse_report_detail', report_id=r['id']) }}" class="btn btn-sm">Open</a></td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="sub">No reports yet.</td></tr>
+        {% endfor %}
+    </table>
+</div>
+
+<div class="mobile-only" style="display:flex; flex-direction:column; gap:10px;">
+    {% for r in reports %}
+    <div class="card" style="padding:12px;">
+        <div style="font-weight:600;">{{ r['report_date'] or '—' }} — {{ r['status'] }}</div>
+        <div class="sub" style="margin-top:4px;">
+            {{ 'Version ' ~ r['current_version_number'] if r['current_version_number'] else 'No version yet' }} · {{ r['created_by'] or '—' }}
+        </div>
+        <a href="{{ url_for('sitepulse_report_detail', report_id=r['id']) }}" class="btn btn-sm" style="margin-top:8px;">Open</a>
+    </div>
+    {% else %}
+    <p class="sub">No reports yet.</p>
+    {% endfor %}
+</div>
+{% endblock %}

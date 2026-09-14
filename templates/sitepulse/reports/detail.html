@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block content %}
+<span class="rc-eyebrow">SitePulse</span>
+<h1>{{ report['project_name'] }} — Field Report</h1>
+<p class="sub">{{ report['project_client'] or '' }} — {{ report['project_address'] or '' }}</p>
+
+<div class="card">
+    <div style="display:flex; flex-wrap:wrap; gap:24px;">
+        <div><strong>Status:</strong> {{ report['status'] }}</div>
+        <div><strong>Created By:</strong> {{ report['created_by'] or '—' }}</div>
+        <div><strong>Last Edited By:</strong> {{ report['last_edited_by'] or '—' }}</div>
+    </div>
+    <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
+        <a href="{{ url_for('sitepulse_report_preview', report_id=report['id']) }}" target="_blank" class="btn btn-sm">Preview</a>
+        {% if report['status'] == 'Draft' and can_author %}
+        <form method="POST" action="{{ url_for('sitepulse_report_submit', report_id=report['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-gold">Submit</button>
+        </form>
+        {% endif %}
+        {% if report['status'] == 'Submitted' and can_manage %}
+        <form method="POST" action="{{ url_for('sitepulse_report_reopen', report_id=report['id']) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm">Reopen</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+
+{% if versions %}
+<div class="card" style="margin-top:16px;">
+    <h3 style="font-size:15px; color:var(--gold);">Version History</h3>
+    {% for v in versions %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-top:1px solid var(--line); flex-wrap:wrap; gap:8px;">
+        <div>Version {{ v['version_number'] }} — submitted by {{ v['submitted_by'] }} on {{ v['submitted_at'][:10] if v['submitted_at'] }}</div>
+        <div style="display:flex; gap:8px;">
+            <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=v['id']) }}" class="btn btn-sm" target="_blank">Download PDF</a>
+            <button type="button" class="btn btn-sm share-report-btn"
+                data-pdf-url="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=v['id']) }}"
+                data-filename="{{ report['project_name'] }} Field Report v{{ v['version_number'] }}.pdf"
+                data-title="{{ report['project_name'] }} Field Report">Share</button>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<script>
+// Progressive enhancement: use the real Web Share API (with actual file
+// sharing) where the browser/device supports it -- fetches the SAME
+// authorized PDF URL the Download button uses (no separate/weaker
+// authorization path, no public URL), shares the file blob directly if
+// navigator.canShare({files:[...]}) says the browser supports file
+// sharing. Falls back cleanly to just opening the authorized download
+// URL (identical behavior to clicking Download PDF) on any browser
+// without Web Share support, or if share/fetch fails for any reason --
+// never leaves the button non-functional.
+document.querySelectorAll(".share-report-btn").forEach(function (btn) {
+    btn.addEventListener("click", async function () {
+        var pdfUrl = btn.getAttribute("data-pdf-url");
+        var filename = btn.getAttribute("data-filename");
+        var title = btn.getAttribute("data-title");
+        try {
+            if (navigator.share) {
+                if (navigator.canShare) {
+                    var resp = await fetch(pdfUrl);
+                    var blob = await resp.blob();
+                    var file = new File([blob], filename, { type: "application/pdf" });
+                    if (navigator.canShare({ files: [file] })) {
+                        await navigator.share({ files: [file], title: title });
+                        return;
+                    }
+                }
+                // Web Share exists but file sharing isn't supported here --
+                // share the authorized URL itself instead of a raw file.
+                await navigator.share({ title: title, url: pdfUrl });
+                return;
+            }
+        } catch (err) {
+            // User cancelled, or share/fetch failed -- fall through to
+            // the plain download fallback below rather than leaving the
+            // user with nothing.
+        }
+        window.open(pdfUrl, "_blank");
+    });
+});
+</script>
+
+<div class="card" style="margin-top:16px;">
+    {% if report['status'] == 'Draft' and can_author %}
+    <form method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    {% endif %}
+
+        <label>Report Date</label>
+        <input type="date" name="report_date" value="{{ report['report_date'] or '' }}" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>
+
+        <label style="margin-top:10px;">Work Completed</label>
+        <textarea name="work_completed" rows="3" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['work_completed'] or '' }}</textarea>
+
+        <label style="margin-top:10px;">Issues / Blockers</label>
+        <div style="display:flex; gap:16px; margin:4px 0 8px;">
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px;">
+                <input type="radio" name="has_issues" value="no" {{ 'checked' if not report['has_issues'] }} {{ 'disabled' if not (report['status']=='Draft' and can_author) }}> No Issues
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:13px;">
+                <input type="radio" name="has_issues" value="yes" {{ 'checked' if report['has_issues'] }} {{ 'disabled' if not (report['status']=='Draft' and can_author) }}> Add Issue
+            </label>
+        </div>
+        <textarea name="issues_blockers" rows="3" placeholder="Describe the issue/blocker" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['issues_blockers'] or '' }}</textarea>
+
+        <label style="margin-top:10px;">Next Steps</label>
+        <textarea name="next_steps" rows="3" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['next_steps'] or '' }}</textarea>
+
+        <label style="margin-top:10px;">General Notes (optional)</label>
+        <textarea name="general_notes" rows="2" {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>{{ report['general_notes'] or '' }}</textarea>
+
+        <h3 style="font-size:15px; color:var(--gold); margin:20px 0 6px;">Photos</h3>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:10px;">
+            {% for p in recent_photos %}
+            <label style="cursor:pointer;">
+                <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" style="width:100%; height:100px; object-fit:cover; border-radius:4px; {{ 'outline:3px solid var(--gold);' if p['id'] in selected_ids }}" loading="lazy">
+                <div style="display:flex; align-items:center; gap:4px; margin-top:4px; font-size:12px;">
+                    <input type="checkbox" name="selected_photos" value="{{ p['id'] }}" {{ 'checked' if p['id'] in selected_ids }} {{ 'disabled' if not (report['status']=='Draft' and can_author) }}>
+                    {{ p['caption'] or 'No caption' }}
+                </div>
+            </label>
+            {% else %}
+            <p class="sub">No Daily Capture photos yet for this project.</p>
+            {% endfor %}
+        </div>
+
+    {% if report['status'] == 'Draft' and can_author %}
+        <button type="submit" class="btn btn-gold" style="margin-top:16px;">Save Report</button>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

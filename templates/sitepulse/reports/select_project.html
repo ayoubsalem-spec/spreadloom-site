@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<span class="rc-eyebrow">SitePulse</span>
+<h1>Field Reports — Select a Project</h1>
+<div class="card">
+    {% for p in projects %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--line);">
+        <div>{{ p['name'] }} <span class="sub">{{ p['client'] or '' }}</span></div>
+        <div style="display:flex; gap:8px;">
+            <a href="{{ url_for('sitepulse_project_photos', project_id=p['id']) }}" class="btn btn-sm">Add Photos</a>
+            <a href="{{ url_for('sitepulse_project_reports', project_id=p['id']) }}" class="btn btn-sm">Reports</a>
+        </div>
+    </div>
+    {% else %}
+    <p class="sub">No projects available.</p>
+    {% endfor %}
+</div>
+{% endblock %}
