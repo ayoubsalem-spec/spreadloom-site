@@ -7,3 +7,4 @@ openpyxl
 markdown
 bleach
 reportlab
+pillow-heif==1.7.0
