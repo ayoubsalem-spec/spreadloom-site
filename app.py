@@ -38,6 +38,9 @@ from reportlab.lib.units import inch
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.lib.utils import ImageReader
+from PIL import Image, ImageOps
+import pillow_heif
+pillow_heif.register_heif_opener()
 from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session, Response, stream_with_context
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import CSRFProtect
@@ -483,6 +486,7 @@ def build_field_report_pdf(report_info, photos, version_number):
         section("General Notes")
         y = _pdf_write_wrapped(c, report_info["general_notes"], x, y, width - 1.5 * inch, size=10)
 
+    missing_photo_ids = []
     if photos:
         section("Photos")
         img_w = 2.6 * inch
@@ -493,6 +497,13 @@ def build_field_report_pdf(report_info, photos, version_number):
         for p in photos:
             path = os.path.join(UPLOAD_DIR, p["filename"])
             if not os.path.exists(path):
+                # PRODUCTION FIX: this used to be a silent `continue` --
+                # a selected photo simply vanishing from the PDF with
+                # zero trace anywhere. Now explicitly tracked so the
+                # caller (Submit) can refuse to claim success rather
+                # than silently producing an incomplete "professional"
+                # report.
+                missing_photo_ids.append(p.get("photo_id"))
                 continue
             if row_start_y - img_h < bottom_margin + 30:
                 row_start_y = new_page(f"Field Report \u2014 {report_info.get('project_name') or ''} (photos continued)")
@@ -501,7 +512,13 @@ def build_field_report_pdf(report_info, photos, version_number):
             try:
                 c.drawImage(ImageReader(path), px, row_start_y - img_h, width=img_w, height=img_h, preserveAspectRatio=True, anchor="c")
             except Exception:
-                pass
+                # PRODUCTION FIX: this used to be a bare `except: pass`
+                # -- ANY image decode/draw failure (corrupt file,
+                # unsupported format, EXIF issue, memory issue) was
+                # silently swallowed with no indication anywhere. Now
+                # explicitly tracked, same as a missing file above.
+                missing_photo_ids.append(p.get("photo_id"))
+                continue
             if p.get("caption"):
                 c.setFont("Helvetica", 8)
                 c.setFillColor(navy)
@@ -515,7 +532,7 @@ def build_field_report_pdf(report_info, photos, version_number):
     footer()
     c.save()
     buf.seek(0)
-    return buf.read()
+    return buf.read(), missing_photo_ids
 
 
 def save_generated_pdf(pdf_bytes):
@@ -594,7 +611,7 @@ DB_DIR = os.environ.get("DATA_DIR", ".")
 DB_PATH = os.path.join(DB_DIR, "buildiq.db")
 UPLOAD_DIR = os.path.join(DB_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "heic", "webp"}
+ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "heic", "heif", "webp"}
 MAX_PHOTO_SIZE_MB = 10
 
 ADMIN_EMAILS = ["ayoub@darycet.com", "rebecca@darycet.com"]
@@ -796,7 +813,7 @@ def save_photo(file_storage):
         return None
     ext = file_storage.filename.rsplit(".", 1)[-1].lower() if "." in file_storage.filename else ""
     if ext not in ALLOWED_PHOTO_EXTENSIONS:
-        flash(f"Photo not saved -- unsupported file type ({ext or 'unknown'}). Use JPG, PNG, HEIC, or WEBP.", "error")
+        flash(f"Photo not saved -- unsupported file type ({ext or 'unknown'}). Use JPG, PNG, HEIC/HEIF, or WEBP.", "error")
         return None
     file_storage.seek(0, os.SEEK_END)
     size_mb = file_storage.tell() / (1024 * 1024)
@@ -804,6 +821,32 @@ def save_photo(file_storage):
     if size_mb > MAX_PHOTO_SIZE_MB:
         flash(f"Photo not saved -- file too large ({size_mb:.1f}MB, max {MAX_PHOTO_SIZE_MB}MB).", "error")
         return None
+
+    if ext in ("heic", "heif"):
+        # NORMALIZE ONLY HEIC/HEIF -- confirmed by direct empirical
+        # testing that JPG/PNG/WEBP already decode correctly through
+        # the existing ImageReader/PDF pipeline; converting those too
+        # would be unnecessary risk for zero benefit. A new iPhone HEIC
+        # upload becomes a reliable, broadly-compatible JPEG working
+        # file immediately, with correct EXIF-orientation applied here
+        # (not stripped/ignored) -- so downstream PDF generation is
+        # never dependent on HEIC decoding behavior for anything
+        # uploaded from this point forward. Quality kept high (90) since
+        # this is construction documentation, not a thumbnail -- no
+        # resizing introduced here beyond the existing upload size cap.
+        try:
+            file_storage.seek(0)
+            img = Image.open(file_storage)
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            filename = f"{uuid.uuid4().hex}.jpg"
+            img.save(os.path.join(UPLOAD_DIR, secure_filename(filename)), format="JPEG", quality=90)
+            return filename
+        except Exception as e:
+            flash(f"Photo not saved -- this HEIC/HEIF file could not be processed. ({e})", "error")
+            return None
+
     filename = f"{uuid.uuid4().hex}.{ext}"
     file_storage.save(os.path.join(UPLOAD_DIR, secure_filename(filename)))
     return filename
@@ -3841,8 +3884,31 @@ def sitepulse_report_detail(report_id):
     ).fetchall()
     selected_ids = {r["photo_id"] for r in db.execute("SELECT photo_id FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchall()}
     versions = db.execute("SELECT * FROM field_report_versions WHERE report_id = ? ORDER BY version_number DESC", (report_id,)).fetchall()
+    # DISPLAY PHOTOS: for a Submitted report, show the CURRENT VERSION's
+    # own immutable snapshot photos -- never the live, possibly-already-
+    # changed report_photo_selections -- so a viewer never sees a
+    # historical version misrepresented as containing a selection it
+    # never actually had. For a Draft (nothing submitted yet, or
+    # reopened and being edited), show the live current selection,
+    # since that genuinely IS what would be submitted next.
+    display_photos = []
+    if report["status"] == "Submitted" and report["current_version_id"]:
+        current_version = db.execute("SELECT * FROM field_report_versions WHERE id = ?", (report["current_version_id"],)).fetchone()
+        if current_version:
+            display_photos = json.loads(current_version["content_snapshot_json"]).get("photos", [])
+    else:
+        display_photos = [
+            {"photo_id": r["photo_id"], "filename": r["filename"], "caption": r["caption"]}
+            for r in db.execute(
+                """SELECT rps.photo_id, pfp.filename, pfp.caption FROM report_photo_selections rps
+                   JOIN project_field_photos pfp ON pfp.id = rps.photo_id
+                   WHERE rps.report_id = ? ORDER BY rps.sort_order""",
+                (report_id,)
+            ).fetchall()
+        ]
     return render_template("sitepulse/reports/detail.html", report=report, recent_photos=recent_photos,
-                            selected_ids=selected_ids, versions=versions, can_author=can_author, can_manage=can_manage)
+                            selected_ids=selected_ids, versions=versions, can_author=can_author, can_manage=can_manage,
+                            display_photos=display_photos)
 
 
 def _build_report_snapshot(db, report):
@@ -3891,7 +3957,7 @@ def sitepulse_report_preview(report_id):
         return ("Forbidden", 403)
     snapshot = _build_report_snapshot(db, report)
     snapshot["submitted_by"] = current_user.name or current_user.email
-    pdf_bytes = build_field_report_pdf(snapshot, snapshot["photos"], version_number="Preview")
+    pdf_bytes, missing_photo_ids = build_field_report_pdf(snapshot, snapshot["photos"], version_number="Preview")
     return Response(pdf_bytes, mimetype="application/pdf", headers={"Content-Disposition": "inline; filename=preview.pdf"})
 
 
@@ -3932,7 +3998,19 @@ def sitepulse_report_submit(report_id):
     next_version = (existing_max["mx"] or 0) + 1
 
     try:
-        pdf_bytes = build_field_report_pdf(snapshot, snapshot["photos"], version_number=next_version)
+        pdf_bytes, missing_photo_ids = build_field_report_pdf(snapshot, snapshot["photos"], version_number=next_version)
+        if missing_photo_ids:
+            # PRODUCTION FIX: a selected report photo could not be
+            # embedded (missing file or decode failure) -- this must
+            # NOT be allowed to silently produce a "successful" but
+            # incomplete PDF/version. No PDF is saved, no version row
+            # is created, the report stays in Draft exactly as it was
+            # before this attempt, and the failure is explicit and
+            # retryable -- matching the same safe-failure-order
+            # already used for outright PDF-generation exceptions.
+            flash(f"Report submission failed -- {len(missing_photo_ids)} selected photo(s) could not be embedded in the PDF "
+                  f"(missing or unreadable file). Nothing was changed. Please verify those photos and try again.", "error")
+            return redirect(url_for("sitepulse_report_detail", report_id=report_id))
         pdf_filename = save_generated_pdf(pdf_bytes)
     except Exception as e:
         # Safe failure: no partial DB write has happened yet at all --
@@ -3994,6 +4072,27 @@ def sitepulse_report_version_pdf(version_id, report_id):
     if not _reporting_authorized_for_project(report["project_id"]):
         return ("Forbidden", 403)
     return send_from_directory(UPLOAD_DIR, secure_filename(version["pdf_filename"]), mimetype="application/pdf")
+
+
+@app.route("/sitepulse/reports/<int:report_id>/versions/<int:version_id>")
+@login_required
+def sitepulse_report_version_view(version_id, report_id):
+    """Read-only view of exactly what one historical version's own
+    immutable snapshot contained -- its own text and its own photo
+    selection, never the live/current report_photo_selections. Lets a
+    user inspect an old version's photos inside BuildIQ without needing
+    to download the PDF."""
+    db = get_db()
+    version = db.execute("SELECT * FROM field_report_versions WHERE id = ? AND report_id = ?", (version_id, report_id)).fetchone()
+    if not version:
+        return ("Not found", 404)
+    report = _report_row(db, report_id)
+    if not report:
+        return ("Not found", 404)
+    if not _reporting_authorized_for_project(report["project_id"]):
+        return ("Forbidden", 403)
+    snapshot = json.loads(version["content_snapshot_json"])
+    return render_template("sitepulse/reports/version_view.html", report=report, version=version, snapshot=snapshot)
 
 
 @app.route("/sitepulse/procurement/rental-swaps")

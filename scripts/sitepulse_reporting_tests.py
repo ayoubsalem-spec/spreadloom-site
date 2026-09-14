@@ -15,6 +15,9 @@ import sqlite3
 from datetime import datetime
 from unittest.mock import patch
 from PIL import Image
+from pypdf import PdfReader
+import pillow_heif
+pillow_heif.register_heif_opener()
 
 import _test_db_setup
 _test_db_setup.isolate_test_database()
@@ -257,11 +260,12 @@ def main():
     check("27. V1's own PDF still independently downloadable after V2 exists", resp_v1_pdf_still.status_code == 200)
     history_resp = author_client.get(f"/sitepulse/project/{pid}/reports")
     history_body = history_resp.get_data(as_text=True)
-    check("28. report history page loads and shows the report", history_resp.status_code == 200 and "V2" in history_body)
+    check("28. report history page loads and shows the report's current version", history_resp.status_code == 200 and "Version 2" in history_body)
 
     print()
-    print("=== 29. Mobile template structural smoke ===")
-    check("29. history page has a mobile-only stacked section", 'class="mobile-only"' in history_body and 'class="card desktop-only"' in history_body)
+    print("=== 29. Mobile-first structural smoke (unified card list, no squeezed desktop table) ===")
+    check("29. report history uses a card-based list, not a raw desktop table", "<table" not in history_body)
+    check("29. history page still shows an Open action per report", "Open" in history_body)
 
     print()
     print("=== 30. Web Share/download fallback UI present -- actual JS wiring, not just text ===")
@@ -379,6 +383,281 @@ def main():
     latest_snapshot = json.loads(latest_version["content_snapshot_json"])
     check("version snapshot contains created_by", latest_snapshot.get("created_by") == "__rep_author")
     check("version snapshot contains submitted_by", latest_snapshot.get("submitted_by") == "__rep_author")
+
+    print()
+    print("=== REAL PDF/PHOTO PRODUCTION REGRESSION TEST -- real decodable images, real pypdf inspection ===")
+
+    def real_photo(color, size=(600, 450)):
+        buf = io.BytesIO()
+        Image.new("RGB", size, color=color).save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+        return buf
+
+    pid_prod = make_project(name="__RepTest ProdPDF")
+    token_up = get_csrf(author_client, f"/sitepulse/project/{pid_prod}/photos")
+    author_client.post(f"/sitepulse/project/{pid_prod}/photos", data={
+        "csrf_token": token_up,
+        "photos": [(real_photo((200, 50, 50)), "alpha.jpg"), (real_photo((50, 150, 200)), "bravo.jpg"), (real_photo((80, 180, 80)), "charlie.jpg")]
+    }, content_type="multipart/form-data")
+    prod_photos = db.execute("SELECT * FROM project_field_photos WHERE project_id=? ORDER BY id", (pid_prod,)).fetchall()
+    check("real end-to-end: 3 real JPEG photos uploaded through Daily Capture", len(prod_photos) == 3)
+
+    captions = ["Photo Alpha", "Photo Bravo", "Photo Charlie"]
+    for photo, cap in zip(prod_photos, captions):
+        tk = get_csrf(author_client, f"/sitepulse/project/{pid_prod}/photos")
+        author_client.post(f"/sitepulse/photos/{photo['id']}/caption", data={"csrf_token": tk, "caption": cap})
+    alpha, bravo, charlie = prod_photos[0], prod_photos[1], prod_photos[2]
+
+    token_new_prod = get_csrf(author_client, f"/sitepulse/project/{pid_prod}/reports")
+    author_client.post(f"/sitepulse/project/{pid_prod}/reports/new", data={"csrf_token": token_new_prod})
+    prod_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_prod,)).fetchone()
+
+    token_sel = get_csrf(author_client, f"/sitepulse/reports/{prod_report['id']}")
+    author_client.post(f"/sitepulse/reports/{prod_report['id']}", data={
+        "csrf_token": token_sel, "report_date": "2026-09-14", "work_completed": "Real photo pipeline test",
+        "has_issues": "no", "next_steps": "N/A", "general_notes": "",
+        "selected_photos": [str(alpha["id"]), str(bravo["id"])]  # Charlie deliberately left unselected
+    })
+    persisted_selections = db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=?", (prod_report["id"],)).fetchone()["c"]
+    check("photo selections persisted before Preview/Submit (exactly Alpha+Bravo, not Charlie)", persisted_selections == 2)
+
+    preview_prod = author_client.get(f"/sitepulse/reports/{prod_report['id']}/preview")
+    check("Preview succeeds with real photos", preview_prod.status_code == 200 and preview_prod.content_type == "application/pdf")
+    check("Preview creates NO official version", db.execute("SELECT COUNT(*) c FROM field_report_versions WHERE report_id=?", (prod_report["id"],)).fetchone()["c"] == 0)
+    preview_reader = PdfReader(io.BytesIO(preview_prod.data))
+    preview_text = "".join(page.extract_text() or "" for page in preview_reader.pages)
+    check("Preview PDF text contains both selected captions", "Photo Alpha" in preview_text and "Photo Bravo" in preview_text)
+    check("Preview PDF text does NOT contain the unselected photo's caption", "Photo Charlie" not in preview_text)
+
+    token_sub1 = get_csrf(author_client, f"/sitepulse/reports/{prod_report['id']}")
+    author_client.post(f"/sitepulse/reports/{prod_report['id']}/submit", data={"csrf_token": token_sub1})
+    v1_prod = db.execute("SELECT * FROM field_report_versions WHERE report_id=? AND version_number=1", (prod_report["id"],)).fetchone()
+    check("V1 created on first submit", v1_prod is not None)
+    v1_prod_snapshot = json.loads(v1_prod["content_snapshot_json"])
+    v1_photo_ids = {p["photo_id"] for p in v1_prod_snapshot["photos"]}
+    check("V1 snapshot contains exactly the selected photo set (Alpha+Bravo, not Charlie)", v1_photo_ids == {alpha["id"], bravo["id"]})
+    v1_captions = {p["caption"] for p in v1_prod_snapshot["photos"]}
+    check("V1 snapshot captions correct", v1_captions == {"Photo Alpha", "Photo Bravo"})
+
+    v1_pdf_resp = author_client.get(f"/sitepulse/reports/{prod_report['id']}/versions/{v1_prod['id']}/pdf")
+    check("V1 PDF downloads successfully through the secure version route", v1_pdf_resp.status_code == 200)
+    v1_reader = PdfReader(io.BytesIO(v1_pdf_resp.data))
+    v1_image_count = sum(len(page.images) for page in v1_reader.pages)
+    check("V1 PDF contains real embedded image XObjects (not merely text/filenames)", v1_image_count >= 2)
+    v1_text = "".join(page.extract_text() or "" for page in v1_reader.pages)
+    check("V1 PDF text contains both selected captions", "Photo Alpha" in v1_text and "Photo Bravo" in v1_text)
+    check("V1 PDF text does not represent the unselected photo's caption", "Photo Charlie" not in v1_text)
+
+    token_reopen_prod = get_csrf(author_client, f"/sitepulse/reports/{prod_report['id']}")
+    author_client.post(f"/sitepulse/reports/{prod_report['id']}/reopen", data={"csrf_token": token_reopen_prod})
+    token_sel2 = get_csrf(author_client, f"/sitepulse/reports/{prod_report['id']}")
+    author_client.post(f"/sitepulse/reports/{prod_report['id']}", data={
+        "csrf_token": token_sel2, "report_date": "2026-09-14", "work_completed": "V2 -- swapped to Charlie only",
+        "has_issues": "no", "next_steps": "N/A", "general_notes": "",
+        "selected_photos": [str(charlie["id"])]
+    })
+    token_sub2 = get_csrf(author_client, f"/sitepulse/reports/{prod_report['id']}")
+    author_client.post(f"/sitepulse/reports/{prod_report['id']}/submit", data={"csrf_token": token_sub2})
+    v2_prod = db.execute("SELECT * FROM field_report_versions WHERE report_id=? AND version_number=2", (prod_report["id"],)).fetchone()
+    check("V2 created on second submit", v2_prod is not None)
+
+    v2_pdf_resp = author_client.get(f"/sitepulse/reports/{prod_report['id']}/versions/{v2_prod['id']}/pdf")
+    check("V2 PDF downloads successfully", v2_pdf_resp.status_code == 200)
+    v2_reader = PdfReader(io.BytesIO(v2_pdf_resp.data))
+    v2_text = "".join(page.extract_text() or "" for page in v2_reader.pages)
+    check("V2 PDF represents the NEW selection (Charlie)", "Photo Charlie" in v2_text)
+    check("V2 PDF does not represent the old selection (Alpha/Bravo) it no longer has", "Photo Alpha" not in v2_text and "Photo Bravo" not in v2_text)
+
+    v1_pdf_resp_again = author_client.get(f"/sitepulse/reports/{prod_report['id']}/versions/{v1_prod['id']}/pdf")
+    check("V1 PDF remains independently retrievable and unchanged after V2 exists", v1_pdf_resp_again.status_code == 200)
+    v1_reader_again = PdfReader(io.BytesIO(v1_pdf_resp_again.data))
+    v1_text_again = "".join(page.extract_text() or "" for page in v1_reader_again.pages)
+    check("V1 PDF still correctly represents ITS OWN original selection (Alpha/Bravo), not V2's", "Photo Alpha" in v1_text_again and "Photo Charlie" not in v1_text_again)
+
+    check("Download and Share both use the SAME current_version_id-driven PDF route (single source of truth)",
+          f"/sitepulse/reports/{prod_report['id']}/versions/{v2_prod['id']}/pdf" in author_client.get(f"/sitepulse/reports/{prod_report['id']}").get_data(as_text=True))
+
+    print()
+    print("=== Missing/broken photo does NOT silently produce a false-success Submit (the actual production fix) ===")
+    pid_broken = make_project(name="__RepTest BrokenPhoto")
+    token_bp = get_csrf(author_client, f"/sitepulse/project/{pid_broken}/photos")
+    author_client.post(f"/sitepulse/project/{pid_broken}/photos", data={
+        "csrf_token": token_bp, "photos": [(real_photo((10, 10, 10)), "will_vanish.jpg")]
+    }, content_type="multipart/form-data")
+    broken_photo = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_broken,)).fetchone()
+    os.remove(os.path.join(appmod.UPLOAD_DIR, broken_photo["filename"]))
+
+    token_bp_report = get_csrf(author_client, f"/sitepulse/project/{pid_broken}/reports")
+    author_client.post(f"/sitepulse/project/{pid_broken}/reports/new", data={"csrf_token": token_bp_report})
+    broken_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_broken,)).fetchone()
+    token_bp_sel = get_csrf(author_client, f"/sitepulse/reports/{broken_report['id']}")
+    author_client.post(f"/sitepulse/reports/{broken_report['id']}", data={
+        "csrf_token": token_bp_sel, "work_completed": "test", "has_issues": "no", "next_steps": "x", "general_notes": "",
+        "selected_photos": [str(broken_photo["id"])]
+    })
+    token_bp_submit = get_csrf(author_client, f"/sitepulse/reports/{broken_report['id']}")
+    author_client.post(f"/sitepulse/reports/{broken_report['id']}/submit", data={"csrf_token": token_bp_submit})
+    broken_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (broken_report["id"],)).fetchone()
+    check("PRODUCTION FIX: a selected photo that can't be embedded blocks Submit (stays Draft, not falsely Submitted)",
+          broken_report_after["status"] == "Draft")
+    check("PRODUCTION FIX: no version row created when a selected photo is missing/unreadable",
+          db.execute("SELECT COUNT(*) c FROM field_report_versions WHERE report_id=?", (broken_report["id"],)).fetchone()["c"] == 0)
+
+    print()
+    print("=== HEIC CORRECTION: new HEIC upload -> normalized JPEG -> PDF embed ===")
+
+    def real_heic():
+        buf = io.BytesIO()
+        Image.new("RGB", (600, 450), color=(210, 140, 40)).save(buf, format="HEIF", quality=90)
+        buf.seek(0)
+        return buf
+
+    pid_heic = make_project(name="__RepTest HeicNew")
+    token_hu = get_csrf(author_client, f"/sitepulse/project/{pid_heic}/photos")
+    upload_resp = author_client.post(f"/sitepulse/project/{pid_heic}/photos", data={
+        "csrf_token": token_hu, "photos": [(real_heic(), "iphone.heic")]
+    }, content_type="multipart/form-data")
+    check("new HEIC upload accepted (200/302, not rejected)", upload_resp.status_code in (200, 302))
+    heic_photo = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_heic,)).fetchone()
+    check("save_photo() saved a record for the HEIC upload", heic_photo is not None)
+    check("normalized working file is a JPEG, not the original HEIC extension", heic_photo["filename"].lower().endswith(".jpg"))
+    saved_path = os.path.join(appmod.UPLOAD_DIR, heic_photo["filename"])
+    check("normalized JPEG file physically exists on disk", os.path.exists(saved_path))
+    check("normalized file is actually decodable as a real JPEG (not just renamed)", Image.open(saved_path).format == "JPEG")
+
+    token_hu2 = get_csrf(author_client, f"/sitepulse/project/{pid_heic}/photos")
+    author_client.post(f"/sitepulse/photos/{heic_photo['id']}/caption", data={"csrf_token": token_hu2, "caption": "iPhone jobsite photo"})
+
+    token_hr = get_csrf(author_client, f"/sitepulse/project/{pid_heic}/reports")
+    author_client.post(f"/sitepulse/project/{pid_heic}/reports/new", data={"csrf_token": token_hr})
+    heic_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_heic,)).fetchone()
+    token_hs = get_csrf(author_client, f"/sitepulse/reports/{heic_report['id']}")
+    author_client.post(f"/sitepulse/reports/{heic_report['id']}", data={
+        "csrf_token": token_hs, "work_completed": "HEIC pipeline test", "has_issues": "no", "next_steps": "x", "general_notes": "",
+        "selected_photos": [str(heic_photo["id"])]
+    })
+
+    preview_heic = author_client.get(f"/sitepulse/reports/{heic_report['id']}/preview")
+    check("Preview succeeds with a normalized-from-HEIC photo", preview_heic.status_code == 200)
+    preview_heic_reader = PdfReader(io.BytesIO(preview_heic.data))
+    preview_heic_text = "".join(p.extract_text() or "" for p in preview_heic_reader.pages)
+    check("Preview displays the HEIC-originated photo's caption", "iPhone jobsite photo" in preview_heic_text)
+
+    token_hsub = get_csrf(author_client, f"/sitepulse/reports/{heic_report['id']}")
+    author_client.post(f"/sitepulse/reports/{heic_report['id']}/submit", data={"csrf_token": token_hsub})
+    heic_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (heic_report["id"],)).fetchone()
+    check("Submit succeeds for a report containing a normalized-from-HEIC photo", heic_report_after["status"] == "Submitted")
+    heic_v1 = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (heic_report["id"],)).fetchone()
+    heic_pdf_resp = author_client.get(f"/sitepulse/reports/{heic_report['id']}/versions/{heic_v1['id']}/pdf")
+    check("Download: generated PDF actually contains the (normalized) image", sum(len(p.images) for p in PdfReader(io.BytesIO(heic_pdf_resp.data)).pages) >= 1)
+    heic_pdf_text = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(heic_pdf_resp.data)).pages)
+    check("Downloaded PDF contains the correct caption", "iPhone jobsite photo" in heic_pdf_text)
+    detail_heic_body = author_client.get(f"/sitepulse/reports/{heic_report['id']}").get_data(as_text=True)
+    check("Share control references the SAME versioned PDF route as Download", f"/versions/{heic_v1['id']}/pdf" in detail_heic_body)
+
+    print()
+    print("=== HEIC CORRECTION: historical (pre-existing, un-normalized) HEIC still embeds now that the opener is registered ===")
+    pid_hist = make_project(name="__RepTest HeicHistorical")
+    now2 = datetime.utcnow().isoformat()
+    heic_bytes = real_heic().read()
+    hist_filename = f"{__import__('uuid').uuid4().hex}.heic"
+    with open(os.path.join(appmod.UPLOAD_DIR, hist_filename), "wb") as f:
+        f.write(heic_bytes)
+    db.execute(
+        "INSERT INTO project_field_photos (project_id, filename, original_filename, caption, uploaded_by, uploaded_at, archived) VALUES (?,?,?,?,?,?,0)",
+        (pid_hist, hist_filename, "old_iphone_photo.heic", "Historical HEIC photo", "__legacy_user", now2)
+    )
+    db.commit()
+    hist_photo = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_hist,)).fetchone()
+    check("historical HEIC record set up directly (simulating a pre-V1.2 upload, never normalized)", hist_photo["filename"].endswith(".heic"))
+
+    token_histr = get_csrf(author_client, f"/sitepulse/project/{pid_hist}/reports")
+    author_client.post(f"/sitepulse/project/{pid_hist}/reports/new", data={"csrf_token": token_histr})
+    hist_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_hist,)).fetchone()
+    token_hists = get_csrf(author_client, f"/sitepulse/reports/{hist_report['id']}")
+    author_client.post(f"/sitepulse/reports/{hist_report['id']}", data={
+        "csrf_token": token_hists, "work_completed": "Historical HEIC test", "has_issues": "no", "next_steps": "x", "general_notes": "",
+        "selected_photos": [str(hist_photo["id"])]
+    })
+    token_histsub = get_csrf(author_client, f"/sitepulse/reports/{hist_report['id']}")
+    author_client.post(f"/sitepulse/reports/{hist_report['id']}/submit", data={"csrf_token": token_histsub})
+    hist_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (hist_report["id"],)).fetchone()
+    check("Submit succeeds for a HISTORICAL un-normalized HEIC file (pillow-heif now decodes it directly)", hist_report_after["status"] == "Submitted")
+    hist_v1 = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (hist_report["id"],)).fetchone()
+    hist_pdf_resp = author_client.get(f"/sitepulse/reports/{hist_report['id']}/versions/{hist_v1['id']}/pdf")
+    check("historical HEIC image is actually embedded in the generated PDF", sum(len(p.images) for p in PdfReader(io.BytesIO(hist_pdf_resp.data)).pages) >= 1)
+    hist_pdf_text = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(hist_pdf_resp.data)).pages)
+    check("historical HEIC photo's caption appears in the PDF", "Historical HEIC photo" in hist_pdf_text)
+
+    print()
+    print("=== FORMAT REGRESSION: JPG/PNG/WEBP unaffected by the HEIC normalization change ===")
+
+    def real_photo_fmt(color, fmt):
+        buf = io.BytesIO()
+        Image.new("RGB", (500, 400), color=color).save(buf, format=fmt, quality=90)
+        buf.seek(0)
+        return buf
+
+    for label, fmt, ext in [("JPG", "JPEG", "jpg"), ("PNG", "PNG", "png"), ("WEBP", "WEBP", "webp")]:
+        pid_fmt = make_project(name=f"__RepTest Format{label}")
+        token_fu = get_csrf(author_client, f"/sitepulse/project/{pid_fmt}/photos")
+        author_client.post(f"/sitepulse/project/{pid_fmt}/photos", data={
+            "csrf_token": token_fu, "photos": [(real_photo_fmt((100, 100, 200), fmt), f"test.{ext}")]
+        }, content_type="multipart/form-data")
+        fmt_photo = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_fmt,)).fetchone()
+        check(f"{label}: upload accepted and saved", fmt_photo is not None)
+        check(f"{label}: NOT converted to JPEG (only HEIC/HEIF is normalized)", fmt_photo["filename"].lower().endswith(f".{ext}"))
+
+        token_fr = get_csrf(author_client, f"/sitepulse/project/{pid_fmt}/reports")
+        author_client.post(f"/sitepulse/project/{pid_fmt}/reports/new", data={"csrf_token": token_fr})
+        fmt_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_fmt,)).fetchone()
+        token_fs = get_csrf(author_client, f"/sitepulse/reports/{fmt_report['id']}")
+        author_client.post(f"/sitepulse/reports/{fmt_report['id']}", data={
+            "csrf_token": token_fs, "work_completed": f"{label} regression test", "has_issues": "no", "next_steps": "x", "general_notes": "",
+            "selected_photos": [str(fmt_photo["id"])]
+        })
+        preview_fmt = author_client.get(f"/sitepulse/reports/{fmt_report['id']}/preview")
+        check(f"{label}: Preview succeeds", preview_fmt.status_code == 200)
+        token_fsub = get_csrf(author_client, f"/sitepulse/reports/{fmt_report['id']}")
+        author_client.post(f"/sitepulse/reports/{fmt_report['id']}/submit", data={"csrf_token": token_fsub})
+        fmt_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (fmt_report["id"],)).fetchone()
+        check(f"{label}: Submit succeeds", fmt_report_after["status"] == "Submitted")
+        fmt_v1 = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (fmt_report["id"],)).fetchone()
+        fmt_pdf_resp = author_client.get(f"/sitepulse/reports/{fmt_report['id']}/versions/{fmt_v1['id']}/pdf")
+        check(f"{label}: PDF actually embeds the image", sum(len(p.images) for p in PdfReader(io.BytesIO(fmt_pdf_resp.data)).pages) >= 1)
+
+    print()
+    print("=== .heif extension (distinct from .heic) -- allowlist/normalization fix ===")
+    pid_heif = make_project(name="__RepTest HeifExt")
+    token_heifu = get_csrf(author_client, f"/sitepulse/project/{pid_heif}/photos")
+    heif_buf = io.BytesIO()
+    Image.new("RGB", (600, 450), color=(90, 60, 210)).save(heif_buf, format="HEIF", quality=90)
+    heif_buf.seek(0)
+    upload_heif_resp = author_client.post(f"/sitepulse/project/{pid_heif}/photos", data={
+        "csrf_token": token_heifu, "photos": [(heif_buf, "iphone.heif")]
+    }, content_type="multipart/form-data")
+    check(".heif upload accepted (not rejected by the allowlist)", upload_heif_resp.status_code in (200, 302))
+    heif_photo = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_heif,)).fetchone()
+    check(".heif upload actually saved a record", heif_photo is not None)
+    check(".heif normalized to .jpg, same as .heic", heif_photo["filename"].lower().endswith(".jpg"))
+
+    token_heifr = get_csrf(author_client, f"/sitepulse/project/{pid_heif}/reports")
+    author_client.post(f"/sitepulse/project/{pid_heif}/reports/new", data={"csrf_token": token_heifr})
+    heif_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_heif,)).fetchone()
+    token_heifs = get_csrf(author_client, f"/sitepulse/reports/{heif_report['id']}")
+    author_client.post(f"/sitepulse/reports/{heif_report['id']}", data={
+        "csrf_token": token_heifs, "work_completed": ".heif extension test", "has_issues": "no", "next_steps": "x", "general_notes": "",
+        "selected_photos": [str(heif_photo["id"])]
+    })
+    preview_heif = author_client.get(f"/sitepulse/reports/{heif_report['id']}/preview")
+    check(".heif report: Preview succeeds", preview_heif.status_code == 200)
+    token_heifsub = get_csrf(author_client, f"/sitepulse/reports/{heif_report['id']}")
+    author_client.post(f"/sitepulse/reports/{heif_report['id']}/submit", data={"csrf_token": token_heifsub})
+    heif_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (heif_report["id"],)).fetchone()
+    check(".heif report: Submit succeeds", heif_report_after["status"] == "Submitted")
+    heif_v1 = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (heif_report["id"],)).fetchone()
+    heif_pdf_resp = author_client.get(f"/sitepulse/reports/{heif_report['id']}/versions/{heif_v1['id']}/pdf")
+    check(".heif report: PDF actually embeds the image", sum(len(p.images) for p in PdfReader(io.BytesIO(heif_pdf_resp.data)).pages) >= 1)
 
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
