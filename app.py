@@ -7091,7 +7091,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v6.0-atlas-brain-foundation"
+ATLAS_BUILD = "TEST-v6.2-equipment-action-continuity"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7408,6 +7408,68 @@ def stream_atlas_turn(user_text, draft):
         yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': msg, 'audio': None, 'audio_error': None})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
         return
+
+    # V6.2 deterministic equipment-move proposal path. A clear command such as
+    # "Move BOMAG Smooth Roller to Peninsula" is resolved against BuildIQ here
+    # instead of relying on the model to reproduce hidden action state. This path
+    # is READ-ONLY: it only creates a proposal. The actual write still requires
+    # the separate confirmation turn and /assistant/confirm_write permission gate.
+    _move_match = re.match(r"^\s*move\s+(.+?)\s+to\s+(.+?)\s*[.!?]*\s*$", user_text or "", flags=re.IGNORECASE)
+    if _move_match and not (draft.get("pending_submit") or {}).get("tool_name"):
+        _equipment_query = _move_match.group(1).strip()
+        _destination_query = _move_match.group(2).strip()
+        _db = get_db()
+        _equipment_rows = _db.execute(
+            "SELECT id, name, location FROM sitepulse_assets WHERE lower(name)=lower(?)",
+            (_equipment_query,),
+        ).fetchall()
+        if not _equipment_rows:
+            _equipment_rows = _db.execute(
+                "SELECT id, name, location FROM sitepulse_assets WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 7",
+                (f"%{_equipment_query}%",),
+            ).fetchall()
+        if len(_equipment_rows) == 1:
+            _asset = _equipment_rows[0]
+            # Prefer the canonical BuildIQ project name when the destination
+            # uniquely resolves to one; otherwise preserve the person's location
+            # text because Equipment Center supports non-project locations too.
+            _project_rows = _db.execute(
+                "SELECT id, name FROM tracker_projects WHERE lower(name)=lower(?)",
+                (_destination_query,),
+            ).fetchall()
+            if not _project_rows:
+                _project_rows = _db.execute(
+                    "SELECT id, name FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 7",
+                    (f"%{_destination_query}%",),
+                ).fetchall()
+            _destination = _project_rows[0]["name"] if len(_project_rows) == 1 else _destination_query
+            _params = {"equipment_name": _asset["name"], "to_location": _destination}
+            _tool = ATLAS_TOOLS.get("move_equipment")
+            _clean_params, _param_error = _validate_tool_params(_tool, _params) if _tool else (None, "unsupported action")
+            if _tool and _tool.kind == "write" and not _param_error:
+                _proposal_hash = hashlib.sha256(json.dumps({"tool": "move_equipment", "params": _clean_params}, sort_keys=True).encode("utf-8")).hexdigest()
+                draft["pending_submit"] = {
+                    "fields_hash": _proposal_hash, "tool_name": "move_equipment",
+                    "params": dict(_clean_params), "issued_at": time.time(),
+                }
+                _from = _asset["location"] or "Unassigned"
+                _spoken = (
+                    "**Move Equipment**\n\n"
+                    f"- **Equipment:** {_asset['name']}\n"
+                    f"- **From:** {_from}\n"
+                    f"- **To:** {_destination}\n"
+                    "- **When:** Now\n\n"
+                    "**Confirm this action** and I’ll do it."
+                )
+                _history = list(draft.get("history", []))
+                _history.extend([
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": _spoken},
+                ])
+                draft["history"] = _history[-20:]
+                yield f"data: {json.dumps({'type': 'delta', 'text': _spoken})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'mode': 'buildiq_action', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+                return
 
     snapshot = gather_business_snapshot()
     system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"))
