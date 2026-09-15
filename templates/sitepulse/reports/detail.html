@@ -69,7 +69,22 @@
     {% endif %}
 </div>
 
-{% if display_photos %}
+{% if display_groups %}
+<div class="card" style="margin-top:16px;">
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Report Photos</h3>
+    {% for g in display_groups %}
+    <h4 style="font-size:13px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin:14px 0 8px;">{{ g['group_name'] }}</h4>
+    <div class="rep-photo-grid">
+        {% for p in g['photos'] %}
+        <div class="rep-display-photo">
+            <img src="{{ url_for('sitepulse_photo_file', photo_id=p['photo_id']) }}" loading="lazy">
+            {% if p['caption'] %}<div class="sub" style="margin-top:4px; font-size:12px;">{{ p['caption'] }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% endfor %}
+</div>
+{% elif display_photos %}
 <div class="card" style="margin-top:16px;">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Report Photos</h3>
     <div class="rep-photo-grid">

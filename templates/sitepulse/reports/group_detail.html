@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+    .rep-photo-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:14px; }
+    @media (max-width:480px) { .rep-photo-grid { grid-template-columns:repeat(2, 1fr); gap:10px; } }
+    .rep-photo-card img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:8px; display:block; }
+    .rep-caption-input { width:100%; font-size:16px; padding:12px; min-height:44px; box-sizing:border-box; }
+    .rep-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; width:100%; box-sizing:border-box; }
+    .rep-upload-input { font-size:16px; padding:14px; min-height:48px; width:100%; box-sizing:border-box; }
+    .rep-in-report-badge { display:inline-block; background:rgba(94,234,212,0.14); color:var(--teal); font-size:11px; padding:2px 8px; border-radius:4px; margin-bottom:4px; }
+</style>
+<span class="rc-eyebrow">SitePulse</span>
+<div style="margin-bottom:8px;">
+    <a href="{{ url_for('sitepulse_project_capture', project_id=project['id']) }}{% if report_id %}?report_id={{ report_id }}{% endif %}" class="btn btn-sm">&larr; Back to Field Capture</a>
+</div>
+<h1 style="word-break:break-word;">{{ group['name'] }}</h1>
+<p class="sub">{{ project['name'] }}</p>
+
+{% if can_author %}
+<div class="card">
+    <form method="POST" action="{{ url_for('sitepulse_group_rename', group_id=group['id']) }}" style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="name" value="{{ group['name'] }}" style="flex:2; min-width:160px; font-size:14px; padding:8px;">
+        <button type="submit" class="btn btn-sm">Rename Group</button>
+    </form>
+    <form method="POST" action="{{ url_for('sitepulse_group_photos_upload', group_id=group['id']) }}" enctype="multipart/form-data">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="report_id" value="{{ report_id or '' }}">
+        <label style="font-size:15px;">Take or Choose Photos</label>
+        <input class="rep-upload-input" type="file" name="photos" accept="image/*" capture="environment" multiple required>
+        <p class="sub" style="margin-top:8px;">{% if report_id %}Photos saved here are added directly to your current report.{% else %}Start a report from Field Capture to have new photos count toward it.{% endif %}</p>
+        <button type="submit" class="btn btn-gold rep-btn-lg" style="margin-top:12px;">Save Photos</button>
+    </form>
+</div>
+{% endif %}
+
+{% if report_id %}
+<h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">In This Report ({{ in_report|length }})</h3>
+<div class="rep-photo-grid">
+    {% for p in in_report %}
+    <div class="card rep-photo-card" style="padding:8px;">
+        <span class="rep-in-report-badge">In Report</span>
+        <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" loading="lazy">
+        {% if can_author %}
+        <form method="POST" action="{{ url_for('sitepulse_photo_caption', photo_id=p['id']) }}" style="margin-top:8px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input class="rep-caption-input" type="text" name="caption" value="{{ p['caption'] or '' }}" placeholder="Add a note">
+            <button type="submit" class="btn btn-sm rep-btn-lg" style="margin-top:6px;">Save Note</button>
+        </form>
+        <form method="POST" action="{{ url_for('sitepulse_report_photo_remove', report_id=report_id, photo_id=p['id']) }}" style="margin-top:6px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm rep-btn-lg">Remove from Report</button>
+        </form>
+        {% endif %}
+    </div>
+    {% else %}
+    <p class="sub">No photos in this report for this group yet.</p>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if other_history %}
+<h3 style="font-size:15px; color:var(--gold); margin:20px 0 10px;">Other Project History ({{ other_history|length }})</h3>
+<p class="sub" style="margin-top:-4px;">Older {{ group['name'] }} photos from this project. Not part of the current report unless added.</p>
+<div class="rep-photo-grid">
+    {% for p in other_history %}
+    <div class="card rep-photo-card" style="padding:8px; opacity:0.85;">
+        <img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" loading="lazy">
+        <div class="sub" style="margin-top:4px; font-size:11px;">{{ p['uploaded_at'][:10] if p['uploaded_at'] }}</div>
+        {% if report_id and can_author %}
+        <form method="POST" action="{{ url_for('sitepulse_report_photo_add', report_id=report_id, photo_id=p['id']) }}" style="margin-top:6px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-sm rep-btn-lg">Add to Report</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+    .cap-group-row { display:flex; justify-content:space-between; align-items:center; padding:16px; border:1px solid var(--line); border-radius:8px; margin-bottom:10px; text-decoration:none; color:var(--text); box-sizing:border-box; gap:8px; }
+    .cap-group-row:hover { border-color:var(--gold); }
+    .cap-group-name { font-size:16px; font-weight:600; min-width:0; overflow-wrap:break-word; }
+    .cap-group-count { color:var(--text-dim); font-size:14px; white-space:nowrap; flex-shrink:0; }
+    @media (max-width:400px) {
+        .cap-group-row { padding:14px 10px; }
+    }
+    .cap-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; }
+</style>
+<span class="rc-eyebrow">SitePulse</span>
+<div style="margin-bottom:8px;">
+    <a href="{{ url_for('sitepulse_reports_select_project') }}" class="btn btn-sm">&larr; Back to Field Reports</a>
+</div>
+<h1 style="word-break:break-word;">{{ project['name'] }}</h1>
+<p class="sub">Today's Field Capture — {{ project['client'] or '' }}</p>
+
+<div style="display:flex; gap:10px; flex-wrap:wrap; margin:14px 0;">
+    <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">View Reports</a>
+</div>
+
+{% if can_author %}
+<div class="card">
+    <form method="POST" action="{{ url_for('sitepulse_group_create', project_id=project['id']) }}" style="display:flex; gap:10px; flex-wrap:wrap;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="text" name="name" placeholder="New group name (e.g. Plumbing)" style="flex:2; min-width:0; width:100%; box-sizing:border-box; font-size:15px; padding:10px;">
+        <button type="submit" class="btn btn-gold cap-btn-lg" style="flex:1; min-width:0; width:100%; box-sizing:border-box;">+ Add Group</button>
+    </form>
+</div>
+{% endif %}
+
+<div style="margin-top:16px;">
+    {% for g in groups %}
+    <a class="cap-group-row" href="{{ url_for('sitepulse_group_detail', group_id=g['id']) }}{% if report_id %}?report_id={{ report_id }}{% endif %}">
+        <span class="cap-group-name">{{ g['name'] }}</span>
+        <span class="cap-group-count">{{ group_counts.get(g['id'], 0) }} photo{{ 's' if group_counts.get(g['id'], 0) != 1 }} &rsaquo;</span>
+    </a>
+    {% else %}
+    <p class="sub">No groups yet. Add one above to start documenting the site.</p>
+    {% endfor %}
+</div>
+
+{% if report_id %}
+<div style="margin-top:20px;">
+    <a href="{{ url_for('sitepulse_report_detail', report_id=report_id) }}" class="btn btn-gold cap-btn-lg" style="width:100%; text-align:center; display:block; box-sizing:border-box;">Generate Report</a>
+</div>
+{% endif %}
+{% endblock %}

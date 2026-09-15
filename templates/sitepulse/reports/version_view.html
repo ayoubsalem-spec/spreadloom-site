@@ -13,21 +13,24 @@
     <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=version['id']) }}" class="btn btn-sm" target="_blank">Download PDF</a>
 </div>
 
+{% if snapshot.get('groups') %}
 <div class="card">
-    <h3 style="font-size:15px; color:var(--gold);">Work Completed</h3>
-    <p>{{ snapshot['work_completed'] or '—' }}</p>
-    <h3 style="font-size:15px; color:var(--gold); margin-top:16px;">Issues / Blockers</h3>
-    <p>{{ snapshot['issues_blockers'] if snapshot['has_issues'] else 'No Issues' }}</p>
-    <h3 style="font-size:15px; color:var(--gold); margin-top:16px;">Next Steps</h3>
-    <p>{{ snapshot['next_steps'] or '—' }}</p>
-    {% if snapshot['general_notes'] %}
-    <h3 style="font-size:15px; color:var(--gold); margin-top:16px;">General Notes</h3>
-    <p>{{ snapshot['general_notes'] }}</p>
-    {% endif %}
+    <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Photos — {{ snapshot['groups']|map(attribute='photos')|map('length')|sum }} total</h3>
+    {% for g in snapshot['groups'] %}
+    <h4 style="font-size:13px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin:14px 0 8px;">{{ g['group_name'] }}</h4>
+    <div class="rep-photo-grid">
+        {% for p in g['photos'] %}
+        <div>
+            <img src="{{ url_for('sitepulse_photo_file', photo_id=p['photo_id']) }}" loading="lazy">
+            {% if p['caption'] %}<div class="sub" style="margin-top:4px; font-size:12px;">{{ p['caption'] }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% endfor %}
 </div>
-
-{% if snapshot['photos'] %}
-<div class="card" style="margin-top:16px;">
+{% elif snapshot['photos'] %}
+<!-- Legacy pre-V1.4 snapshot: no group structure exists -- preserved exactly as the original flat rendering. -->
+<div class="card">
     <h3 style="font-size:15px; color:var(--gold); margin-bottom:10px;">Photos in This Version</h3>
     <div class="rep-photo-grid">
         {% for p in snapshot['photos'] %}
@@ -37,6 +40,17 @@
         </div>
         {% endfor %}
     </div>
+</div>
+{% endif %}
+
+{% set has_summary = snapshot['work_completed'] or (snapshot['has_issues'] and snapshot['issues_blockers']) or snapshot['next_steps'] or snapshot['general_notes'] %}
+{% if has_summary %}
+<div class="card" style="margin-top:16px;">
+    <h3 style="font-size:14px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px;">Optional Daily Summary</h3>
+    {% if snapshot['work_completed'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">Work Completed</h4><p>{{ snapshot['work_completed'] }}</p>{% endif %}
+    {% if snapshot['has_issues'] and snapshot['issues_blockers'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">Issues / Blockers</h4><p>{{ snapshot['issues_blockers'] }}</p>{% endif %}
+    {% if snapshot['next_steps'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">Next Steps</h4><p>{{ snapshot['next_steps'] }}</p>{% endif %}
+    {% if snapshot['general_notes'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">General Notes</h4><p>{{ snapshot['general_notes'] }}</p>{% endif %}
 </div>
 {% endif %}
 {% endblock %}

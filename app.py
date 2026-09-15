@@ -467,34 +467,18 @@ def build_field_report_pdf(report_info, photos, version_number):
     line("Address", report_info.get("project_address"))
     line("Report Date", report_info.get("report_date"))
     line("Submitted By", report_info.get("submitted_by") or report_info.get("author") or "\u2014")
-
-    section("Work Completed")
-    y = _pdf_write_wrapped(c, report_info.get("work_completed") or "\u2014", x, y, width - 1.5 * inch, size=10)
-
-    section("Issues / Blockers")
-    if report_info.get("has_issues"):
-        y = _pdf_write_wrapped(c, report_info.get("issues_blockers") or "\u2014", x, y, width - 1.5 * inch, size=10)
-    else:
-        c.setFont("Helvetica", 10)
-        c.drawString(x, y, "No Issues")
-        y -= 16
-
-    section("Next Steps")
-    y = _pdf_write_wrapped(c, report_info.get("next_steps") or "\u2014", x, y, width - 1.5 * inch, size=10)
-
-    if report_info.get("general_notes"):
-        section("General Notes")
-        y = _pdf_write_wrapped(c, report_info["general_notes"], x, y, width - 1.5 * inch, size=10)
+    line("Total Photos", str(len(photos)) if photos else "0")
 
     missing_photo_ids = []
-    if photos:
-        section("Photos")
-        img_w = 2.6 * inch
-        img_h = 1.9 * inch
-        gap = 0.25 * inch
+    img_w = 2.6 * inch
+    img_h = 1.9 * inch
+    gap = 0.25 * inch
+
+    def draw_photo_group(group_photos, group_label=None):
+        nonlocal y
         col = 0
         row_start_y = y
-        for p in photos:
+        for p in group_photos:
             path = os.path.join(UPLOAD_DIR, p["filename"])
             if not os.path.exists(path):
                 # PRODUCTION FIX: this used to be a silent `continue` --
@@ -508,6 +492,18 @@ def build_field_report_pdf(report_info, photos, version_number):
             if row_start_y - img_h < bottom_margin + 30:
                 row_start_y = new_page(f"Field Report \u2014 {report_info.get('project_name') or ''} (photos continued)")
                 col = 0
+                if group_label:
+                    # V1.4 FIX: a group's photos spilling onto a new
+                    # page used to leave the group heading orphaned on
+                    # the PREVIOUS page with no photos under it, and the
+                    # continued photos on the new page had no visible
+                    # group label at all. Re-draw the group heading at
+                    # the top of the continuation page so every photo
+                    # always has clear group context.
+                    c.setFillColor(gold)
+                    c.setFont("Helvetica-Bold", 12)
+                    c.drawString(x, row_start_y, f"{group_label} (continued)")
+                    row_start_y -= 22
             px = x + col * (img_w + gap)
             try:
                 # V1.3.1 ORIENTATION FIX: apply EXIF-orientation
@@ -548,6 +544,46 @@ def build_field_report_pdf(report_info, photos, version_number):
                 col = 0
                 row_start_y -= (img_h + 0.4 * inch)
         y = row_start_y - img_h - 0.3 * inch
+
+    # V1.4: PHOTOS FIRST, grouped -- the PDF should read like Procurement's
+    # grouped-photo reference, not a narrative form with pictures
+    # attached. Falls back to one flat "Photos" section for any caller
+    # that doesn't supply a groups breakdown (backward compatibility).
+    groups = report_info.get("groups")
+    if groups:
+        for g in groups:
+            if not g.get("photos"):
+                continue
+            section(g.get("group_name") or "Ungrouped")
+            draw_photo_group(g["photos"], group_label=g.get("group_name") or "Ungrouped")
+    elif photos:
+        section("Photos")
+        draw_photo_group(photos)
+
+    # OPTIONAL DAILY SUMMARY -- last, and only rendered at all if at
+    # least one field is actually populated. Photos are the dominant
+    # content; this must never look like the primary document.
+    summary_fields = [report_info.get("work_completed"), report_info.get("issues_blockers") if report_info.get("has_issues") else None,
+                       report_info.get("next_steps"), report_info.get("general_notes")]
+    if any((f or "").strip() for f in summary_fields if f):
+        section("Optional Daily Summary")
+        y = _pdf_write_wrapped(c, "Work Completed:", x, y, width - 1.5 * inch, size=10)
+        y = _pdf_write_wrapped(c, report_info.get("work_completed") or "\u2014", x, y, width - 1.5 * inch, size=10)
+        y -= 6
+        y = _pdf_write_wrapped(c, "Issues / Blockers:", x, y, width - 1.5 * inch, size=10)
+        if report_info.get("has_issues"):
+            y = _pdf_write_wrapped(c, report_info.get("issues_blockers") or "\u2014", x, y, width - 1.5 * inch, size=10)
+        else:
+            c.setFont("Helvetica", 10)
+            c.drawString(x, y, "No Issues")
+            y -= 16
+        y -= 6
+        y = _pdf_write_wrapped(c, "Next Steps:", x, y, width - 1.5 * inch, size=10)
+        y = _pdf_write_wrapped(c, report_info.get("next_steps") or "\u2014", x, y, width - 1.5 * inch, size=10)
+        if report_info.get("general_notes"):
+            y -= 6
+            y = _pdf_write_wrapped(c, "General Notes:", x, y, width - 1.5 * inch, size=10)
+            y = _pdf_write_wrapped(c, report_info["general_notes"], x, y, width - 1.5 * inch, size=10)
 
     footer()
     c.save()
@@ -1694,6 +1730,19 @@ def init_db():
             UNIQUE(report_id, version_number)
         );
 
+        -- V1.4: reusable, project-owned photo groups (e.g. "Plumbing",
+        -- "Structure") -- NOT global, NOT report-exclusive. A photo's
+        -- group_id is nullable so every pre-V1.4 photo/report/version
+        -- remains valid with zero backfill ("Ungrouped").
+        CREATE TABLE IF NOT EXISTS field_photo_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT,
+            FOREIGN KEY (project_id) REFERENCES tracker_projects (id)
+        );
+
         -- Site Inventory: concrete requests + material inventory, split out
         -- of SitePulse into their own section per today's direction.
         CREATE TABLE IF NOT EXISTS inventory_materials (
@@ -2026,6 +2075,7 @@ def init_db():
         # actual company PROJECT_CHECKLIST.pdf audit -- these two columns
         # were missing from the header form entirely.
         "ALTER TABLE project_deployments ADD COLUMN job_description TEXT",
+        "ALTER TABLE project_field_photos ADD COLUMN group_id INTEGER",
         "ALTER TABLE project_deployments ADD COLUMN inspections_required_list TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
@@ -2115,6 +2165,8 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_field_reports_project ON field_reports(project_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_report_photo_selections_report ON report_photo_selections(report_id, sort_order)",
         "CREATE INDEX IF NOT EXISTS idx_field_report_versions_report ON field_report_versions(report_id, version_number)",
+        "CREATE INDEX IF NOT EXISTS idx_field_photo_groups_project ON field_photo_groups(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_field_photos_group ON project_field_photos(group_id)",
     ]:
         try:
             db.execute(index_sql)
@@ -4187,6 +4239,244 @@ def _report_row(db, report_id):
     ).fetchone()
 
 
+def _group_or_none(db, group_id, project_id):
+    """Every group/photo/report ID from the browser is validated against
+    its canonical project relationship here -- never trust a group_id
+    without confirming group.project_id == the project actually being
+    worked on. Returns None on any mismatch, which every caller treats
+    as a 404, not a silent no-op."""
+    return db.execute("SELECT * FROM field_photo_groups WHERE id = ? AND project_id = ?", (group_id, project_id)).fetchone()
+
+
+def _get_or_create_draft_report(db, project_id):
+    """The existing Draft field_reports row IS the explicit capture
+    context (per the approved architecture) -- reused rather than
+    inventing a second concept/table. One Draft per project is found or
+    created; newly captured photos become explicitly selected for THIS
+    report the moment they're successfully uploaded, not merely by
+    someone opening a group (opening is never a business event)."""
+    existing = db.execute("SELECT * FROM field_reports WHERE project_id = ? AND status = 'Draft' ORDER BY created_at DESC LIMIT 1", (project_id,)).fetchone()
+    if existing:
+        return existing["id"]
+    now = datetime.utcnow().isoformat()
+    author = current_user.name or current_user.email
+    cur = db.execute(
+        "INSERT INTO field_reports (project_id, report_date, status, created_by, last_edited_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+        (project_id, date.today().isoformat(), "Draft", author, author, now, now)
+    )
+    db.commit()
+    log_activity("sitepulse_reporting", "field_report", cur.lastrowid, "report_created", field="project_id", new_value=str(project_id))
+    db.commit()
+    return cur.lastrowid
+
+
+@app.route("/sitepulse/project/<int:project_id>/capture")
+@login_required
+def sitepulse_project_capture(project_id):
+    """Field Capture -- the Report & Run-style groups screen. Finds or
+    creates today's Draft report as the explicit capture context, then
+    lists this project's reusable groups with a count of photos
+    CURRENTLY SELECTED FOR THIS DRAFT in each group (not the group's
+    all-time project photo count) -- matching Procurement's reference
+    screen, which shows today's capture, not permanent history."""
+    if not _reporting_authorized_for_project(project_id):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    project = db.execute("SELECT id, name, client, address FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        flash("Project not found.", "error")
+        return redirect(url_for("inventory_home"))
+    can_author = _reporting_can_author()
+    report_id = _get_or_create_draft_report(db, project_id) if can_author else None
+    groups = db.execute("SELECT * FROM field_photo_groups WHERE project_id = ? ORDER BY id", (project_id,)).fetchall()
+    group_counts = {}
+    if report_id:
+        rows = db.execute(
+            """SELECT pfp.group_id, COUNT(*) c FROM report_photo_selections rps
+               JOIN project_field_photos pfp ON pfp.id = rps.photo_id
+               WHERE rps.report_id = ? GROUP BY pfp.group_id""",
+            (report_id,)
+        ).fetchall()
+        group_counts = {r["group_id"]: r["c"] for r in rows}
+    return render_template("sitepulse/reports/capture.html", project=project, groups=groups, group_counts=group_counts,
+                            report_id=report_id, can_author=can_author)
+
+
+@app.route("/sitepulse/project/<int:project_id>/groups", methods=["POST"])
+@login_required
+def sitepulse_group_create(project_id):
+    if not _reporting_can_author():
+        flash("You don't have permission to create a group.", "error")
+        return redirect(url_for("sitepulse_project_capture", project_id=project_id))
+    db = get_db()
+    project = db.execute("SELECT id FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if not project:
+        flash("Project not found.", "error")
+        return redirect(url_for("inventory_home"))
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        flash("Group name is required.", "error")
+        return redirect(url_for("sitepulse_project_capture", project_id=project_id))
+    now = datetime.utcnow().isoformat()
+    author = current_user.name or current_user.email
+    db.execute("INSERT INTO field_photo_groups (project_id, name, created_by, created_at) VALUES (?,?,?,?)", (project_id, name, author, now))
+    db.commit()
+    flash(f'Group "{name}" created.')
+    return redirect(url_for("sitepulse_project_capture", project_id=project_id))
+
+
+@app.route("/sitepulse/groups/<int:group_id>/rename", methods=["POST"])
+@login_required
+def sitepulse_group_rename(group_id):
+    if not _reporting_can_author():
+        flash("You don't have permission to rename this group.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    group = db.execute("SELECT * FROM field_photo_groups WHERE id = ?", (group_id,)).fetchone()
+    if not group:
+        return ("Not found", 404)
+    new_name = (request.form.get("name") or "").strip()
+    if not new_name:
+        flash("Group name is required.", "error")
+        return redirect(url_for("sitepulse_project_capture", project_id=group["project_id"]))
+    db.execute("UPDATE field_photo_groups SET name = ? WHERE id = ?", (new_name, group_id))
+    db.commit()
+    # Renaming is intentionally live-forward only -- it never touches
+    # any field_report_versions.content_snapshot_json already written,
+    # which is what keeps a historical submitted PDF showing the group
+    # name as it existed AT SUBMISSION TIME even after a later rename.
+    flash("Group renamed.")
+    return redirect(url_for("sitepulse_project_capture", project_id=group["project_id"]))
+
+
+@app.route("/sitepulse/groups/<int:group_id>")
+@login_required
+def sitepulse_group_detail(group_id):
+    """Opening a group is explicitly NOT a business event -- it never
+    changes report_photo_selections by itself. Shows photos already
+    selected for the active report_id (if provided) distinctly from
+    older project photos in the same group, which require an explicit
+    Add action to join the report."""
+    db = get_db()
+    group = db.execute("SELECT * FROM field_photo_groups WHERE id = ?", (group_id,)).fetchone()
+    if not group:
+        return ("Not found", 404)
+    if not _reporting_authorized_for_project(group["project_id"]):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    project = db.execute("SELECT id, name, client, address FROM tracker_projects WHERE id = ?", (group["project_id"],)).fetchone()
+    report_id = request.args.get("report_id", type=int)
+    selected_ids = set()
+    if report_id:
+        report_check = db.execute("SELECT id FROM field_reports WHERE id = ? AND project_id = ?", (report_id, group["project_id"])).fetchone()
+        if not report_check:
+            report_id = None
+    if report_id:
+        selected_ids = {r["photo_id"] for r in db.execute("SELECT photo_id FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchall()}
+    all_group_photos = db.execute(
+        "SELECT * FROM project_field_photos WHERE project_id = ? AND group_id = ? AND archived = 0 ORDER BY uploaded_at DESC",
+        (group["project_id"], group_id)
+    ).fetchall()
+    in_report = [p for p in all_group_photos if p["id"] in selected_ids]
+    other_history = [p for p in all_group_photos if p["id"] not in selected_ids]
+    return render_template("sitepulse/reports/group_detail.html", project=project, group=group, report_id=report_id,
+                            in_report=in_report, other_history=other_history, can_author=_reporting_can_author())
+
+
+@app.route("/sitepulse/groups/<int:group_id>/photos", methods=["POST"])
+@login_required
+def sitepulse_group_photos_upload(group_id):
+    """Capturing photos INTO a group with an active report_id IS the
+    explicit business event -- these photos are project-owned as always
+    (save_photo/project_field_photos unchanged) AND immediately, only
+    as a direct result of THIS successful upload, added to that
+    report's report_photo_selections. Never a side effect of merely
+    viewing the group."""
+    if not _reporting_can_author():
+        flash("You don't have permission to add photos.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    group = db.execute("SELECT * FROM field_photo_groups WHERE id = ?", (group_id,)).fetchone()
+    if not group:
+        return ("Not found", 404)
+    if not _reporting_authorized_for_project(group["project_id"]):
+        flash("You don't have access to SitePulse.", "error")
+        return redirect(url_for("home"))
+    report_id = request.form.get("report_id", type=int)
+    report_row = None
+    if report_id:
+        report_row = db.execute("SELECT id FROM field_reports WHERE id = ? AND project_id = ? AND status = 'Draft'", (report_id, group["project_id"])).fetchone()
+    now = datetime.utcnow().isoformat()
+    uploader = current_user.name or current_user.email
+    files = request.files.getlist("photos")
+    saved_count = 0
+    next_sort = 0
+    if report_row:
+        max_sort = db.execute("SELECT MAX(sort_order) m FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchone()["m"]
+        next_sort = (max_sort + 1) if max_sort is not None else 0
+    for f in files:
+        filename = save_photo(f)
+        if filename:
+            cur = db.execute(
+                "INSERT INTO project_field_photos (project_id, filename, original_filename, uploaded_by, uploaded_at, archived, group_id) VALUES (?,?,?,?,?,0,?)",
+                (group["project_id"], filename, secure_filename(f.filename or ""), uploader, now, group_id)
+            )
+            saved_count += 1
+            if report_row:
+                db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, cur.lastrowid, next_sort))
+                next_sort += 1
+    if saved_count:
+        db.commit()
+        log_activity("sitepulse_reporting", "field_photos", group["project_id"], "photos_added", field="group_id", new_value=f"{group_id} ({saved_count})")
+        db.commit()
+        flash(f"{saved_count} photo(s) saved to {group['name']}.")
+    return redirect(url_for("sitepulse_group_detail", group_id=group_id, report_id=report_id))
+
+
+@app.route("/sitepulse/reports/<int:report_id>/photos/<int:photo_id>/add", methods=["POST"])
+@login_required
+def sitepulse_report_photo_add(report_id, photo_id):
+    """Explicitly add an OLDER/existing project photo (not part of this
+    capture session) to the active Draft report -- never automatic."""
+    if not _reporting_can_author():
+        flash("You don't have permission to edit this report.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    report = db.execute("SELECT * FROM field_reports WHERE id = ?", (report_id,)).fetchone()
+    if not report or report["status"] != "Draft":
+        return ("Not found", 404)
+    photo = db.execute("SELECT * FROM project_field_photos WHERE id = ? AND project_id = ?", (photo_id, report["project_id"])).fetchone()
+    if not photo:
+        return ("Not found", 404)
+    max_sort = db.execute("SELECT MAX(sort_order) m FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchone()["m"]
+    next_sort = (max_sort + 1) if max_sort is not None else 0
+    db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, photo_id, next_sort))
+    db.commit()
+    flash("Photo added to report.")
+    return redirect(request.referrer or url_for("sitepulse_report_detail", report_id=report_id))
+
+
+@app.route("/sitepulse/reports/<int:report_id>/photos/<int:photo_id>/remove", methods=["POST"])
+@login_required
+def sitepulse_report_photo_remove(report_id, photo_id):
+    """REMOVE FROM REPORT is deliberately a different operation from
+    deleting the permanent project photo -- this only ever deletes the
+    report_photo_selections junction row, never project_field_photos
+    itself. The photo remains full project history either way."""
+    if not _reporting_can_author():
+        flash("You don't have permission to edit this report.", "error")
+        return redirect(url_for("home"))
+    db = get_db()
+    report = db.execute("SELECT * FROM field_reports WHERE id = ?", (report_id,)).fetchone()
+    if not report or report["status"] != "Draft":
+        return ("Not found", 404)
+    db.execute("DELETE FROM report_photo_selections WHERE report_id = ? AND photo_id = ?", (report_id, photo_id))
+    db.commit()
+    flash("Photo removed from this report (project photo history is unaffected).")
+    return redirect(request.referrer or url_for("sitepulse_report_detail", report_id=report_id))
+
+
 @app.route("/sitepulse/reports/<int:report_id>", methods=["GET", "POST"])
 @login_required
 def sitepulse_report_detail(report_id):
@@ -4254,10 +4544,17 @@ def sitepulse_report_detail(report_id):
     # reopened and being edited), show the live current selection,
     # since that genuinely IS what would be submitted next.
     display_photos = []
+    display_groups = []
     if report["status"] == "Submitted" and report["current_version_id"]:
         current_version = db.execute("SELECT * FROM field_report_versions WHERE id = ?", (report["current_version_id"],)).fetchone()
         if current_version:
-            display_photos = json.loads(current_version["content_snapshot_json"]).get("photos", [])
+            snap = json.loads(current_version["content_snapshot_json"])
+            display_photos = snap.get("photos", [])
+            # V1.4: a pre-V1.4 snapshot has no "groups" key at all -- the
+            # legacy flat rendering path is preserved exactly, matching
+            # "do not visually redesign historical V1.3.1 reports merely
+            # because V1.4 exists."
+            display_groups = snap.get("groups", [])
     else:
         display_photos = [
             {"photo_id": r["photo_id"], "filename": r["filename"], "caption": r["caption"]}
@@ -4268,9 +4565,23 @@ def sitepulse_report_detail(report_id):
                 (report_id,)
             ).fetchall()
         ]
+        live_group_rows = db.execute(
+            """SELECT rps.sort_order, pfp.id AS photo_id, pfp.filename, pfp.caption, fpg.name AS group_name
+               FROM report_photo_selections rps JOIN project_field_photos pfp ON pfp.id = rps.photo_id
+               LEFT JOIN field_photo_groups fpg ON fpg.id = pfp.group_id
+               WHERE rps.report_id = ? ORDER BY rps.sort_order""",
+            (report_id,)
+        ).fetchall()
+        seen = {}
+        for r in live_group_rows:
+            gname = r["group_name"] or "Ungrouped"
+            if gname not in seen:
+                seen[gname] = {"group_name": gname, "photos": []}
+                display_groups.append(seen[gname])
+            seen[gname]["photos"].append({"photo_id": r["photo_id"], "filename": r["filename"], "caption": r["caption"]})
     return render_template("sitepulse/reports/detail.html", report=report, recent_photos=recent_photos,
                             selected_ids=selected_ids, versions=versions, can_author=can_author, can_manage=can_manage,
-                            display_photos=display_photos)
+                            display_photos=display_photos, display_groups=display_groups)
 
 
 def _build_report_snapshot(db, report):
@@ -4279,13 +4590,33 @@ def _build_report_snapshot(db, report):
     report text fields + the EXACT photo selection (ids, captions, sort
     order) as they existed at that moment, so field_report_versions can
     answer what a past version actually contained even after
-    report_photo_selections and field_reports have both since moved on."""
+    report_photo_selections and field_reports have both since moved on.
+    V1.4: also captures each photo's GROUP NAME AT THAT MOMENT (not a
+    live FK) -- a later group rename must never change what an already-
+    submitted version says. The flat "photos" list is kept exactly as
+    before for backward compatibility with pre-V1.4 consumers/snapshots;
+    "groups" is an additive, ordered breakdown for the new grouped PDF
+    and grouped historical view."""
     selections = db.execute(
-        """SELECT rps.sort_order, pfp.id AS photo_id, pfp.filename, pfp.caption
+        """SELECT rps.sort_order, pfp.id AS photo_id, pfp.filename, pfp.caption, pfp.group_id,
+                  fpg.name AS group_name
            FROM report_photo_selections rps JOIN project_field_photos pfp ON pfp.id = rps.photo_id
+           LEFT JOIN field_photo_groups fpg ON fpg.id = pfp.group_id
            WHERE rps.report_id = ? ORDER BY rps.sort_order""",
         (report["id"],)
     ).fetchall()
+    photos_flat = [{"photo_id": s["photo_id"], "filename": s["filename"], "caption": s["caption"], "sort_order": s["sort_order"]} for s in selections]
+
+    groups_ordered = []
+    groups_by_name = {}
+    for s in selections:
+        gname = s["group_name"] or "Ungrouped"
+        if gname not in groups_by_name:
+            entry = {"group_name": gname, "photos": []}
+            groups_by_name[gname] = entry
+            groups_ordered.append(entry)
+        groups_by_name[gname]["photos"].append({"photo_id": s["photo_id"], "filename": s["filename"], "caption": s["caption"], "sort_order": s["sort_order"]})
+
     return {
         "report_date": report["report_date"],
         "work_completed": report["work_completed"],
@@ -4298,8 +4629,10 @@ def _build_report_snapshot(db, report):
         "project_client": report["project_client"],
         "project_address": report["project_address"],
         "created_by": report["created_by"],
-        "photos": [{"photo_id": s["photo_id"], "filename": s["filename"], "caption": s["caption"], "sort_order": s["sort_order"]} for s in selections],
+        "photos": photos_flat,
+        "groups": groups_ordered,
     }
+
 
 
 @app.route("/sitepulse/reports/<int:report_id>/preview")
@@ -4347,8 +4680,16 @@ def sitepulse_report_submit(report_id):
     if report["status"] != "Draft":
         flash("This report has already been submitted.", "error")
         return redirect(url_for("sitepulse_report_detail", report_id=report_id))
-    if not (report["work_completed"] or "").strip():
-        flash("Work Completed is required before submitting.", "error")
+    # V1.4: Work Completed is no longer mandatory -- the approved
+    # architecture explicitly allows a report consisting entirely of
+    # project info + grouped photos + optional photo notes, with every
+    # Optional Daily Summary field blank. The only real requirement now
+    # is that the report isn't completely empty -- at least one
+    # selected photo, or something in the Daily Summary.
+    has_photo_selection = db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchone()["c"] > 0
+    has_summary_text = any((report[f] or "").strip() for f in ("work_completed", "issues_blockers", "next_steps", "general_notes"))
+    if not has_photo_selection and not has_summary_text:
+        flash("Add at least one photo or fill in the Daily Summary before submitting.", "error")
         return redirect(url_for("sitepulse_report_detail", report_id=report_id))
 
     submitter = current_user.name or current_user.email
