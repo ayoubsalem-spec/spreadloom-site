@@ -7095,7 +7095,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v6.5-conversation-action-engine"
+ATLAS_BUILD = "TEST-v7.0-atlas-conversation-brain"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7395,6 +7395,94 @@ def _atlas_resolve_equipment(query, draft):
     return rows[0] if len(rows) == 1 else None
 
 
+def _atlas_semantic_equipment_move(text, draft, api_key):
+    """Semantic fallback for natural equipment move requests.
+
+    Claude may interpret language, but it cannot authorize or execute anything.
+    Its output is treated only as an intent hint; equipment is re-resolved against
+    live BuildIQ data and destinations remain subject to the normal proposal /
+    confirmation / permission / executor boundary.
+    """
+    if not api_key or not (text or "").strip():
+        return None, None
+    active = dict(draft.get("active_context") or {})
+    system = (
+        "You are an intent parser for an equipment-management conversation. "
+        "Return JSON only with keys intent, equipment_ref, destination, use_previous_location. "
+        "intent must be move_equipment or other. Interpret natural shorthand, pronouns, filler, typos, "
+        "and conversational requests. Use equipment_ref='ACTIVE' only when the user refers to the currently discussed equipment "
+        "with words such as it/that/this/the same one. If they say move/send/take/put it back without naming a destination, "
+        "set use_previous_location=true. If they specify a destination, copy only that destination text. "
+        "Do not invent equipment, locations, or actions. Questions that merely ask about equipment are other."
+    )
+    context = "Active context: " + json.dumps(active, ensure_ascii=False) + "\nUser: " + text
+    pieces=[]; failed=False
+    for ev in _stream_claude_completion(api_key, system, [{"role":"user","content":context}], tools=None, max_tokens=120, label="ACTION_INTENT_CLASSIFY"):
+        if ev[0]=="text_delta": pieces.append(ev[1])
+        elif ev[0]=="error": failed=True
+    if failed:
+        return None, None
+    raw="".join(pieces).strip()
+    try:
+        if raw.startswith("```"):
+            raw=re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I|re.S)
+        obj=json.loads(raw)
+    except Exception:
+        return None, None
+    if obj.get("intent") != "move_equipment":
+        return None, None
+    ref=(obj.get("equipment_ref") or "").strip()
+    if ref == "ACTIVE":
+        if active.get("entity_type") != "equipment" or not active.get("name"):
+            return None, None
+        ref=active["name"]
+    asset=_atlas_resolve_equipment(ref, draft)
+    if asset is None:
+        return None, None
+    destination=(obj.get("destination") or "").strip()
+    if obj.get("use_previous_location"):
+        destination=(active.get("previous_location") or "").strip()
+    if not destination:
+        return None, None
+    return asset, destination
+
+
+def _atlas_resolve_move_intent(text, draft, api_key):
+    """Deterministic first, semantic second; both end at live-data validation."""
+    asset, destination = _atlas_parse_equipment_move(text, draft)
+    if asset is not None and destination:
+        return asset, destination
+    return _atlas_semantic_equipment_move(text, draft, api_key)
+
+
+def _atlas_store_move_proposal(draft, asset, destination, user_text):
+    """Create a validated pending move and its authoritative proposal text."""
+    db=get_db()
+    rows=db.execute("SELECT id, name FROM tracker_projects WHERE lower(name)=lower(?)", (destination,)).fetchall()
+    if not rows:
+        rows=db.execute("SELECT id, name FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 7", (f"%{destination}%",)).fetchall()
+    canonical=rows[0]["name"] if len(rows)==1 else destination
+    params={"equipment_name": asset["name"], "to_location": canonical}
+    tool=ATLAS_TOOLS.get("move_equipment")
+    clean, err=_validate_tool_params(tool, params) if tool else (None, "unsupported action")
+    if not tool or tool.kind != "write" or err:
+        return None
+    proposal_hash=hashlib.sha256(json.dumps({"tool":"move_equipment","params":clean}, sort_keys=True).encode("utf-8")).hexdigest()
+    draft["pending_write"]=None
+    draft["pending_submit"]={
+        "fields_hash":proposal_hash,"tool_name":"move_equipment","params":dict(clean),"issued_at":time.time(),
+        "action_context":{"entity_type":"equipment","name":asset["name"],"previous_location":asset["location"] or "Unassigned","proposed_location":canonical},
+    }
+    return (
+        "**Move Equipment**\n\n"
+        f"- **Equipment:** {asset['name']}\n"
+        f"- **From:** {asset['location'] or 'Unassigned'}\n"
+        f"- **To:** {canonical}\n"
+        "- **When:** Now\n\n"
+        "**Confirm this action** and I’ll do it."
+    )
+
+
 def _atlas_parse_equipment_move(text, draft):
     """Resolve natural equipment-move instructions into deterministic BuildIQ
     parameters. Conversational wording is allowed, but entity/location values
@@ -7506,54 +7594,17 @@ def stream_atlas_turn(user_text, draft):
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
         return
 
-    # V6.2 deterministic equipment-move proposal path. A clear command such as
-    # "Move BOMAG Smooth Roller to Peninsula" is resolved against BuildIQ here
-    # instead of relying on the model to reproduce hidden action state. This path
-    # is READ-ONLY: it only creates a proposal. The actual write still requires
-    # the separate confirmation turn and /assistant/confirm_write permission gate.
-    _asset, _destination_query = _atlas_parse_equipment_move(user_text, draft)
+    # Atlas conversation brain: understand the move naturally, then force the
+    # result through live-data validation and the deterministic proposal boundary.
+    _asset, _destination_query = _atlas_resolve_move_intent(user_text, draft, api_key)
     if _asset is not None and _destination_query and not (draft.get("pending_submit") or {}).get("tool_name"):
-        _db = get_db()
-        # Prefer the canonical BuildIQ project name when the destination
-        # uniquely resolves to one; otherwise preserve the person's location
-        # text because Equipment Center supports non-project locations too.
-        _project_rows = _db.execute(
-            "SELECT id, name FROM tracker_projects WHERE lower(name)=lower(?)",
-            (_destination_query,),
-        ).fetchall()
-        if not _project_rows:
-            _project_rows = _db.execute(
-                "SELECT id, name FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 7",
-                (f"%{_destination_query}%",),
-            ).fetchall()
-        _destination = _project_rows[0]["name"] if len(_project_rows) == 1 else _destination_query
-        _params = {"equipment_name": _asset["name"], "to_location": _destination}
-        _tool = ATLAS_TOOLS.get("move_equipment")
-        _clean_params, _param_error = _validate_tool_params(_tool, _params) if _tool else (None, "unsupported action")
-        if _tool and _tool.kind == "write" and not _param_error:
-            _proposal_hash = hashlib.sha256(json.dumps({"tool": "move_equipment", "params": _clean_params}, sort_keys=True).encode("utf-8")).hexdigest()
-            draft["pending_submit"] = {
-                "fields_hash": _proposal_hash, "tool_name": "move_equipment",
-                "params": dict(_clean_params), "issued_at": time.time(),
-                "action_context": {"entity_type": "equipment", "name": _asset["name"], "previous_location": _asset["location"] or "Unassigned", "proposed_location": _destination},
-            }
-            _from = _asset["location"] or "Unassigned"
-            _spoken = (
-                "**Move Equipment**\n\n"
-                f"- **Equipment:** {_asset['name']}\n"
-                f"- **From:** {_from}\n"
-                f"- **To:** {_destination}\n"
-                "- **When:** Now\n\n"
-                "**Confirm this action** and I’ll do it."
-            )
+        _spoken = _atlas_store_move_proposal(draft, _asset, _destination_query, user_text)
+        if _spoken:
             _history = list(draft.get("history", []))
-            _history.extend([
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": _spoken},
-            ])
-            draft["history"] = _history[-20:]
-            yield f"data: {json.dumps({'type': 'delta', 'text': _spoken})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'mode': 'buildiq_action', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+            _history.extend([{"role":"user","content":user_text},{"role":"assistant","content":_spoken}])
+            draft["history"] = _history[-40:]
+            yield f"data: {json.dumps({'type':'delta','text':_spoken})}\n\n"
+            yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
             return
     snapshot = gather_business_snapshot()
     system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"))
@@ -7574,7 +7625,7 @@ def stream_atlas_turn(user_text, draft):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": "Canceled. Nothing was changed."},
             ])
-            draft["history"] = prior_history[-20:]
+            draft["history"] = prior_history[-40:]
             yield f"data: {json.dumps({'type': 'delta', 'text': 'Canceled. Nothing was changed.'})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': 'chat', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return
@@ -7592,12 +7643,25 @@ def stream_atlas_turn(user_text, draft):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": "Confirmed. I’ll do that now."},
             ])
-            draft["history"] = prior_history[-20:]
+            draft["history"] = prior_history[-40:]
             yield f"data: {json.dumps({'type': 'delta', 'text': 'Confirmed. I’ll do that now.'})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': 'buildiq_action', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': pending_write_token})}\n\n"
             return
+        # OTHER may be a correction/replacement action ("actually send it to Red Bluff")
+        # rather than chatter. Resolve it safely and replace the proposal; never execute
+        # the stale pending action on a modified instruction.
+        _mod_asset, _mod_destination = _atlas_resolve_move_intent(user_text, draft, api_key)
+        if _mod_asset is not None and _mod_destination:
+            _spoken = _atlas_store_move_proposal(draft, _mod_asset, _mod_destination, user_text)
+            if _spoken:
+                _history=list(draft.get("history", []))
+                _history.extend([{"role":"user","content":user_text},{"role":"assistant","content":_spoken}])
+                draft["history"]=_history[-40:]
+                yield f"data: {json.dumps({'type':'delta','text':_spoken})}\n\n"
+                yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+                return
 
-    history = draft.get("history", [])[-20:]  # last 10 exchanges, real turns
+    history = draft.get("history", [])[-40:]  # recent real turns
     messages = [{"role": h["role"], "content": h["content"]} for h in history]
     messages.append({"role": "user", "content": user_text})
 
@@ -8426,7 +8490,7 @@ def stream_atlas_turn(user_text, draft):
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": spoken},
     ]
-    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:], "pending_submit": None, "project_context": project_context,
+    new_draft = {"mode": mode, "fields": fields, "history": new_history[-40:], "pending_submit": None, "project_context": project_context,
                  "active_context": dict(draft.get("active_context") or {})}
 
     submitted_id = None
@@ -9001,7 +9065,7 @@ def assistant_conversations_new():
     # unless the person explicitly re-selects/resolves one in the new
     # conversation -- matching the explicit requirement that New Chat
     # never silently carries context forward.
-    ATLAS_SESSIONS[token] = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "interaction_mode": "text", "conversation_id": None}
+    ATLAS_SESSIONS[token] = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "interaction_mode": "text", "conversation_id": None}
     return {"ok": True}
 
 
@@ -9155,7 +9219,7 @@ def assistant_confirm_write():
             }
             h = list(draft.get("history", []))
             h.append({"role": "assistant", "content": f"{action_context['name']} was moved to {tool_params.get('to_location')}."})
-            draft["history"] = h[-20:]
+            draft["history"] = h[-40:]
         return {"success": True, "submitted_id": result.data.get("submitted_id") or result.data.get("id"), "error": None, "result": result.data}
     return {"success": False, "submitted_id": None, "error": result.error}
 
