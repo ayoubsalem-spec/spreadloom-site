@@ -6255,7 +6255,7 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
-def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None):
+def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
     messages array now, not flattened into this text.
@@ -6282,6 +6282,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
     else:
         context_line = "CURRENT PROJECT CONTEXT: none established yet.\n\n"
     active_context_line = "ACTIVE CONVERSATION CONTEXT: " + (json.dumps(active_context, ensure_ascii=False) if active_context else "none") + "\n\n"
+    entity_matches_line = "TURN ENTITY MATCHES (live cross-BuildIQ lookup): " + (json.dumps(turn_entity_matches, ensure_ascii=False) if turn_entity_matches else "none") + "\n\n"
     return (
         "You are Atlas, the assistant inside BuildIQ. If asked your name, "
         "say Atlas. People talk to you like they'd talk to Claude or "
@@ -6321,6 +6322,12 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- The server independently checks the user's Equipment Center permission and Atlas access before executing. If permission is denied, say so plainly.\n"
         "- For project summaries, lead with the answer and current activity. Summarize counts/status first; do not dump every row of a long list unless the person asks for details. Use tables only when they genuinely improve comparison.\n"
         "- Never describe historical location evidence as a current location. Clearly distinguish current assignment/location from recent or historical activity.\n\n"
+        "ENTITY-FIRST INTELLIGENCE rules:\n"
+        "- Never assume a named thing is a project just because the user asks about it. A name may be a project, equipment item, location, vendor, person, request, or another BuildIQ entity.\n"
+        "- When TURN ENTITY MATCHES are provided below, treat those live BuildIQ matches as the authority for what the subject can mean. Lead with the relevant match instead of claiming it is not found merely because it is not a project.\n"
+        "- If one meaning clearly fits, answer from it. If multiple materially different meanings fit and context does not disambiguate, briefly present the relevant meanings or ask one useful clarification.\n"
+        "- A location is a real business entity even when it is not a Project Hunt project.\n"
+        "- Never claim you learned or will remember a correction permanently unless the underlying system actually persisted such a change.\n\n"
         "PROJECT CONTEXT rules:\n"
         "- If the person establishes or changes which project they're "
         "talking about (e.g. \"let's talk about Patel Farm\", \"switch to "
@@ -6380,7 +6387,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "BuildIQ doesn't actually store.\n"
         "- If no project is established yet, this tool has nothing to "
         "act on -- establish one with set_project_context first.\n\n"
-        + context_line + active_context_line +
+        + context_line + active_context_line + entity_matches_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
         + json.dumps(fields) + "\n\n"
@@ -7095,7 +7102,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v7.0-atlas-conversation-brain"
+ATLAS_BUILD = "TEST-v8.0-atlas-grounded-brain"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7395,6 +7402,109 @@ def _atlas_resolve_equipment(query, draft):
     return rows[0] if len(rows) == 1 else None
 
 
+def _atlas_norm_entity_text(value):
+    """Loose comparison form used only for READ/RESOLUTION matching, never authorization."""
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+def _atlas_known_location_candidates():
+    """Canonical location vocabulary already present in BuildIQ.
+    Includes current equipment locations and Project Hunt names.  This is grounding data,
+    not a hard-coded stop-word/filler list.
+    """
+    db = get_db()
+    vals = []
+    for r in db.execute("SELECT DISTINCT location FROM sitepulse_assets WHERE location IS NOT NULL AND trim(location) != ''").fetchall():
+        vals.append(r["location"])
+    for r in db.execute("SELECT name FROM tracker_projects WHERE name IS NOT NULL AND trim(name) != ''").fetchall():
+        vals.append(r["name"])
+    # stable de-dupe, case insensitive
+    out=[]; seen=set()
+    for v in vals:
+        k=_atlas_norm_entity_text(v)
+        if k and k not in seen:
+            seen.add(k); out.append(v)
+    return out
+
+
+def _atlas_ground_location(raw_destination):
+    """Ground a model/user destination to an existing BuildIQ location/project when the
+    intended canonical value is uniquely contained in the natural phrase.  Example:
+    'peninsula broski' -> 'Peninsula'.  Ambiguity fails closed; unknown external
+    locations remain unchanged for compatibility with Equipment Center free-text moves.
+    """
+    raw=(raw_destination or '').strip()
+    nr=_atlas_norm_entity_text(raw)
+    if not nr:
+        return raw
+    candidates=[]
+    for c in _atlas_known_location_candidates():
+        nc=_atlas_norm_entity_text(c)
+        if nr == nc:
+            return c
+        # Word-boundary containment: canonical business entity may be surrounded by
+        # conversational language. Prefer the longest unique canonical match.
+        if re.search(r'(?:^| )'+re.escape(nc)+r'(?: |$)', nr):
+            candidates.append((len(nc), c))
+    if candidates:
+        candidates.sort(reverse=True)
+        best_len=candidates[0][0]
+        best=[c for ln,c in candidates if ln==best_len]
+        if len(best)==1:
+            return best[0]
+    return raw
+
+
+def _atlas_cross_entity_matches(subject):
+    """Search BuildIQ across entity types before Atlas assumes what a name means.
+    Read-only. Returns compact grounded facts for the reasoning model.
+    """
+    q=(subject or '').strip()
+    if not q:
+        return []
+    db=get_db(); like=f"%{q}%"; matches=[]
+    # Projects
+    for r in db.execute("SELECT id,name,client,status FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
+        matches.append({"type":"project","id":r["id"],"name":r["name"],"client":r["client"],"status":r["status"]})
+    # Equipment by name
+    for r in db.execute("SELECT id,name,status,location,hours_mileage FROM sitepulse_assets WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
+        matches.append({"type":"equipment","id":r["id"],"name":r["name"],"status":r["status"],"location":r["location"],"hours_mileage":r["hours_mileage"]})
+    # Locations are first-class conversational entities even if no Project Hunt row exists.
+    locs=db.execute("SELECT location, COUNT(*) AS equipment_count FROM sitepulse_assets WHERE location IS NOT NULL AND lower(location) LIKE lower(?) GROUP BY location ORDER BY location LIMIT 8", (like,)).fetchall()
+    for r in locs:
+        equipment=db.execute("SELECT name,status FROM sitepulse_assets WHERE location=? ORDER BY name LIMIT 12", (r["location"],)).fetchall()
+        matches.append({"type":"location","name":r["location"],"equipment_count":r["equipment_count"],"equipment":[{"name":e["name"],"status":e["status"]} for e in equipment]})
+    return matches[:16]
+
+
+def _atlas_semantic_subject(text, api_key):
+    """Extract the business subject of a read/question without deciding its entity type.
+    The model may understand language; BuildIQ search below decides what actually exists.
+    """
+    if not api_key or not (text or '').strip():
+        return None
+    system=(
+        "Extract the specific BuildIQ business thing the user is asking ABOUT. "
+        "Do not decide whether it is a project, location, equipment, person, vendor, etc. "
+        "Return JSON only: {\"subject\": string|null, \"is_lookup\": boolean}. "
+        "is_lookup is true for questions/requests seeking information about a named or context-referenced business thing. "
+        "It is false for pure action commands, confirmations, cancellations, greetings, and general chat. "
+        "Preserve the subject words but remove conversational filler. Do not invent a subject."
+    )
+    pieces=[]; failed=False
+    for ev in _stream_claude_completion(api_key, system, [{"role":"user","content":text}], tools=None, max_tokens=80, label="ENTITY_SUBJECT_CLASSIFY"):
+        if ev[0]=='text_delta': pieces.append(ev[1])
+        elif ev[0]=='error': failed=True
+    if failed: return None
+    raw=''.join(pieces).strip()
+    try:
+        if raw.startswith('```'): raw=re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.I|re.S)
+        obj=json.loads(raw)
+    except Exception:
+        return None
+    subject=(obj.get('subject') or '').strip() if obj.get('is_lookup') else ''
+    return subject or None
+
 def _atlas_semantic_equipment_move(text, draft, api_key):
     """Semantic fallback for natural equipment move requests.
 
@@ -7444,6 +7554,7 @@ def _atlas_semantic_equipment_move(text, draft, api_key):
         destination=(active.get("previous_location") or "").strip()
     if not destination:
         return None, None
+    destination = _atlas_ground_location(destination)
     return asset, destination
 
 
@@ -7451,12 +7562,13 @@ def _atlas_resolve_move_intent(text, draft, api_key):
     """Deterministic first, semantic second; both end at live-data validation."""
     asset, destination = _atlas_parse_equipment_move(text, draft)
     if asset is not None and destination:
-        return asset, destination
+        return asset, _atlas_ground_location(destination)
     return _atlas_semantic_equipment_move(text, draft, api_key)
 
 
 def _atlas_store_move_proposal(draft, asset, destination, user_text):
     """Create a validated pending move and its authoritative proposal text."""
+    destination = _atlas_ground_location(destination)
     db=get_db()
     rows=db.execute("SELECT id, name FROM tracker_projects WHERE lower(name)=lower(?)", (destination,)).fetchall()
     if not rows:
@@ -7607,7 +7719,13 @@ def stream_atlas_turn(user_text, draft):
             yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
             return
     snapshot = gather_business_snapshot()
-    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"))
+    _turn_entity_matches = []
+    if not (draft.get("pending_submit") or {}).get("tool_name"):
+        _subject = _atlas_semantic_subject(user_text, api_key)
+        if _subject:
+            _turn_entity_matches = _atlas_cross_entity_matches(_subject)
+            _atlas_trace("ENTITY_LOOKUP", subject=_subject[:80], matches=len(_turn_entity_matches))
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches)
 
     # Deterministic second-turn confirmation for non-form BuildIQ actions.
     # The prior turn stores the exact validated tool + params server-side.
