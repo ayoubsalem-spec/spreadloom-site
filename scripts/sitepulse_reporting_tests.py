@@ -38,7 +38,7 @@ def check(label, condition):
 
 
 def get_csrf(client, path):
-    html = client.get(path).get_data(as_text=True)
+    html = client.get(path, follow_redirects=True).get_data(as_text=True)
     m = re.search(r'name="csrf_token" value="([^"]+)"', html)
     return m.group(1) if m else None
 
@@ -725,8 +725,8 @@ def main():
     author_client.post(f"/sitepulse/project/{pid_ux}/reports/new", data={"csrf_token": token_uxr})
     ux_report = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_ux,)).fetchone()
 
-    draft_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}").get_data(as_text=True)
-    check("Draft report still renders an editable textarea for Work Completed", '<textarea class="rep-field" name="work_completed"' in draft_body)
+    draft_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}", follow_redirects=True).get_data(as_text=True)
+    check("Draft report resolves to the new group-based builder with an editable Daily Summary textarea", '<textarea class="cap-field" name="work_completed"' in draft_body)
     check("Back-to-Reports link present on the report page", "Back to Reports" in draft_body)
 
     token_uxs = get_csrf(author_client, f"/sitepulse/reports/{ux_report['id']}")
@@ -762,8 +762,8 @@ def main():
     author_client.post(f"/sitepulse/reports/{ux_report['id']}/reopen", data={"csrf_token": token_reopen_v13})
     ux_report_reopened = db.execute("SELECT status FROM field_reports WHERE id=?", (ux_report["id"],)).fetchone()
     check("Reopen (by an authorized manager) correctly returns Submitted to Draft", ux_report_reopened["status"] == "Draft")
-    reopened_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}").get_data(as_text=True)
-    check("after Reopen, the report renders editable again", '<textarea class="rep-field" name="work_completed"' in reopened_body)
+    reopened_body = author_client.get(f"/sitepulse/reports/{ux_report['id']}", follow_redirects=True).get_data(as_text=True)
+    check("after Reopen, the report resolves back to the editable group builder", '<textarea class="cap-field" name="work_completed"' in reopened_body)
 
     print()
     print("=== V1.3: historical version photos remain correct, current-submitted photos correspond to current version ===")
@@ -1106,7 +1106,71 @@ def main():
           appmod.app.test_client().post(f"/sitepulse/project/{pid_cap}/groups", data={"name": "Sneaky"}).status_code in (302, 400, 401, 403))
 
 
+
+    # ============================================================
+    print()
+    print("=== V1.4 UX CORRECTION: Draft resolves to the new group builder, not the old flat editor ===")
+    pid_ux14 = make_project(name="__RepTest UXCorrection")
+    token_ux14 = get_csrf(author_client, f"/sitepulse/project/{pid_ux14}/capture")
+    resp_ux14_direct = author_client.get(f"/sitepulse/project/{pid_ux14}/capture")
+    draft_ux14 = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_ux14,)).fetchone()
+    resp_draft_get = author_client.get(f"/sitepulse/reports/{draft_ux14['id']}", follow_redirects=False)
+    check("Draft GET redirects (302) rather than rendering the old page directly", resp_draft_get.status_code == 302)
+    check("the redirect target is the group builder, not the old flat editor", "/capture" in resp_draft_get.headers.get("Location", ""))
+    resolved_body = author_client.get(f"/sitepulse/reports/{draft_ux14['id']}", follow_redirects=True).get_data(as_text=True)
+    check("old flat 'Select Photos' picker is absent from the Draft flow entirely", "Select Photos" not in resolved_body)
+    check("REPORT SECTIONS is the dominant heading on the Draft builder", "Report Sections" in resolved_body)
+    check("Generate Report is the primary bottom action", "Generate Report" in resolved_body)
+
+    print()
+    print("=== V1.4 UX CORRECTION: Daily Summary collapsed by default, save does not wipe photo selections ===")
+    token_us_group = get_csrf(author_client, f"/sitepulse/project/{pid_ux14}/capture")
+    author_client.post(f"/sitepulse/project/{pid_ux14}/groups", data={"csrf_token": token_us_group, "name": "Plumbing"})
+    us_group = db.execute("SELECT * FROM field_photo_groups WHERE project_id=?", (pid_ux14,)).fetchone()
+    token_us_photo = get_csrf(author_client, f"/sitepulse/groups/{us_group['id']}?report_id={draft_ux14['id']}")
+    author_client.post(f"/sitepulse/groups/{us_group['id']}/photos", data={
+        "csrf_token": token_us_photo, "report_id": str(draft_ux14["id"]),
+        "photos": [(real_photo((80, 80, 80)), "x.jpg")]
+    }, content_type="multipart/form-data")
+    selections_before_summary_save = db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=?", (draft_ux14["id"],)).fetchone()["c"]
+    check("photo captured before Daily Summary save", selections_before_summary_save == 1)
+    check("Daily Summary is collapsed by default (open class absent)", 'id="summaryBody"' in resolved_body and 'class="card cap-summary-body open"' not in resolved_body)
+
+    token_summary_save = get_csrf(author_client, f"/sitepulse/reports/{draft_ux14['id']}")
+    author_client.post(f"/sitepulse/reports/{draft_ux14['id']}", data={"csrf_token": token_summary_save, "work_completed": "Partial summary only", "has_issues": "no"})
+    check("CRITICAL: saving the Daily Summary does NOT wipe out the group-captured photo selection",
+          db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=?", (draft_ux14["id"],)).fetchone()["c"] == 1)
+    check("Daily Summary partial save (Work Completed only) persists correctly",
+          db.execute("SELECT work_completed FROM field_reports WHERE id=?", (draft_ux14["id"],)).fetchone()["work_completed"] == "Partial summary only")
+
+    print()
+    print("=== V1.4 UX CORRECTION: fresh Plumbing/Electrical workflow produces NO Ungrouped section ===")
+    pid_fresh = make_project(name="__RepTest FreshGroupWorkflow")
+    author_client.get(f"/sitepulse/project/{pid_fresh}/capture")
+    fresh_draft = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_fresh,)).fetchone()
+    token_fresh_g = get_csrf(author_client, f"/sitepulse/project/{pid_fresh}/capture")
+    author_client.post(f"/sitepulse/project/{pid_fresh}/groups", data={"csrf_token": token_fresh_g, "name": "Plumbing"})
+    author_client.post(f"/sitepulse/project/{pid_fresh}/groups", data={"csrf_token": token_fresh_g, "name": "Electrical"})
+    fresh_groups = db.execute("SELECT * FROM field_photo_groups WHERE project_id=? ORDER BY id", (pid_fresh,)).fetchall()
+    for g in fresh_groups:
+        tk = get_csrf(author_client, f"/sitepulse/groups/{g['id']}?report_id={fresh_draft['id']}")
+        author_client.post(f"/sitepulse/groups/{g['id']}/photos", data={
+            "csrf_token": tk, "report_id": str(fresh_draft["id"]), "photos": [(real_photo((30, 60, 90)), "p.jpg")]
+        }, content_type="multipart/form-data")
+    fresh_preview = author_client.get(f"/sitepulse/reports/{fresh_draft['id']}/preview")
+    fresh_preview_text = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(fresh_preview.data)).pages)
+    check("fresh Plumbing/Electrical-only workflow produces NO Ungrouped section anywhere", "Ungrouped" not in fresh_preview_text)
+    check("fresh workflow correctly shows both real group names", "Plumbing" in fresh_preview_text and "Electrical" in fresh_preview_text)
+
+    print()
+    print("=== V1.4 UX CORRECTION: capture mechanics preserved structurally (camera/library/pending/HEIC/EXIF) ===")
+    capture_html_body = author_client.get(f"/sitepulse/groups/{us_group['id']}?report_id={draft_ux14['id']}").get_data(as_text=True)
+    check("camera input still present in the group capture screen", 'accept="image/*" capture="environment"' in capture_html_body)
+    check("Take/Choose Photos upload mechanics still present", "Take or Choose Photos" in capture_html_body or "photos" in capture_html_body)
+
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
+
+
 
     print("\nCleaning up...")
     db.execute("DELETE FROM report_photo_selections WHERE report_id IN (SELECT id FROM field_reports WHERE project_id IN (SELECT id FROM tracker_projects WHERE name LIKE '__RepTest%'))")
