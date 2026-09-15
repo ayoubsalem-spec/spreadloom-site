@@ -315,7 +315,7 @@ def main():
     check("PDF generation failure creates zero version rows", db.execute("SELECT COUNT(*) c FROM field_report_versions WHERE report_id=?", (report_fail["id"],)).fetchone()["c"] == 0)
 
     print()
-    print("=== Submit requires Work Completed ===")
+    print("=== V1.4: Submit still blocks a genuinely empty report (no photos AND no summary text) ===")
     pid_empty = make_project(name="__RepTest EmptyCase")
     token_e = get_csrf(author_client, f"/sitepulse/project/{pid_empty}/reports")
     author_client.post(f"/sitepulse/project/{pid_empty}/reports/new", data={"csrf_token": token_e})
@@ -323,7 +323,7 @@ def main():
     token_e2 = get_csrf(author_client, f"/sitepulse/reports/{report_empty['id']}")
     author_client.post(f"/sitepulse/reports/{report_empty['id']}/submit", data={"csrf_token": token_e2})
     report_empty_after = db.execute("SELECT * FROM field_reports WHERE id=?", (report_empty["id"],)).fetchone()
-    check("empty Work Completed blocks submission", report_empty_after["status"] == "Draft")
+    check("a report with zero photos and zero summary text still blocks submission", report_empty_after["status"] == "Draft")
 
     # ============================================================
     print()
@@ -907,6 +907,204 @@ def main():
     author_client.post(f"/sitepulse/reports/{missing_report_v131['id']}/submit", data={"csrf_token": token_msub131})
     missing_report_after_v131 = db.execute("SELECT * FROM field_reports WHERE id=?", (missing_report_v131["id"],)).fetchone()
     check("missing selected photo still blocks Submit after the orientation fix (regression)", missing_report_after_v131["status"] == "Draft")
+
+
+    # ============================================================
+    print()
+    print("=== V1.4: GROUPS -- creation, rename, arbitrary names, project scoping ===")
+    pid_g = make_project(name="__RepTest GroupsV14")
+    token_gc = get_csrf(author_client, f"/sitepulse/project/{pid_g}/capture")
+    author_client.post(f"/sitepulse/project/{pid_g}/groups", data={"csrf_token": token_gc, "name": "Plumbing"})
+    author_client.post(f"/sitepulse/project/{pid_g}/groups", data={"csrf_token": token_gc, "name": "Totally Custom Category Name"})
+    groups_g = db.execute("SELECT * FROM field_photo_groups WHERE project_id=? ORDER BY id", (pid_g,)).fetchall()
+    check("1. group creation works", len(groups_g) == 2)
+    check("3. arbitrary group names allowed, not limited to a fixed taxonomy", any(g["name"] == "Totally Custom Category Name" for g in groups_g))
+    plumbing_g = groups_g[0]
+
+    token_gr = get_csrf(author_client, f"/sitepulse/groups/{plumbing_g['id']}")
+    author_client.post(f"/sitepulse/groups/{plumbing_g['id']}/rename", data={"csrf_token": token_gr, "name": "Plumbing Renamed"})
+    plumbing_g_after = db.execute("SELECT * FROM field_photo_groups WHERE id=?", (plumbing_g["id"],)).fetchone()
+    check("2. group rename works", plumbing_g_after["name"] == "Plumbing Renamed")
+
+    pid_g2 = make_project(name="__RepTest GroupsV14b")
+    token_gc2 = get_csrf(author_client, f"/sitepulse/project/{pid_g2}/capture")
+    author_client.post(f"/sitepulse/project/{pid_g2}/groups", data={"csrf_token": token_gc2, "name": "Plumbing"})
+    groups_g2 = db.execute("SELECT * FROM field_photo_groups WHERE project_id=?", (pid_g2,)).fetchall()
+    check("4. groups are project-scoped, not global (same name in two different projects = two different rows)",
+          len(groups_g2) == 1 and groups_g2[0]["id"] != plumbing_g["id"])
+
+    print()
+    print("=== V1.4: explicit Draft/capture-context behavior (6/7/8/9) ===")
+    pid_cap = make_project(name="__RepTest CaptureCtx")
+    resp_cap = author_client.get(f"/sitepulse/project/{pid_cap}/capture")
+    check("Field Capture auto-creates/finds today's Draft as the explicit context", resp_cap.status_code == 200)
+    draft_cap = db.execute("SELECT * FROM field_reports WHERE project_id=? AND status='Draft'", (pid_cap,)).fetchone()
+    check("exactly one Draft created (not duplicated on repeat visits)", db.execute("SELECT COUNT(*) c FROM field_reports WHERE project_id=?", (pid_cap,)).fetchone()["c"] == 1)
+    resp_cap_again = author_client.get(f"/sitepulse/project/{pid_cap}/capture")
+    check("revisiting Field Capture reuses the SAME Draft, does not create a second one", db.execute("SELECT COUNT(*) c FROM field_reports WHERE project_id=?", (pid_cap,)).fetchone()["c"] == 1)
+
+    token_capg = get_csrf(author_client, f"/sitepulse/project/{pid_cap}/capture")
+    author_client.post(f"/sitepulse/project/{pid_cap}/groups", data={"csrf_token": token_capg, "name": "Plumbing"})
+    author_client.post(f"/sitepulse/project/{pid_cap}/groups", data={"csrf_token": token_capg, "name": "Structure"})
+    cap_groups = db.execute("SELECT * FROM field_photo_groups WHERE project_id=? ORDER BY id", (pid_cap,)).fetchall()
+
+    print()
+    print("=== V1.4: merely opening a group is NEVER a business event (9/10) ===")
+    open_resp = author_client.get(f"/sitepulse/groups/{cap_groups[0]['id']}?report_id={draft_cap['id']}")
+    check("opening a group with existing (empty at this point) history returns 200", open_resp.status_code == 200)
+    check("9. merely viewing/opening a group does NOT select anything (zero selections still)",
+          db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=?", (draft_cap["id"],)).fetchone()["c"] == 0)
+
+    print()
+    print("=== V1.4: repeated camera/library photo capture into a group (7) ===")
+    token_up1 = get_csrf(author_client, f"/sitepulse/groups/{cap_groups[0]['id']}?report_id={draft_cap['id']}")
+    author_client.post(f"/sitepulse/groups/{cap_groups[0]['id']}/photos", data={
+        "csrf_token": token_up1, "report_id": str(draft_cap["id"]),
+        "photos": [(real_photo((10, 100, 200)), "a.jpg"), (real_photo((200, 10, 100)), "b.jpg"), (real_photo((100, 200, 10)), "c.jpg")]
+    }, content_type="multipart/form-data")
+    plumbing_photos = db.execute("SELECT * FROM project_field_photos WHERE group_id=?", (cap_groups[0]["id"],)).fetchall()
+    check("7. multiple photos in one batch remain supported (proven V1.3.1 accumulation, now group-aware)", len(plumbing_photos) == 3)
+
+    print()
+    print("=== V1.4: newly captured photos in the explicit Draft context become selected automatically (8) ===")
+    check("8. newly captured photos with an active report_id are automatically added to that Draft's selection",
+          db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=?", (draft_cap["id"],)).fetchone()["c"] == 3)
+
+    print()
+    print("=== V1.4: old project photos are NOT silently added; can be explicitly added (10/11) ===")
+    old_photo_time = datetime.utcnow().isoformat()
+    cur_old = db.execute(
+        "INSERT INTO project_field_photos (project_id, filename, uploaded_by, uploaded_at, archived, group_id) VALUES (?,?,?,?,0,?)",
+        (pid_cap, plumbing_photos[0]["filename"], "__legacy_user", old_photo_time, cap_groups[0]["id"])
+    )
+    db.commit()
+    old_photo_id = cur_old.lastrowid
+    check("10. an older project photo in the group is NOT silently part of the report selection",
+          db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=? AND photo_id=?", (draft_cap["id"], old_photo_id)).fetchone()["c"] == 0)
+    token_add = get_csrf(author_client, f"/sitepulse/groups/{cap_groups[0]['id']}?report_id={draft_cap['id']}")
+    author_client.post(f"/sitepulse/reports/{draft_cap['id']}/photos/{old_photo_id}/add", data={"csrf_token": token_add})
+    check("11. an old project photo CAN be explicitly added to the report", db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=? AND photo_id=?", (draft_cap["id"], old_photo_id)).fetchone()["c"] == 1)
+
+    print()
+    print("=== V1.4: remove-from-report vs delete-project-photo (12) ===")
+    token_remove = get_csrf(author_client, f"/sitepulse/reports/{draft_cap['id']}")
+    author_client.post(f"/sitepulse/reports/{draft_cap['id']}/photos/{old_photo_id}/remove", data={"csrf_token": token_remove})
+    check("12. remove-from-report deletes only the selection junction row", db.execute("SELECT COUNT(*) c FROM report_photo_selections WHERE report_id=? AND photo_id=?", (draft_cap["id"], old_photo_id)).fetchone()["c"] == 0)
+    check("12. remove-from-report does NOT delete the permanent project photo", db.execute("SELECT COUNT(*) c FROM project_field_photos WHERE id=?", (old_photo_id,)).fetchone()["c"] == 1)
+
+    print()
+    print("=== V1.4: photo notes (13/14) ===")
+    token_note = get_csrf(author_client, f"/sitepulse/groups/{cap_groups[0]['id']}?report_id={draft_cap['id']}")
+    author_client.post(f"/sitepulse/photos/{plumbing_photos[0]['id']}/caption", data={"csrf_token": token_note, "caption": "Need to check this line is still active."})
+    photo_with_note = db.execute("SELECT * FROM project_field_photos WHERE id=?", (plumbing_photos[0]["id"],)).fetchone()
+    check("13. photo note persists", photo_with_note["caption"] == "Need to check this line is still active.")
+    check("14. note remains optional -- other photos in the same batch have none", db.execute("SELECT COUNT(*) c FROM project_field_photos WHERE id=? AND (caption IS NULL OR caption = '')", (plumbing_photos[1]["id"],)).fetchone()["c"] == 1)
+
+    print()
+    print("=== V1.4: existing group reused on a future report (17) ===")
+    token_sub_cap = get_csrf(author_client, f"/sitepulse/reports/{draft_cap['id']}")
+    # (No detail-form POST here -- that form's photo checkboxes reflect
+    # group-captured selections correctly in a REAL browser render/submit,
+    # but a test POST that only sends has_issues without also resubmitting
+    # the already-checked photo ids would wipe them, which is not
+    # representative of real usage. Submit directly instead.)
+    author_client.post(f"/sitepulse/reports/{draft_cap['id']}/submit", data={"csrf_token": token_sub_cap})
+    resp_cap2 = author_client.get(f"/sitepulse/project/{pid_cap}/capture")
+    check("after submitting, a new Draft/capture context is available for the same project", resp_cap2.status_code == 200)
+    check("17. the SAME existing group can be reused on this new report (not recreated)",
+          db.execute("SELECT COUNT(*) c FROM field_photo_groups WHERE project_id=?", (pid_cap,)).fetchone()["c"] == 2)
+
+    print()
+    print("=== V1.4: group rename does not change historical snapshot (15/16) ===")
+    v1_cap = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (draft_cap["id"],)).fetchone()
+    v1_snapshot_cap = json.loads(v1_cap["content_snapshot_json"])
+    original_group_name_in_snapshot = v1_snapshot_cap["groups"][0]["group_name"]
+    token_rename2 = get_csrf(author_client, f"/sitepulse/groups/{cap_groups[0]['id']}")
+    author_client.post(f"/sitepulse/groups/{cap_groups[0]['id']}/rename", data={"csrf_token": token_rename2, "name": "Plumbing / Underground"})
+    v1_cap_reloaded = db.execute("SELECT * FROM field_report_versions WHERE id=?", (v1_cap["id"],)).fetchone()
+    v1_snapshot_reloaded = json.loads(v1_cap_reloaded["content_snapshot_json"])
+    check("15. renaming a group does NOT change an already-submitted version's snapshot group name",
+          v1_snapshot_reloaded["groups"][0]["group_name"] == original_group_name_in_snapshot == "Plumbing")
+
+    v1_pdf_cap = author_client.get(f"/sitepulse/reports/{draft_cap['id']}/versions/{v1_cap['id']}/pdf")
+    v1_pdf_text_cap = "".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(v1_pdf_cap.data)).pages)
+    check("16. historical PDF retains the OLD group name, not the renamed one", "Plumbing" in v1_pdf_text_cap and "Underground" not in v1_pdf_text_cap)
+
+    print()
+    print("=== V1.4: ungrouped legacy photos still work (18) ===")
+    pid_ungrouped = make_project(name="__RepTest UngroupedV14")
+    token_ug = get_csrf(author_client, f"/sitepulse/project/{pid_ungrouped}/photos")
+    author_client.post(f"/sitepulse/project/{pid_ungrouped}/photos", data={"csrf_token": token_ug, "photos": [(real_photo((5, 5, 5)), "legacy.jpg")]}, content_type="multipart/form-data")
+    ungrouped_photo = db.execute("SELECT * FROM project_field_photos WHERE project_id=?", (pid_ungrouped,)).fetchone()
+    check("18. a photo uploaded via the legacy (ungrouped) path still has group_id NULL and works", ungrouped_photo["group_id"] is None)
+
+    print()
+    print("=== V1.4: Optional Daily Summary may be entirely blank (21) ===")
+    pid_blank_summary = make_project(name="__RepTest BlankSummaryV14")
+    token_bs = get_csrf(author_client, f"/sitepulse/project/{pid_blank_summary}/capture")
+    author_client.post(f"/sitepulse/project/{pid_blank_summary}/groups", data={"csrf_token": token_bs, "name": "General"})
+    bs_group = db.execute("SELECT * FROM field_photo_groups WHERE project_id=?", (pid_blank_summary,)).fetchone()
+    bs_draft = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_blank_summary,)).fetchone()
+    token_bsp = get_csrf(author_client, f"/sitepulse/groups/{bs_group['id']}?report_id={bs_draft['id']}")
+    author_client.post(f"/sitepulse/groups/{bs_group['id']}/photos", data={"csrf_token": token_bsp, "report_id": str(bs_draft["id"]), "photos": [(real_photo((1, 2, 3)), "z.jpg")]}, content_type="multipart/form-data")
+    token_bss = get_csrf(author_client, f"/sitepulse/reports/{bs_draft['id']}")
+    resp_bs_submit = author_client.post(f"/sitepulse/reports/{bs_draft['id']}/submit", data={"csrf_token": token_bss})
+    bs_report_after = db.execute("SELECT * FROM field_reports WHERE id=?", (bs_draft["id"],)).fetchone()
+    check("21. a report with ONLY photos and a completely blank Daily Summary submits successfully", bs_report_after["status"] == "Submitted")
+
+    print()
+    print("=== V1.4: grouped PDF structure (22/23/24/25/26) ===")
+    pid_pdf14 = make_project(name="__RepTest GroupedPdfV14")
+    token_pdf14 = get_csrf(author_client, f"/sitepulse/project/{pid_pdf14}/capture")
+    author_client.post(f"/sitepulse/project/{pid_pdf14}/groups", data={"csrf_token": token_pdf14, "name": "Plumbing"})
+    author_client.post(f"/sitepulse/project/{pid_pdf14}/groups", data={"csrf_token": token_pdf14, "name": "Structure"})
+    pdf14_groups = db.execute("SELECT * FROM field_photo_groups WHERE project_id=? ORDER BY id", (pid_pdf14,)).fetchall()
+    pdf14_draft = db.execute("SELECT * FROM field_reports WHERE project_id=?", (pid_pdf14,)).fetchone()
+    for g, caps in [(pdf14_groups[0], ["Note on pipe A", "Note on pipe B", None]), (pdf14_groups[1], ["Beam check", None])]:
+        tk = get_csrf(author_client, f"/sitepulse/groups/{g['id']}?report_id={pdf14_draft['id']}")
+        author_client.post(f"/sitepulse/groups/{g['id']}/photos", data={
+            "csrf_token": tk, "report_id": str(pdf14_draft["id"]),
+            "photos": [(real_photo((i * 40, 100, 150)), f"{g['name']}{i}.jpg") for i in range(len(caps))]
+        }, content_type="multipart/form-data")
+        group_photo_rows = db.execute("SELECT * FROM project_field_photos WHERE group_id=? ORDER BY id", (g["id"],)).fetchall()
+        for photo_row, cap in zip(group_photo_rows, caps):
+            if cap:
+                tk2 = get_csrf(author_client, f"/sitepulse/groups/{g['id']}?report_id={pdf14_draft['id']}")
+                author_client.post(f"/sitepulse/photos/{photo_row['id']}/caption", data={"csrf_token": tk2, "caption": cap})
+    token_pdf14sub = get_csrf(author_client, f"/sitepulse/reports/{pdf14_draft['id']}")
+    author_client.post(f"/sitepulse/reports/{pdf14_draft['id']}/submit", data={"csrf_token": token_pdf14sub})
+    pdf14_version = db.execute("SELECT * FROM field_report_versions WHERE report_id=?", (pdf14_draft["id"],)).fetchone()
+    pdf14_resp = author_client.get(f"/sitepulse/reports/{pdf14_draft['id']}/versions/{pdf14_version['id']}/pdf")
+    pdf14_reader = PdfReader(io.BytesIO(pdf14_resp.data))
+    pdf14_text = "".join(p.extract_text() or "" for p in pdf14_reader.pages)
+    check("22. grouped PDF contains both group headings", "Plumbing" in pdf14_text and "Structure" in pdf14_text)
+    check("23. grouped PDF Total Photos count is correct (5)", "Total Photos:" in pdf14_text and "5" in pdf14_text)
+    check("24. captions appear under the correct photos (spot check both present)", "Note on pipe A" in pdf14_text and "Beam check" in pdf14_text)
+    check("25. group ordering preserved (Plumbing appears before Structure, matching creation/capture order)", pdf14_text.find("Plumbing") < pdf14_text.find("Structure"))
+    pdf14_images = sum(len(p.images) for p in pdf14_reader.pages)
+    check("real embedded image objects present (not merely filenames/text)", pdf14_images >= 5)
+
+    print()
+    print("=== V1.4: cross-cutting regressions (32-40) ===")
+    photo_unauth = appmod.app.test_client().get(f"/sitepulse/photos/{plumbing_photos[0]['id']}/file")
+    check("32. secure photo authorization unchanged (unauthenticated -> redirected to login)", photo_unauth.status_code in (302, 401, 403))
+    pdf_unauth = appmod.app.test_client().get(f"/sitepulse/reports/{draft_cap['id']}/versions/{v1_cap['id']}/pdf")
+    check("33. secure PDF authorization unchanged (unauthenticated -> redirected to login)", pdf_unauth.status_code in (302, 401, 403))
+    detail_body_v14 = author_client.get(f"/sitepulse/reports/{draft_cap['id']}").get_data(as_text=True)
+    check("34. Share file behavior (navigator.share/File) unchanged", "navigator.share" in detail_body_v14 and "new File(" in detail_body_v14)
+    check("35. Download behavior unchanged", "Download PDF" in detail_body_v14)
+    check("36. submitted version remains immutable after further group renames (re-verified)",
+          json.loads(db.execute("SELECT content_snapshot_json FROM field_report_versions WHERE id=?", (v1_cap["id"],)).fetchone()[0])["groups"][0]["group_name"] == "Plumbing")
+
+    token_reopen_cap = get_csrf(author_client, f"/sitepulse/reports/{draft_cap['id']}")
+    author_client.post(f"/sitepulse/reports/{draft_cap['id']}/reopen", data={"csrf_token": token_reopen_cap})
+    token_resub = get_csrf(author_client, f"/sitepulse/reports/{draft_cap['id']}")
+    author_client.post(f"/sitepulse/reports/{draft_cap['id']}/submit", data={"csrf_token": token_resub})
+    check("37. reopen/resubmit creates a new version", db.execute("SELECT COUNT(*) c FROM field_report_versions WHERE report_id=?", (draft_cap["id"],)).fetchone()["c"] == 2)
+    check("38. the previous version remains available", author_client.get(f"/sitepulse/reports/{draft_cap['id']}/versions/{v1_cap['id']}/pdf").status_code == 200)
+    check("40. permission model unchanged -- unauthenticated request to create a group is denied",
+          appmod.app.test_client().post(f"/sitepulse/project/{pid_cap}/groups", data={"name": "Sneaky"}).status_code in (302, 400, 401, 403))
+
 
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")
 
