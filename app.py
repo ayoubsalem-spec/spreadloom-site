@@ -40,6 +40,7 @@ from reportlab.pdfgen import canvas as pdf_canvas
 from reportlab.lib.utils import ImageReader
 from PIL import Image, ImageOps
 import pillow_heif
+import re
 pillow_heif.register_heif_opener()
 from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session, Response, stream_with_context, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -7091,7 +7092,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v6.2-equipment-action-continuity"
+ATLAS_BUILD = "TEST-v6.2.1-equipment-action-continuity"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
