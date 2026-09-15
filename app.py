@@ -6285,8 +6285,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "ChatGPT -- hold a real conversation, remember what's already been "
         "said, and don't repeat a question that's already been answered. "
         "Replies may be read aloud by text-to-speech, so keep them "
-        "conversational and avoid markdown or lists unless they're truly "
-        "needed.\n\n"
+        "conversational. In text mode, use short headings, bullets and whitespace whenever they make the answer easier to scan. Never dump a dense wall of text. In voice mode, keep it natural and concise.\n\n"
         "You can do two things:\n"
         "1. Answer questions about the current state of the business using "
         "the snapshot below.\n"
@@ -6310,6 +6309,12 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "normally -- don't force them back to the form.\n"
         "- If they say cancel/never mind/start over, clear the fields and "
         "set mode back to chat.\n\n"
+        "BUILDIQ ACTION rules:\n"
+        "- You can safely operate BuildIQ actions that the server exposes. For this TEST build, equipment moves are the first non-Concrete action enabled.\n"
+        "- If the person asks to move or schedule a move for equipment, collect only what is missing: equipment name and destination are required; date/time/status/hours/reason are optional.\n"
+        "- Never claim the move happened before confirmation. First summarize the proposed move clearly and ask for confirmation.\n"
+        "- When proposing or confirming an equipment move, emit mode=buildiq_action, tool=move_equipment, action=submit, and params containing the exact known values. On the confirmation turn, repeat the exact same tool/params.\n"
+        "- The server independently checks the user's Equipment Center permission and Atlas access before executing. If permission is denied, say so plainly.\n\n"
         "PROJECT CONTEXT rules:\n"
         "- If the person establishes or changes which project they're "
         "talking about (e.g. \"let's talk about Patel Farm\", \"switch to "
@@ -6376,7 +6381,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "Respond in exactly two parts:\n"
         "1. Your natural reply.\n"
         "2. On its own line, a state block in EXACTLY this format:\n"
-        '<state>{"mode": "concrete_request" or "chat", "fields": {<all fields known so far>}, "action": "none" or "submit"}</state>'
+        '<state>{"mode": "concrete_request" or "buildiq_action" or "chat", "fields": {<concrete fields>}, "tool": "move_equipment" or null, "params": {<action parameters>}, "action": "none" or "submit"}</state>'
     )
 
 
@@ -6801,6 +6806,108 @@ register_tool(
 )
 
 
+# Atlas Brain V1: first reusable non-form action. This deliberately uses the
+# same tables, audit trail and WhatsApp side effects as Equipment Center while
+# still passing through execute_tool's manual-permission + Atlas gate and
+# confirmation boundary. It is the pattern subsequent BuildIQ write tools use.
+def _tool_move_equipment(user, equipment_name, to_location, status=None,
+                         schedule_date=None, schedule_time=None,
+                         hours_mileage=None, move_reason=None, **_kwargs):
+    db = get_db()
+    needle = (equipment_name or "").strip()
+    if not needle:
+        raise ToolWriteRejected("equipment_name_required")
+    exact = db.execute("SELECT * FROM sitepulse_assets WHERE lower(name)=lower(?)", (needle,)).fetchall()
+    rows = exact or db.execute("SELECT * FROM sitepulse_assets WHERE lower(name) LIKE lower(?) ORDER BY name", (f"%{needle}%",)).fetchall()
+    if not rows:
+        raise ToolWriteRejected("equipment_not_found")
+    if len(rows) > 1:
+        names = ", ".join(r["name"] for r in rows[:6])
+        raise ToolWriteRejected("equipment_ambiguous: " + names)
+    a = rows[0]
+    old_location = a["location"] or ""
+    new_location = (to_location or "").strip()
+    if not new_location:
+        raise ToolWriteRejected("destination_required")
+    new_status = (status or a["status"] or "Available").strip()
+    if new_status not in SP_STATUS_OPTIONS:
+        raise ToolWriteRejected("invalid_equipment_status")
+    reading = str(hours_mileage if hours_mileage is not None else (a["hours_mileage"] or ""))
+    schedule_date = (schedule_date or "").strip()
+    schedule_time = (schedule_time or "").strip()
+    move_reason = (move_reason or "").strip()
+    now = datetime.utcnow().isoformat()
+    today = date.today().isoformat()
+    mover = user.name or user.email
+    if new_location == old_location:
+        raise ToolWriteRejected("equipment_already_at_destination")
+
+    if schedule_date and schedule_date > today:
+        db.execute("UPDATE sitepulse_assets SET status=?, hours_mileage=?, updated_at=? WHERE id=?",
+                   (new_status, reading, now, a["id"]))
+        cur = db.execute(
+            """INSERT INTO sitepulse_usage_log (asset_id, entry_kind, from_location, to_location,
+               move_status, scheduled_date, scheduled_time, move_reason, created_by, created_at)
+               VALUES (?, 'move', ?, ?, 'Scheduled', ?, ?, ?, ?, ?)""",
+            (a["id"], old_location, new_location, schedule_date, schedule_time, move_reason, mover, now))
+        log_activity("sitepulse", "move", cur.lastrowid, "scheduled", asset_id=a["id"],
+                     field="location", old_value=old_location, new_value=new_location)
+        db.commit()
+        try:
+            send_whatsapp_group_message(
+                f"📅 Move scheduled: {a['name']}\n{old_location or '—'} → {new_location}\n"
+                f"Date: {schedule_date}{' at ' + schedule_time if schedule_time else ''}\n"
+                + (f"Reason: {move_reason}\n" if move_reason else "") + f"Scheduled by: {mover}",
+                chat_id=whatsapp_chat_id_for_site(new_location, old_location) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID)
+        except Exception as exc:
+            print(f"[atlas] equipment move WhatsApp notification failed: {exc}")
+        return {"id": a["id"], "equipment": a["name"], "from": old_location,
+                "to": new_location, "scheduled": True, "schedule_date": schedule_date,
+                "schedule_time": schedule_time, "status": new_status}
+
+    effective_date = schedule_date or today
+    db.execute("UPDATE sitepulse_assets SET status=?, location=?, hours_mileage=?, updated_at=? WHERE id=?",
+               (new_status, new_location, reading, now, a["id"]))
+    cur = db.execute(
+        """INSERT INTO sitepulse_usage_log (asset_id, entry_kind, from_location, to_location,
+           mileage_hours, move_status, status_at_move, moved_by, scheduled_date, applied_at,
+           out_date, created_by, created_at)
+           VALUES (?, 'move', ?, ?, ?, 'Applied', ?, ?, ?, ?, ?, ?, ?)""",
+        (a["id"], old_location, new_location, reading, new_status, mover,
+         effective_date, now, effective_date, mover, now))
+    log_activity("sitepulse", "move", cur.lastrowid, "created", asset_id=a["id"],
+                 field="location", old_value=old_location, new_value=new_location)
+    db.commit()
+    try:
+        send_whatsapp_group_message(
+            f"📍 {a['name']} moved\n{old_location or '—'} → {new_location}\n"
+            f"Hours/Mileage: {reading or '—'}\nBy: {mover}",
+            chat_id=whatsapp_chat_id_for_site(new_location, old_location) or ULTRAMSG_SITEPULSE_GROUP_CHAT_ID)
+    except Exception as exc:
+        print(f"[atlas] equipment move WhatsApp notification failed: {exc}")
+    return {"id": a["id"], "equipment": a["name"], "from": old_location,
+            "to": new_location, "scheduled": False, "effective_date": effective_date,
+            "status": new_status}
+
+
+register_tool(
+    name="move_equipment",
+    description="Move or schedule a move for a piece of Equipment Center equipment.",
+    parameters={
+        "equipment_name": {"type": "string", "required": True},
+        "to_location": {"type": "string", "required": True},
+        "status": {"type": "string", "required": False, "enum": SP_STATUS_OPTIONS},
+        "schedule_date": {"type": "string", "required": False},
+        "schedule_time": {"type": "string", "required": False},
+        "hours_mileage": {"type": "string", "required": False},
+        "move_reason": {"type": "string", "required": False},
+    },
+    permission="action:equipment_center:manage",
+    atlas_permission="module:atlas:view",
+    kind="write", confirm=True, handler=_tool_move_equipment,
+)
+
+
 def _atlas_native_tool_declarations(only=None):
     """Builds the Anthropic `tools=[...]` declaration array for ONLY the
     tools in ATLAS_NATIVE_TOOLS_ALLOWED -- never the full ATLAS_TOOLS
@@ -6982,7 +7089,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v5.7-unified-intelligence-routing"
+ATLAS_BUILD = "TEST-v6.0-atlas-brain-foundation"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8091,6 +8198,8 @@ def stream_atlas_turn(user_text, draft):
     mode = state.get("mode", "chat")
     fields = state.get("fields", {}) if mode == "concrete_request" else {}
     action = state.get("action", "none")
+    action_tool = state.get("tool") if mode == "buildiq_action" else None
+    action_params = state.get("params", {}) if mode == "buildiq_action" else {}
 
     new_history = history + [
         {"role": "user", "content": user_text},
@@ -8100,7 +8209,25 @@ def stream_atlas_turn(user_text, draft):
 
     submitted_id = None
     pending_write_token = None
-    if action == "submit":
+    if action == "submit" and mode == "buildiq_action" and action_tool:
+        tool = ATLAS_TOOLS.get(action_tool)
+        clean_params, param_error = _validate_tool_params(tool, action_params) if tool else (None, "unsupported action")
+        if not tool or tool.kind != "write" or param_error:
+            extra = " I still need a little more information before I can do that."
+            yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
+            spoken += extra
+        else:
+            proposal_hash = hashlib.sha256(json.dumps({"tool": action_tool, "params": clean_params}, sort_keys=True).encode("utf-8")).hexdigest()
+            prior_pending = draft.get("pending_submit")
+            if prior_pending and prior_pending.get("fields_hash") == proposal_hash:
+                pending_write_token = secrets.token_hex(16)
+                new_draft["pending_write"] = {"token": pending_write_token, "tool_name": action_tool, "params": dict(clean_params), "issued_at": time.time()}
+            else:
+                extra = " **Confirm this action** and I’ll do it."
+                yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
+                spoken += extra
+                new_draft["pending_submit"] = {"fields_hash": proposal_hash}
+    elif action == "submit":
         needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
         needs_lab = fields.get("lab_required") == "Yes"
         needs_drilling = fields.get("drilling_required") == "Yes"
@@ -8771,17 +8898,18 @@ def assistant_confirm_write():
         # execute_tool ever runs -- this is what actually makes it
         # atomic. Any other request for this same token, concurrent or
         # not, will now find pending_write already gone.
-        fields = dict(pending.get("fields", {}))
+        tool_name = pending.get("tool_name") or "create_concrete_request"
+        tool_params = dict(pending.get("params", pending.get("fields", {})))
         draft["pending_write"] = None
         draft["pending_submit"] = None
 
-    result = execute_tool("create_concrete_request", fields, current_user, confirmed=True,
+    result = execute_tool(tool_name, tool_params, current_user, confirmed=True,
                           session_context=draft.get("project_context", {}))
     if result.success:
         draft["mode"] = "chat"
         draft["fields"] = {}
         draft["history"] = []
-        return {"success": True, "submitted_id": result.data.get("submitted_id"), "error": None}
+        return {"success": True, "submitted_id": result.data.get("submitted_id") or result.data.get("id"), "error": None, "result": result.data}
     return {"success": False, "submitted_id": None, "error": result.error}
 
 
