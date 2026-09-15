@@ -814,6 +814,7 @@ def save_generated_pdf(pdf_bytes):
 
 
 
+@app.template_filter("friendly_dt")
 def friendly_dt(iso_str):
     """'2026-08-18T19:36:00' (stored UTC) -> 'August 18, 2026 at 2:36 PM'
     (converted to Houston/Central time, DST-aware)."""
@@ -7092,7 +7093,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v6.2.1-equipment-action-continuity"
+ATLAS_BUILD = "TEST-v6.2.2-equipment-confirmation-phrases"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7313,9 +7314,11 @@ def _atlas_is_simple_confirmation(text):
     normalized = " ".join(normalized.split())
     return normalized in {
         "yes", "yes move it", "yes do it", "do it", "go ahead",
-        "go ahead and do it", "move it", "confirm", "confirmed",
-        "yes submit it", "submit it", "that's right", "thats right",
-        "yes that's right", "yes thats right",
+        "yes go ahead", "yes go ahead and do it", "go ahead and do it",
+        "go ahead with it", "yes go ahead with it", "move it",
+        "yes please", "yes please do it", "confirm", "confirmed",
+        "yes confirm", "yes confirmed", "yes submit it", "submit it",
+        "that's right", "thats right", "yes that's right", "yes thats right",
     }
 
 
