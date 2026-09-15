@@ -1,80 +1,62 @@
 {% extends "base.html" %}
 {% block content %}
 <style>
-    .cap-group-row { display:flex; justify-content:space-between; align-items:center; padding:16px; border:1px solid var(--line); border-radius:8px; margin-bottom:10px; text-decoration:none; color:var(--text); box-sizing:border-box; gap:8px; }
-    .cap-group-row:hover { border-color:var(--gold); }
-    .cap-group-name { font-size:16px; font-weight:600; min-width:0; overflow-wrap:break-word; }
-    .cap-group-count { color:var(--text-dim); font-size:14px; white-space:nowrap; flex-shrink:0; }
-    @media (max-width:400px) { .cap-group-row { padding:14px 10px; } }
-    .cap-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; }
-    .cap-status-badge { display:inline-block; background:rgba(201,162,75,0.14); color:var(--gold); font-size:12px; font-weight:600; padding:3px 10px; border-radius:4px; margin-top:4px; }
-    .cap-section-title { font-size:13px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin:22px 0 10px; }
-    .cap-summary-toggle { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; border:1px solid var(--line); border-radius:8px; cursor:pointer; box-sizing:border-box; }
-    .cap-summary-toggle span:first-child { font-size:15px; font-weight:600; }
-    .cap-summary-body { display:none; padding:14px 0 0; }
-    .cap-summary-body.open { display:block; }
-    .cap-field { width:100%; font-size:15px; padding:10px; box-sizing:border-box; margin-bottom:12px; }
-    .cap-field-label { font-size:12px; color:var(--text-dim); display:block; margin-bottom:4px; }
+.capture-shell{max-width:980px;margin:0 auto;padding-bottom:96px}.cap-top{display:flex;align-items:center;gap:12px;margin-bottom:8px}.cap-title{margin:4px 0 0}.cap-sub{color:var(--text-dim);margin:2px 0 14px}.cap-section-label{font-size:12px;color:var(--gold);text-transform:uppercase;letter-spacing:.08em;margin:20px 0 8px}.cap-add{display:flex;gap:8px;margin-bottom:12px}.cap-add input{flex:1;min-width:0;font-size:16px;padding:12px}.cap-add button{white-space:nowrap}.group{border:1px solid var(--line);border-radius:10px;margin:10px 0;background:rgba(15,27,42,.55);overflow:hidden}.group summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px;cursor:pointer;font-size:17px;font-weight:700}.group summary::-webkit-details-marker{display:none}.group summary .count{font-size:13px;font-weight:400;color:var(--text-dim)}.group-body{padding:0 14px 16px;border-top:1px solid var(--line)}.photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:14px 0}.photo{min-width:0}.photo img{width:100%;height:150px;object-fit:cover;border-radius:8px;display:block}.note{width:100%;box-sizing:border-box;margin-top:6px;padding:9px;font-size:14px}.capture-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.capture-actions label{display:flex;align-items:center;justify-content:center;min-height:48px;cursor:pointer}.capture-actions input{display:none}.save-state{font-size:13px;color:var(--teal);min-height:18px;margin-top:8px}.summary-box{border:1px solid var(--line);border-radius:10px;padding:0 14px}.summary-box summary{cursor:pointer;padding:15px 0;font-weight:600}.summary-box textarea{width:100%;box-sizing:border-box;padding:10px;margin:4px 0 10px;font-size:15px}.review-btn{display:block;width:100%;box-sizing:border-box;text-align:center;margin-top:22px;padding:16px;font-size:17px}.empty{color:var(--text-dim);padding:8px 0}.spinner{opacity:.55;pointer-events:none}
+@media(max-width:600px){.capture-shell{padding-bottom:86px}.cap-add{display:grid;grid-template-columns:1fr}.photo-grid{grid-template-columns:repeat(2,1fr)}.photo img{height:120px}.group summary{padding:15px 13px}.capture-actions{grid-template-columns:1fr 1fr}}
 </style>
+<div class="capture-shell">
 <span class="rc-eyebrow">SitePulse</span>
-<div style="margin-bottom:8px;">
-    <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">&larr; Back to Reports</a>
-</div>
-<h1 style="word-break:break-word;">{{ project['name'] }}</h1>
-<p class="sub">Field Report &middot; {{ (report['report_date'] if report else None) or 'Today' }}</p>
-{% if report %}<span class="cap-status-badge">{{ report['status'] }}</span>{% endif %}
+<div class="cap-top"><a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">&larr; Reports</a></div>
+<h1 class="cap-title">{{ project['name'] }}</h1>
+<p class="cap-sub">Field Report &middot; {{ (report['report_date'] if report else None) or 'Today' }} {% if report %}&middot; {{ report['status'] }}{% endif %}</p>
 
-<div class="cap-section-title">Report Sections</div>
+<div class="cap-section-label">Photo Sections</div>
 {% if can_author %}
-<div class="card" style="margin-bottom:16px;">
-    <form method="POST" action="{{ url_for('sitepulse_group_create', project_id=project['id']) }}" style="display:flex; gap:10px; flex-wrap:wrap;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="text" name="name" placeholder="New section name (e.g. Plumbing)" style="flex:2; min-width:0; width:100%; box-sizing:border-box; font-size:15px; padding:10px;">
-        <button type="submit" class="btn btn-gold cap-btn-lg" style="flex:1; min-width:0; width:100%; box-sizing:border-box;">+ Add Section</button>
-    </form>
-</div>
+<form class="cap-add" method="POST" action="{{ url_for('sitepulse_group_create', project_id=project['id']) }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input name="name" required placeholder="Add section — Plumbing, Electrical, Glass…"><button class="btn btn-gold" type="submit">+ Add Section</button>
+</form>
 {% endif %}
 
-<div>
-    {% for g in groups %}
-    <a class="cap-group-row" href="{{ url_for('sitepulse_group_detail', group_id=g['id']) }}{% if report_id %}?report_id={{ report_id }}{% endif %}">
-        <span class="cap-group-name">{{ g['name'] }}</span>
-        <span class="cap-group-count">{{ group_counts.get(g['id'], 0) }} photo{{ 's' if group_counts.get(g['id'], 0) != 1 }} &rsaquo;</span>
-    </a>
-    {% else %}
-    <p class="sub">No sections yet. Add one above to start documenting the site.</p>
-    {% endfor %}
+{% for g in groups %}
+{% set photos = group_report_photos.get(g['id'], []) %}
+<details class="group" id="group-{{ g['id'] }}" {% if request.args.get('open_group')|int == g['id'] %}open{% endif %}>
+<summary><span>{{ g['name'] }}</span><span class="count" id="count-{{ g['id'] }}">{{ photos|length }} photo{{ 's' if photos|length != 1 }} &rsaquo;</span></summary>
+<div class="group-body">
+<div class="photo-grid" id="photos-{{ g['id'] }}">
+{% for p in photos %}
+<div class="photo"><img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" loading="lazy"><input class="note" data-caption-url="{{ url_for('sitepulse_photo_caption', photo_id=p['id']) }}" value="{{ p['caption'] or '' }}" placeholder="Add note (optional)"></div>
+{% endfor %}
 </div>
+{% if not photos %}<div class="empty" id="empty-{{ g['id'] }}">No photos yet. Start with Camera or Photo Library.</div>{% endif %}
+{% if can_author and report_id %}
+<form class="upload-form" data-group="{{ g['id'] }}" action="{{ url_for('sitepulse_group_photos_upload', group_id=g['id']) }}" method="POST" enctype="multipart/form-data">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="report_id" value="{{ report_id }}">
+<div class="capture-actions">
+<label class="btn btn-gold">📷 Camera<input class="camera-input" type="file" name="photos" accept="image/*" capture="environment" multiple></label>
+<label class="btn">▣ Photo Library<input class="library-input" type="file" name="photos" accept="image/*" multiple></label>
+</div><div class="save-state" id="state-{{ g['id'] }}"></div>
+</form>
+{% endif %}
+</div></details>
+{% else %}<p class="empty">Add your first photo section to start the report.</p>{% endfor %}
 
 {% if report_id %}
-<div class="cap-section-title">Daily Summary <span class="sub" style="text-transform:none; letter-spacing:normal;">(Optional)</span></div>
-<div class="cap-summary-toggle" onclick="document.getElementById('summaryBody').classList.toggle('open'); this.querySelector('.cap-chevron').textContent = document.getElementById('summaryBody').classList.contains('open') ? '\u2304' : '\u203a';">
-    <span>Work Completed, Issues, Next Steps, Notes</span>
-    <span class="cap-chevron" style="font-size:20px; color:var(--text-dim);">&rsaquo;</span>
-</div>
-<div class="card cap-summary-body" id="summaryBody">
-    {% if can_author %}
-    <form method="POST" action="{{ url_for('sitepulse_report_detail', report_id=report_id) }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <label class="cap-field-label">Work Completed</label>
-        <textarea class="cap-field" name="work_completed" rows="2">{{ (report['work_completed'] if report else '') or '' }}</textarea>
-        <label class="cap-field-label">Issues / Blockers</label>
-        <div style="display:flex; gap:8px; margin-bottom:8px;">
-            <label style="font-size:13px;"><input type="radio" name="has_issues" value="no" {{ 'checked' if not (report and report['has_issues']) }}> No Issues</label>
-            <label style="font-size:13px;"><input type="radio" name="has_issues" value="yes" {{ 'checked' if report and report['has_issues'] }}> Add Issue</label>
-        </div>
-        <textarea class="cap-field" name="issues_blockers" rows="2" placeholder="Describe the issue">{{ (report['issues_blockers'] if report else '') or '' }}</textarea>
-        <label class="cap-field-label">Next Steps</label>
-        <textarea class="cap-field" name="next_steps" rows="2">{{ (report['next_steps'] if report else '') or '' }}</textarea>
-        <label class="cap-field-label">General Notes</label>
-        <textarea class="cap-field" name="general_notes" rows="2">{{ (report['general_notes'] if report else '') or '' }}</textarea>
-        <button type="submit" class="btn btn-sm">Save Daily Summary</button>
-    </form>
-    {% endif %}
-</div>
-
-<div style="margin-top:24px;">
-    <a href="{{ url_for('sitepulse_report_preview', report_id=report_id) }}" target="_blank" class="btn btn-gold cap-btn-lg" style="width:100%; text-align:center; display:block; box-sizing:border-box;">Generate Report</a>
-</div>
+<div class="cap-section-label">Daily Summary <span style="text-transform:none;letter-spacing:0;color:var(--text-dim)">(optional)</span></div>
+<details class="summary-box"><summary>Work completed, issues, next steps & notes</summary>
+{% if can_author %}<form method="POST" action="{{ url_for('sitepulse_report_detail', report_id=report_id) }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<label>Work Completed</label><textarea name="work_completed" rows="2">{{ report['work_completed'] or '' }}</textarea>
+<label>Issues / Blockers</label><div style="display:flex;gap:18px;margin:8px 0"><label><input type="radio" name="has_issues" value="no" {{ 'checked' if not report['has_issues'] }}> No Issues</label><label><input type="radio" name="has_issues" value="yes" {{ 'checked' if report['has_issues'] }}> Add Issue</label></div><textarea name="issues_blockers" rows="2" placeholder="Describe issue only if needed">{{ report['issues_blockers'] or '' }}</textarea>
+<label>Next Steps</label><textarea name="next_steps" rows="2">{{ report['next_steps'] or '' }}</textarea>
+<label>General Notes</label><textarea name="general_notes" rows="2">{{ report['general_notes'] or '' }}</textarea>
+<button class="btn" type="submit">Save Summary</button></form>{% endif %}</details>
+<a href="{{ url_for('sitepulse_report_review', report_id=report_id) }}" class="btn btn-gold review-btn">Review Report &rarr;</a>
 {% endif %}
+</div>
+<script>
+function uploadFiles(form, files){if(!files||!files.length)return;const gid=form.dataset.group,state=document.getElementById('state-'+gid),fd=new FormData();fd.append('csrf_token',form.querySelector('[name=csrf_token]').value);fd.append('report_id',form.querySelector('[name=report_id]').value);Array.from(files).forEach(f=>fd.append('photos',f));form.classList.add('spinner');state.textContent='Saving '+files.length+' photo'+(files.length===1?'':'s')+'…';fetch(form.action,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}}).then(r=>{if(!r.ok)throw new Error('Upload failed');return r.json()}).then(data=>{const grid=document.getElementById('photos-'+gid);(data.photos||[]).forEach(p=>{const d=document.createElement('div');d.className='photo';d.innerHTML='<img loading="lazy"><input class="note" placeholder="Add note (optional)">';d.querySelector('img').src=p.file_url;const inp=d.querySelector('input');inp.dataset.captionUrl='/sitepulse/photos/'+p.id+'/caption';wireNote(inp);grid.appendChild(d)});const empty=document.getElementById('empty-'+gid);if(empty)empty.remove();const n=grid.children.length;document.getElementById('count-'+gid).textContent=n+' photo'+(n===1?'':'s')+' ›';state.textContent=data.saved_count+' photo'+(data.saved_count===1?'':'s')+' saved ✓';form.classList.remove('spinner')}).catch(()=>{state.textContent='Could not save photos. Try again.';form.classList.remove('spinner')})}
+document.querySelectorAll('.upload-form').forEach(form=>form.querySelectorAll('input[type=file]').forEach(inp=>inp.addEventListener('change',()=>{uploadFiles(form,inp.files);inp.value=''})));
+function wireNote(inp){let t;inp.addEventListener('input',()=>{clearTimeout(t);t=setTimeout(()=>{const fd=new FormData();fd.append('csrf_token','{{ csrf_token() }}');fd.append('caption',inp.value);fetch(inp.dataset.captionUrl,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'}})},500)})}
+document.querySelectorAll('.note').forEach(wireNote);
+</script>
 {% endblock %}

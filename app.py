@@ -4162,6 +4162,8 @@ def sitepulse_photo_caption(photo_id):
     caption = (request.form.get("caption") or "").strip() or None
     db.execute("UPDATE project_field_photos SET caption = ? WHERE id = ?", (caption, photo_id))
     db.commit()
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"ok": True, "photo_id": photo_id, "caption": caption or ""})
     return redirect(url_for("sitepulse_project_photos", project_id=photo["project_id"]))
 
 
@@ -4307,8 +4309,19 @@ def sitepulse_project_capture(project_id):
             (report_id,)
         ).fetchall()
         group_counts = {r["group_id"]: r["c"] for r in rows}
+    group_report_photos = {}
+    if report_id:
+        rows = db.execute(
+            """SELECT pfp.* FROM report_photo_selections rps
+               JOIN project_field_photos pfp ON pfp.id = rps.photo_id
+               WHERE rps.report_id = ? AND pfp.archived = 0
+               ORDER BY rps.sort_order, pfp.id""",
+            (report_id,)
+        ).fetchall()
+        for photo in rows:
+            group_report_photos.setdefault(photo["group_id"], []).append(photo)
     return render_template("sitepulse/reports/capture.html", project=project, groups=groups, group_counts=group_counts,
-                            report_id=report_id, report=report, can_author=can_author)
+                            group_report_photos=group_report_photos, report_id=report_id, report=report, can_author=can_author)
 
 
 @app.route("/sitepulse/project/<int:project_id>/groups", methods=["POST"])
@@ -4419,6 +4432,7 @@ def sitepulse_group_photos_upload(group_id):
     uploader = current_user.name or current_user.email
     files = request.files.getlist("photos")
     saved_count = 0
+    saved_photos = []
     next_sort = 0
     if report_row:
         max_sort = db.execute("SELECT MAX(sort_order) m FROM report_photo_selections WHERE report_id = ?", (report_id,)).fetchone()["m"]
@@ -4431,6 +4445,11 @@ def sitepulse_group_photos_upload(group_id):
                 (group["project_id"], filename, secure_filename(f.filename or ""), uploader, now, group_id)
             )
             saved_count += 1
+            saved_photos.append({
+                "id": cur.lastrowid,
+                "file_url": url_for("sitepulse_photo_file", photo_id=cur.lastrowid),
+                "caption": ""
+            })
             if report_row:
                 db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, cur.lastrowid, next_sort))
                 next_sort += 1
@@ -4439,6 +4458,8 @@ def sitepulse_group_photos_upload(group_id):
         log_activity("sitepulse_reporting", "field_photos", group["project_id"], "photos_added", field="group_id", new_value=f"{group_id} ({saved_count})")
         db.commit()
         flash(f"{saved_count} photo(s) saved to {group['name']}.")
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"ok": True, "saved_count": saved_count, "photos": saved_photos, "group_id": group_id})
     return redirect(url_for("sitepulse_group_detail", group_id=group_id, report_id=report_id))
 
 
@@ -4659,6 +4680,27 @@ def _build_report_snapshot(db, report):
         "groups": groups_ordered,
     }
 
+
+
+@app.route("/sitepulse/reports/<int:report_id>/review")
+@login_required
+def sitepulse_report_review(report_id):
+    """Human-friendly review screen before submission. The report is already
+    being built during capture; this page reviews it rather than pretending
+    that a separate 'Generate Report' step creates it."""
+    db = get_db()
+    report = _report_row(db, report_id)
+    if not report:
+        flash("Report not found.", "error")
+        return redirect(url_for("inventory_home"))
+    if not _reporting_authorized_for_project(report["project_id"]):
+        return ("Forbidden", 403)
+    if report["status"] != "Draft":
+        return redirect(url_for("sitepulse_report_detail", report_id=report_id))
+    project = db.execute("SELECT id, name, client, address FROM tracker_projects WHERE id = ?", (report["project_id"],)).fetchone()
+    snapshot = _build_report_snapshot(db, report)
+    return render_template("sitepulse/reports/review.html", project=project, report=report, snapshot=snapshot,
+                           can_author=_reporting_can_author())
 
 
 @app.route("/sitepulse/reports/<int:report_id>/preview")
