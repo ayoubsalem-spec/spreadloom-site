@@ -6310,11 +6310,13 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None):
         "- If they say cancel/never mind/start over, clear the fields and "
         "set mode back to chat.\n\n"
         "BUILDIQ ACTION rules:\n"
-        "- You can safely operate BuildIQ actions that the server exposes. For this TEST build, equipment moves are the first non-Concrete action enabled.\n"
+        "- You can safely operate BuildIQ actions that the server exposes. Never discuss rollout status, development phases, or call Atlas an early build; simply describe what you can currently do.\n"
         "- If the person asks to move or schedule a move for equipment, collect only what is missing: equipment name and destination are required; date/time/status/hours/reason are optional.\n"
         "- Never claim the move happened before confirmation. First summarize the proposed move clearly and ask for confirmation.\n"
         "- When proposing or confirming an equipment move, emit mode=buildiq_action, tool=move_equipment, action=submit, and params containing the exact known values. On the confirmation turn, repeat the exact same tool/params.\n"
-        "- The server independently checks the user's Equipment Center permission and Atlas access before executing. If permission is denied, say so plainly.\n\n"
+        "- The server independently checks the user's Equipment Center permission and Atlas access before executing. If permission is denied, say so plainly.\n"
+        "- For project summaries, lead with the answer and current activity. Summarize counts/status first; do not dump every row of a long list unless the person asks for details. Use tables only when they genuinely improve comparison.\n"
+        "- Never describe historical location evidence as a current location. Clearly distinguish current assignment/location from recent or historical activity.\n\n"
         "PROJECT CONTEXT rules:\n"
         "- If the person establishes or changes which project they're "
         "talking about (e.g. \"let's talk about Patel Farm\", \"switch to "
@@ -7300,6 +7302,40 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
     yield ("stop", stop_reason)
 
 
+def _atlas_is_simple_confirmation(text):
+    """Conservative, deterministic confirmation recognizer for a pending
+    BuildIQ write. Only short standalone affirmations qualify; action details
+    are never inferred here. The exact action was already captured on the
+    prior proposal turn.
+    """
+    normalized = re.sub(r"[^a-z0-9\s']", " ", (text or "").lower())
+    normalized = " ".join(normalized.split())
+    return normalized in {
+        "yes", "yes move it", "yes do it", "do it", "go ahead",
+        "go ahead and do it", "move it", "confirm", "confirmed",
+        "yes submit it", "submit it", "that's right", "thats right",
+        "yes that's right", "yes thats right",
+    }
+
+
+def _atlas_is_simple_cancel(text):
+    normalized = re.sub(r"[^a-z0-9\s']", " ", (text or "").lower())
+    normalized = " ".join(normalized.split())
+    return normalized in {"no", "cancel", "cancel it", "never mind", "nevermind", "don't do it", "do not do it", "stop"}
+
+
+def _atlas_equipment_current_location(equipment_name):
+    """Read-only preview helper; never mutates Equipment Center."""
+    if not (equipment_name or "").strip():
+        return None
+    db = get_db()
+    needle = equipment_name.strip()
+    rows = db.execute("SELECT name, location FROM sitepulse_assets WHERE lower(name)=lower(?)", (needle,)).fetchall()
+    if len(rows) == 1:
+        return rows[0]["location"] or "Unassigned"
+    return None
+
+
 def stream_atlas_turn(user_text, draft):
     """Streams one turn of the assistant as an SSE generator. Yields
     'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
@@ -7375,6 +7411,42 @@ def stream_atlas_turn(user_text, draft):
 
     snapshot = gather_business_snapshot()
     system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"))
+
+    # Deterministic second-turn confirmation for non-form BuildIQ actions.
+    # The prior turn stores the exact validated tool + params server-side.
+    # A short explicit confirmation reuses that snapshot instead of asking
+    # the model to reconstruct parameters from conversation text.
+    _pending_action = draft.get("pending_submit") or {}
+    if _pending_action.get("tool_name") and _pending_action.get("params"):
+        if _atlas_is_simple_cancel(user_text):
+            draft["pending_submit"] = None
+            draft["pending_write"] = None
+            prior_history = list(draft.get("history", []))
+            prior_history.extend([
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": "Canceled. Nothing was changed."},
+            ])
+            draft["history"] = prior_history[-20:]
+            yield f"data: {json.dumps({'type': 'delta', 'text': 'Canceled. Nothing was changed.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': 'chat', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+            return
+        if _atlas_is_simple_confirmation(user_text):
+            pending_write_token = secrets.token_hex(16)
+            draft["pending_write"] = {
+                "token": pending_write_token,
+                "tool_name": _pending_action["tool_name"],
+                "params": dict(_pending_action["params"]),
+                "issued_at": time.time(),
+            }
+            prior_history = list(draft.get("history", []))
+            prior_history.extend([
+                {"role": "user", "content": user_text},
+                {"role": "assistant", "content": "Confirmed. I’ll do that now."},
+            ])
+            draft["history"] = prior_history[-20:]
+            yield f"data: {json.dumps({'type': 'delta', 'text': 'Confirmed. I’ll do that now.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'mode': 'buildiq_action', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': pending_write_token})}\n\n"
+            return
 
     history = draft.get("history", [])[-20:]  # last 10 exchanges, real turns
     messages = [{"role": h["role"], "content": h["content"]} for h in history]
@@ -8223,10 +8295,20 @@ def stream_atlas_turn(user_text, draft):
                 pending_write_token = secrets.token_hex(16)
                 new_draft["pending_write"] = {"token": pending_write_token, "tool_name": action_tool, "params": dict(clean_params), "issued_at": time.time()}
             else:
-                extra = " **Confirm this action** and I’ll do it."
+                location_note = ""
+                if action_tool == "move_equipment":
+                    current_location = _atlas_equipment_current_location(clean_params.get("equipment_name"))
+                    if current_location:
+                        location_note = f"\n\n**Current location:** {current_location}"
+                extra = location_note + "\n\n**Confirm this action** and I’ll do it."
                 yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
                 spoken += extra
-                new_draft["pending_submit"] = {"fields_hash": proposal_hash}
+                new_draft["pending_submit"] = {
+                    "fields_hash": proposal_hash,
+                    "tool_name": action_tool,
+                    "params": dict(clean_params),
+                    "issued_at": time.time(),
+                }
     elif action == "submit":
         needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
         needs_lab = fields.get("lab_required") == "Yes"

@@ -735,7 +735,13 @@
             body: JSON.stringify({ token: writeToken })
         }).then(function (r) { return r.json(); }).then(function (data) {
             if (data.success) {
-                addMessage('system', '\u2713 Concrete request #' + data.submitted_id + ' submitted');
+                var r = data.result || {};
+                if (r.equipment && r.to) {
+                    var whenText = r.scheduled ? (' scheduled for ' + (r.schedule_date || 'later')) : ' moved';
+                    addMessage('system', '\u2713 ' + r.equipment + whenText + ' to ' + r.to);
+                } else {
+                    addMessage('system', '\u2713 Concrete request #' + data.submitted_id + ' submitted');
+                }
                 resetBtn.style.display = 'none';
             } else if (data.error) {
                 addMessage('error', "Actually, I couldn't submit that -- " + data.error);
