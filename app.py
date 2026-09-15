@@ -6255,7 +6255,7 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
-def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None):
+def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
     messages array now, not flattened into this text.
@@ -6283,13 +6283,14 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         context_line = "CURRENT PROJECT CONTEXT: none established yet.\n\n"
     active_context_line = "ACTIVE CONVERSATION CONTEXT: " + (json.dumps(active_context, ensure_ascii=False) if active_context else "none") + "\n\n"
     entity_matches_line = "TURN ENTITY MATCHES (live cross-BuildIQ lookup): " + (json.dumps(turn_entity_matches, ensure_ascii=False) if turn_entity_matches else "none") + "\n\n"
+    entity_memory_line = "CANONICAL CONVERSATION ENTITY MEMORY: " + (json.dumps(entity_memory, ensure_ascii=False) if entity_memory else "none") + "\n\n"
     return (
         "You are Atlas, the assistant inside BuildIQ. If asked your name, "
         "say Atlas. People talk to you like they'd talk to Claude or "
         "ChatGPT -- hold a real conversation, remember what's already been "
         "said, and don't repeat a question that's already been answered. "
         "Replies may be read aloud by text-to-speech, so keep them "
-        "conversational. In text mode, use short headings, bullets and whitespace whenever they make the answer easier to scan. Never dump a dense wall of text. In voice mode, keep it natural and concise.\n\n"
+        "conversational. MATCH THE PERSON'S TONE naturally: if they are casual, playful, use slang, or joke, you may answer with the same warmth and a light emoji when it genuinely fits; if they are serious, stay professional. Never sound like a canned workflow bot, and never force slang or emojis. In text mode, use short headings, bullets and whitespace whenever they make the answer easier to scan. Never dump a dense wall of text. In voice mode, keep it natural and concise.\n\n"
         "You can do two things:\n"
         "1. Answer questions about the current state of the business using "
         "the snapshot below.\n"
@@ -6332,7 +6333,9 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- If one meaning clearly fits, answer from it. If multiple materially different meanings fit and context does not disambiguate, briefly present the relevant meanings or ask one useful clarification.\n"
         "- A location is a real business entity even when it is not a Project Hunt project.\n"
         "- ENTITY-FIRST ANSWER PRIORITY: if the live matches show the subject exists as a location/equipment/other entity, LEAD with what it IS and the useful facts about it. Do not lead with an irrelevant negative such as 'I couldn't find a project called X'. Mention absence from another entity type only if it materially helps answer the question.\n"
-        "- Never claim you learned or will remember a correction permanently unless the underlying system actually persisted such a change.\n\n"
+        "- Never claim you learned or will remember a correction permanently unless the underlying system actually persisted such a change.\n"
+        "- CANONICAL ENTITY CONTINUITY: names, aliases, addresses, pronouns, and relational phrases can refer to the same real BuildIQ entity. Use CANONICAL CONVERSATION ENTITY MEMORY to keep those facts together instead of treating each display string as a new thing. If live data and memory conflict, live BuildIQ state wins; explain the conflict rather than guessing.\n"
+        "- If an entity memory entry already contains a validated property such as a location address, do not claim the property is missing merely because a later compact lookup omits it. Distinguish 'not returned in this lookup' from 'not stored'.\n\n"
         "BUILDIQ SELF-KNOWLEDGE (canonical product map):\n"
         "- BuildIQ is the construction operating system. Core lifecycle: Project Hunt -> Project Deployment -> SitePulse -> Finance.\n"
         "- Project Hunt: chase/win work; bid and opportunity tracking.\n"
@@ -6405,7 +6408,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "BuildIQ doesn't actually store.\n"
         "- If no project is established yet, this tool has nothing to "
         "act on -- establish one with set_project_context first.\n\n"
-        + context_line + active_context_line + entity_matches_line +
+        + context_line + active_context_line + entity_matches_line + entity_memory_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
         + json.dumps(fields) + "\n\n"
@@ -7120,7 +7123,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.0-atlas-unified-brain"
+ATLAS_BUILD = "TEST-v9.1-canonical-memory-natural-voice"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7388,6 +7391,32 @@ def _atlas_classify_pending_reply(text, api_key):
     return verdict if verdict in {"CONFIRM", "CANCEL", "OTHER"} else "OTHER"
 
 
+def _atlas_natural_confirmation_ack(text, api_key):
+    """Generate only the conversational acknowledgement for an already-classified
+    confirmation. It cannot alter parameters, authorize, execute, or report success.
+    """
+    fallback="Confirmed — I’ll do that now."
+    if not api_key:
+        return fallback
+    system=(
+        "Write ONE very short acknowledgement to a user who just confirmed a pending action. "
+        "Match their tone naturally, like a good conversational assistant: casual can be casual, playful can be lightly playful, and one emoji is okay when it genuinely fits. "
+        "Do NOT say the action succeeded, completed, moved, submitted, or is done. Only say you are proceeding now. "
+        "Do not mention software, classifiers, tokens, or implementation. Output only the acknowledgement, max 14 words."
+    )
+    pieces=[]; failed=False
+    for ev in _stream_claude_completion(api_key, system, [{"role":"user","content":text or ""}], tools=None, max_tokens=32, label="CONFIRM_ACK_STYLE"):
+        if ev[0]=="text_delta": pieces.append(ev[1])
+        elif ev[0]=="error": failed=True
+    out="".join(pieces).strip()
+    if failed or not out or len(out)>140:
+        return fallback
+    # Defense in depth: never let stylistic generation claim authoritative success.
+    if re.search(r"\b(done|completed|succeeded|successful|moved|submitted|created|approved)\b", out, re.I):
+        return fallback
+    return out
+
+
 def _atlas_equipment_current_location(equipment_name):
     """Read-only preview helper; never mutates Equipment Center."""
     if not (equipment_name or "").strip():
@@ -7476,14 +7505,80 @@ def _atlas_ground_location(raw_destination, strict=False):
         return raw
     return None if strict else raw
 
-def _atlas_cross_entity_matches(subject):
+def _atlas_location_label(value):
+    """Return a useful short label for a location without discarding its full value.
+    For street addresses this derives the street name generically (e.g. a numbered
+    'Red Bluff Rd ...' address -> 'Red Bluff'). This is display/alias metadata only.
+    """
+    raw=(value or "").strip()
+    if not raw:
+        return raw
+    m=re.match(r"^\s*\d+[A-Za-z-]*\s+(.+?)\s+(?:rd|road|st|street|ave|avenue|blvd|boulevard|dr|drive|ln|lane|ct|court|hwy|highway|way)\b", raw, re.I)
+    if m:
+        return m.group(1).strip()
+    return raw
+
+
+def _atlas_remember_location(draft, value, aliases=None):
+    """Keep one canonical conversational identity for a validated BuildIQ place.
+    Memory is session-scoped context, not a database write and not authorization.
+    """
+    raw=(value or "").strip()
+    if not raw:
+        return None
+    aliases=[a.strip() for a in (aliases or []) if isinstance(a,str) and a.strip()]
+    label=_atlas_location_label(raw)
+    if label and _atlas_norm_entity_text(label) != _atlas_norm_entity_text(raw):
+        aliases.append(label)
+    norms={_atlas_norm_entity_text(x) for x in [raw,label,*aliases] if x}
+    memory=list(draft.get("entity_memory") or [])
+    hit=None
+    for ent in memory:
+        if ent.get("type") != "location":
+            continue
+        existing={_atlas_norm_entity_text(x) for x in [ent.get("canonical_value"),ent.get("label"),*(ent.get("aliases") or [])] if x}
+        if norms & existing:
+            hit=ent; break
+    is_address=bool(re.search(r"\b\d{2,6}\s+", raw))
+    if hit is None:
+        hit={"type":"location","canonical_value":raw,"label":label or raw,"aliases":[]}
+        memory.append(hit)
+    elif is_address and not re.search(r"\b\d{2,6}\s+", hit.get("canonical_value") or ""):
+        # Prefer the richer full address as canonical when both are known.
+        old=hit.get("canonical_value")
+        if old: aliases.append(old)
+        hit["canonical_value"]=raw
+        hit["label"]=label or hit.get("label") or raw
+    merged=[]; seen=set()
+    for a in [*(hit.get("aliases") or []), *aliases, label]:
+        n=_atlas_norm_entity_text(a)
+        if a and n and n not in seen and n != _atlas_norm_entity_text(hit.get("canonical_value")):
+            seen.add(n); merged.append(a)
+    hit["aliases"]=merged[:12]
+    draft["entity_memory"]=memory[-30:]
+    return dict(hit)
+
+
+def _atlas_memory_matches(subject, draft):
+    ns=_atlas_norm_entity_text(subject)
+    if not ns:
+        return []
+    out=[]
+    for ent in (draft or {}).get("entity_memory", []) or []:
+        vals=[ent.get("canonical_value"), ent.get("label"), *(ent.get("aliases") or [])]
+        if any(ns == _atlas_norm_entity_text(v) or ns in _atlas_norm_entity_text(v) or _atlas_norm_entity_text(v) in ns for v in vals if v):
+            out.append({"type":ent.get("type"),"name":ent.get("label") or ent.get("canonical_value"),"canonical_value":ent.get("canonical_value"),"aliases":ent.get("aliases") or [],"source":"validated_conversation_entity_memory"})
+    return out[:8]
+
+
+def _atlas_cross_entity_matches(subject, draft=None):
     """Search BuildIQ across entity types before Atlas assumes what a name means.
     Read-only. Returns compact grounded facts for the reasoning model.
     """
     q=(subject or '').strip()
     if not q:
         return []
-    db=get_db(); like=f"%{q}%"; matches=[]
+    db=get_db(); like=f"%{q}%"; matches=_atlas_memory_matches(q, draft)
     # Projects
     for r in db.execute("SELECT id,name,client,status FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
         matches.append({"type":"project","id":r["id"],"name":r["name"],"client":r["client"],"status":r["status"]})
@@ -7584,9 +7679,9 @@ def _atlas_semantic_equipment_move(text, draft, api_key):
 
     kind=(obj.get("destination_kind") or "unknown").strip().lower()
     if kind == "previous_location":
-        destination=(active.get("previous_location") or "").strip()
+        destination=((active.get("previous_location_entity") or {}).get("canonical_value") or active.get("previous_location") or "").strip()
     elif kind == "current_location":
-        destination=(active.get("current_location") or asset["location"] or "").strip()
+        destination=((active.get("current_location_entity") or {}).get("canonical_value") or active.get("current_location") or asset["location"] or "").strip()
     elif kind == "explicit":
         destination=(obj.get("destination_text") or "").strip()
     else:
@@ -7627,10 +7722,13 @@ def _atlas_store_move_proposal(draft, asset, destination, user_text):
     if not tool or tool.kind != "write" or err:
         return None
     proposal_hash=hashlib.sha256(json.dumps({"tool":"move_equipment","params":clean}, sort_keys=True).encode("utf-8")).hexdigest()
+    from_entity=_atlas_remember_location(draft, asset["location"] or "Unassigned") if (asset["location"] or "").strip() else None
+    to_entity=_atlas_remember_location(draft, canonical)
     draft["pending_write"]=None
     draft["pending_submit"]={
         "fields_hash":proposal_hash,"tool_name":"move_equipment","params":dict(clean),"issued_at":time.time(),
-        "action_context":{"entity_type":"equipment","name":asset["name"],"previous_location":asset["location"] or "Unassigned","proposed_location":canonical},
+        "action_context":{"entity_type":"equipment","name":asset["name"],"previous_location":asset["location"] or "Unassigned","proposed_location":canonical,
+                          "previous_location_entity":from_entity,"proposed_location_entity":to_entity},
     }
     return (
         "**Move Equipment**\n\n"
@@ -7665,7 +7763,7 @@ def _atlas_parse_equipment_move(text, draft):
     m = re.match(rf"^{verb}\s+({referent})\s+back(?:\s+(?:there|over there))?\s*[.!?]*$", raw, re.I)
     if m:
         if active.get("entity_type") == "equipment" and active.get("name") and active.get("previous_location"):
-            return _atlas_resolve_equipment(active["name"], draft), active["previous_location"]
+            return _atlas_resolve_equipment(active["name"], draft), ((active.get("previous_location_entity") or {}).get("canonical_value") or active["previous_location"])
         return None, None
 
     # "move it back to Red Bluff" / "send it to Peninsula".
@@ -7770,9 +7868,9 @@ def stream_atlas_turn(user_text, draft):
     if not (draft.get("pending_submit") or {}).get("tool_name"):
         _subject = _atlas_semantic_subject(user_text, api_key)
         if _subject:
-            _turn_entity_matches = _atlas_cross_entity_matches(_subject)
+            _turn_entity_matches = _atlas_cross_entity_matches(_subject, draft)
             _atlas_trace("ENTITY_LOOKUP", subject=_subject[:80], matches=len(_turn_entity_matches))
-    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches)
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"))
 
     # Deterministic second-turn confirmation for non-form BuildIQ actions.
     # The prior turn stores the exact validated tool + params server-side.
@@ -7803,13 +7901,14 @@ def stream_atlas_turn(user_text, draft):
                 "issued_at": time.time(),
                 "action_context": dict(_pending_action.get("action_context") or {}),
             }
+            _ack = _atlas_natural_confirmation_ack(user_text, api_key)
             prior_history = list(draft.get("history", []))
             prior_history.extend([
                 {"role": "user", "content": user_text},
-                {"role": "assistant", "content": "Confirmed. I’ll do that now."},
+                {"role": "assistant", "content": _ack},
             ])
             draft["history"] = prior_history[-40:]
-            yield f"data: {json.dumps({'type': 'delta', 'text': 'Confirmed. I’ll do that now.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'delta', 'text': _ack})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': 'buildiq_action', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': pending_write_token})}\n\n"
             return
         # OTHER may be a correction/replacement action ("actually send it to Red Bluff")
@@ -8656,7 +8755,7 @@ def stream_atlas_turn(user_text, draft):
         {"role": "assistant", "content": spoken},
     ]
     new_draft = {"mode": mode, "fields": fields, "history": new_history[-40:], "pending_submit": None, "project_context": project_context,
-                 "active_context": dict(draft.get("active_context") or {})}
+                 "active_context": dict(draft.get("active_context") or {}), "entity_memory": list(draft.get("entity_memory") or [])}
 
     submitted_id = None
     pending_write_token = None
@@ -9021,7 +9120,7 @@ def assistant_ask():
     if not token:
         token = secrets.token_hex(16)
         session["atlas_token"] = token
-    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "interaction_mode": "text"})
+    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "entity_memory": [], "interaction_mode": "text"})
 
     # PERSISTENT HISTORY: a conversation_id may already be attached to
     # this in-memory session (set by /assistant/conversations/new or by
@@ -9230,7 +9329,7 @@ def assistant_conversations_new():
     # unless the person explicitly re-selects/resolves one in the new
     # conversation -- matching the explicit requirement that New Chat
     # never silently carries context forward.
-    ATLAS_SESSIONS[token] = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "interaction_mode": "text", "conversation_id": None}
+    ATLAS_SESSIONS[token] = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "entity_memory": [], "interaction_mode": "text", "conversation_id": None}
     return {"ok": True}
 
 
@@ -9272,6 +9371,7 @@ def assistant_conversation_open(conversation_id):
         "conversation_id": conversation["id"],
         "project_context": restored_context,
         "active_context": {},
+        "entity_memory": [],
         "history": [{"role": m["role"], "content": m["content"]} for m in messages][-20:],
     }
 
@@ -9374,11 +9474,17 @@ def assistant_confirm_write():
         # Preserve conversational continuity after a write. Clearing history here
         # made pronouns like "it" impossible immediately after a successful action.
         if tool_name == "move_equipment" and action_context.get("name"):
+            actual_from=(result.data or {}).get("from") or action_context.get("previous_location")
+            actual_to=(result.data or {}).get("to") or tool_params.get("to_location")
+            from_entity=_atlas_remember_location(draft, actual_from, aliases=[(action_context.get("previous_location_entity") or {}).get("label") or ""]) if actual_from else None
+            to_entity=_atlas_remember_location(draft, actual_to, aliases=[(action_context.get("proposed_location_entity") or {}).get("label") or ""]) if actual_to else None
             draft["active_context"] = {
                 "entity_type": "equipment",
                 "name": action_context["name"],
-                "previous_location": action_context.get("previous_location"),
-                "current_location": tool_params.get("to_location"),
+                "previous_location": actual_from,
+                "previous_location_entity": from_entity,
+                "current_location": actual_to,
+                "current_location_entity": to_entity,
                 "last_action": "move_equipment",
                 "last_action_status": "completed",
             }
