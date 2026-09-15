@@ -4288,7 +4288,15 @@ def sitepulse_project_capture(project_id):
         flash("Project not found.", "error")
         return redirect(url_for("inventory_home"))
     can_author = _reporting_can_author()
-    report_id = _get_or_create_draft_report(db, project_id) if can_author else None
+    if can_author:
+        report_id = _get_or_create_draft_report(db, project_id)
+    else:
+        # View-only users can see an existing Draft's sections (read-
+        # only) but must never trigger creating a new one as a side
+        # effect of merely looking.
+        existing = db.execute("SELECT id FROM field_reports WHERE project_id = ? AND status = 'Draft' ORDER BY created_at DESC LIMIT 1", (project_id,)).fetchone()
+        report_id = existing["id"] if existing else None
+    report = _report_row(db, report_id) if report_id else None
     groups = db.execute("SELECT * FROM field_photo_groups WHERE project_id = ? ORDER BY id", (project_id,)).fetchall()
     group_counts = {}
     if report_id:
@@ -4300,7 +4308,7 @@ def sitepulse_project_capture(project_id):
         ).fetchall()
         group_counts = {r["group_id"]: r["c"] for r in rows}
     return render_template("sitepulse/reports/capture.html", project=project, groups=groups, group_counts=group_counts,
-                            report_id=report_id, can_author=can_author)
+                            report_id=report_id, report=report, can_author=can_author)
 
 
 @app.route("/sitepulse/project/<int:project_id>/groups", methods=["POST"])
@@ -4494,6 +4502,15 @@ def sitepulse_report_detail(report_id):
     can_author = _reporting_can_author()
     can_manage = _reporting_can_manage()
 
+    if request.method == "GET" and report["status"] == "Draft":
+        # V1.4 UX CORRECTION: the old flat Select-Photos/long-form
+        # editor is no longer the primary Draft experience -- Report
+        # Sections/photo groups ARE the report. A Draft always resolves
+        # into the group-based builder now; this page's own POST
+        # handler (for saving header/Daily-Summary fields) and its
+        # Submitted read-only rendering are unaffected.
+        return redirect(url_for("sitepulse_project_capture", project_id=report["project_id"], report_id=report_id))
+
     if request.method == "POST":
         if report["status"] != "Draft":
             flash("This report has been submitted -- reopen it before editing.", "error")
@@ -4520,12 +4537,21 @@ def sitepulse_report_detail(report_id):
              (request.form.get("general_notes") or "").strip() or None,
              editor, now, report_id)
         )
-        selected_ids = request.form.getlist("selected_photos")
-        db.execute("DELETE FROM report_photo_selections WHERE report_id = ?", (report_id,))
-        for idx, pid in enumerate(selected_ids):
-            photo = db.execute("SELECT id FROM project_field_photos WHERE id = ? AND project_id = ?", (pid, report["project_id"])).fetchone()
-            if photo:
-                db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, photo["id"], idx))
+        # V1.4 UX CORRECTION: photo selection no longer happens through
+        # this form at all (the old flat Select-Photos grid is gone
+        # from the primary Draft builder) -- selection now happens
+        # exclusively via group capture / explicit add / explicit
+        # remove. Only touch report_photo_selections here if a caller
+        # actually submitted that field (keeps old-style test/API
+        # callers working); a normal Daily-Summary-only save must never
+        # silently wipe out group-captured photos.
+        if "selected_photos" in request.form or request.form.getlist("selected_photos"):
+            selected_ids = request.form.getlist("selected_photos")
+            db.execute("DELETE FROM report_photo_selections WHERE report_id = ?", (report_id,))
+            for idx, pid in enumerate(selected_ids):
+                photo = db.execute("SELECT id FROM project_field_photos WHERE id = ? AND project_id = ?", (pid, report["project_id"])).fetchone()
+                if photo:
+                    db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, photo["id"], idx))
         db.commit()
         flash("Report saved.")
         return redirect(url_for("sitepulse_report_detail", report_id=report_id))

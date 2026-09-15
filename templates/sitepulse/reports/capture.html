@@ -5,46 +5,76 @@
     .cap-group-row:hover { border-color:var(--gold); }
     .cap-group-name { font-size:16px; font-weight:600; min-width:0; overflow-wrap:break-word; }
     .cap-group-count { color:var(--text-dim); font-size:14px; white-space:nowrap; flex-shrink:0; }
-    @media (max-width:400px) {
-        .cap-group-row { padding:14px 10px; }
-    }
+    @media (max-width:400px) { .cap-group-row { padding:14px 10px; } }
     .cap-btn-lg { font-size:16px; padding:14px 18px; min-height:48px; }
+    .cap-status-badge { display:inline-block; background:rgba(201,162,75,0.14); color:var(--gold); font-size:12px; font-weight:600; padding:3px 10px; border-radius:4px; margin-top:4px; }
+    .cap-section-title { font-size:13px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px; margin:22px 0 10px; }
+    .cap-summary-toggle { display:flex; justify-content:space-between; align-items:center; padding:14px 16px; border:1px solid var(--line); border-radius:8px; cursor:pointer; box-sizing:border-box; }
+    .cap-summary-toggle span:first-child { font-size:15px; font-weight:600; }
+    .cap-summary-body { display:none; padding:14px 0 0; }
+    .cap-summary-body.open { display:block; }
+    .cap-field { width:100%; font-size:15px; padding:10px; box-sizing:border-box; margin-bottom:12px; }
+    .cap-field-label { font-size:12px; color:var(--text-dim); display:block; margin-bottom:4px; }
 </style>
 <span class="rc-eyebrow">SitePulse</span>
 <div style="margin-bottom:8px;">
-    <a href="{{ url_for('sitepulse_reports_select_project') }}" class="btn btn-sm">&larr; Back to Field Reports</a>
+    <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">&larr; Back to Reports</a>
 </div>
 <h1 style="word-break:break-word;">{{ project['name'] }}</h1>
-<p class="sub">Today's Field Capture — {{ project['client'] or '' }}</p>
+<p class="sub">Field Report &middot; {{ (report['report_date'] if report else None) or 'Today' }}</p>
+{% if report %}<span class="cap-status-badge">{{ report['status'] }}</span>{% endif %}
 
-<div style="display:flex; gap:10px; flex-wrap:wrap; margin:14px 0;">
-    <a href="{{ url_for('sitepulse_project_reports', project_id=project['id']) }}" class="btn btn-sm">View Reports</a>
-</div>
-
+<div class="cap-section-title">Report Sections</div>
 {% if can_author %}
-<div class="card">
+<div class="card" style="margin-bottom:16px;">
     <form method="POST" action="{{ url_for('sitepulse_group_create', project_id=project['id']) }}" style="display:flex; gap:10px; flex-wrap:wrap;">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <input type="text" name="name" placeholder="New group name (e.g. Plumbing)" style="flex:2; min-width:0; width:100%; box-sizing:border-box; font-size:15px; padding:10px;">
-        <button type="submit" class="btn btn-gold cap-btn-lg" style="flex:1; min-width:0; width:100%; box-sizing:border-box;">+ Add Group</button>
+        <input type="text" name="name" placeholder="New section name (e.g. Plumbing)" style="flex:2; min-width:0; width:100%; box-sizing:border-box; font-size:15px; padding:10px;">
+        <button type="submit" class="btn btn-gold cap-btn-lg" style="flex:1; min-width:0; width:100%; box-sizing:border-box;">+ Add Section</button>
     </form>
 </div>
 {% endif %}
 
-<div style="margin-top:16px;">
+<div>
     {% for g in groups %}
     <a class="cap-group-row" href="{{ url_for('sitepulse_group_detail', group_id=g['id']) }}{% if report_id %}?report_id={{ report_id }}{% endif %}">
         <span class="cap-group-name">{{ g['name'] }}</span>
         <span class="cap-group-count">{{ group_counts.get(g['id'], 0) }} photo{{ 's' if group_counts.get(g['id'], 0) != 1 }} &rsaquo;</span>
     </a>
     {% else %}
-    <p class="sub">No groups yet. Add one above to start documenting the site.</p>
+    <p class="sub">No sections yet. Add one above to start documenting the site.</p>
     {% endfor %}
 </div>
 
 {% if report_id %}
-<div style="margin-top:20px;">
-    <a href="{{ url_for('sitepulse_report_detail', report_id=report_id) }}" class="btn btn-gold cap-btn-lg" style="width:100%; text-align:center; display:block; box-sizing:border-box;">Generate Report</a>
+<div class="cap-section-title">Daily Summary <span class="sub" style="text-transform:none; letter-spacing:normal;">(Optional)</span></div>
+<div class="cap-summary-toggle" onclick="document.getElementById('summaryBody').classList.toggle('open'); this.querySelector('.cap-chevron').textContent = document.getElementById('summaryBody').classList.contains('open') ? '\u2304' : '\u203a';">
+    <span>Work Completed, Issues, Next Steps, Notes</span>
+    <span class="cap-chevron" style="font-size:20px; color:var(--text-dim);">&rsaquo;</span>
+</div>
+<div class="card cap-summary-body" id="summaryBody">
+    {% if can_author %}
+    <form method="POST" action="{{ url_for('sitepulse_report_detail', report_id=report_id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <label class="cap-field-label">Work Completed</label>
+        <textarea class="cap-field" name="work_completed" rows="2">{{ (report['work_completed'] if report else '') or '' }}</textarea>
+        <label class="cap-field-label">Issues / Blockers</label>
+        <div style="display:flex; gap:8px; margin-bottom:8px;">
+            <label style="font-size:13px;"><input type="radio" name="has_issues" value="no" {{ 'checked' if not (report and report['has_issues']) }}> No Issues</label>
+            <label style="font-size:13px;"><input type="radio" name="has_issues" value="yes" {{ 'checked' if report and report['has_issues'] }}> Add Issue</label>
+        </div>
+        <textarea class="cap-field" name="issues_blockers" rows="2" placeholder="Describe the issue">{{ (report['issues_blockers'] if report else '') or '' }}</textarea>
+        <label class="cap-field-label">Next Steps</label>
+        <textarea class="cap-field" name="next_steps" rows="2">{{ (report['next_steps'] if report else '') or '' }}</textarea>
+        <label class="cap-field-label">General Notes</label>
+        <textarea class="cap-field" name="general_notes" rows="2">{{ (report['general_notes'] if report else '') or '' }}</textarea>
+        <button type="submit" class="btn btn-sm">Save Daily Summary</button>
+    </form>
+    {% endif %}
+</div>
+
+<div style="margin-top:24px;">
+    <a href="{{ url_for('sitepulse_report_preview', report_id=report_id) }}" target="_blank" class="btn btn-gold cap-btn-lg" style="width:100%; text-align:center; display:block; box-sizing:border-box;">Generate Report</a>
 </div>
 {% endif %}
 {% endblock %}

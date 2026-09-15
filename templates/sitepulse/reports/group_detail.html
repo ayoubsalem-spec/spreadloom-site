@@ -11,7 +11,7 @@
 </style>
 <span class="rc-eyebrow">SitePulse</span>
 <div style="margin-bottom:8px;">
-    <a href="{{ url_for('sitepulse_project_capture', project_id=project['id']) }}{% if report_id %}?report_id={{ report_id }}{% endif %}" class="btn btn-sm">&larr; Back to Field Capture</a>
+    <a href="{{ url_for('sitepulse_project_capture', project_id=project['id']) }}{% if report_id %}?report_id={{ report_id }}{% endif %}" class="btn btn-sm">&larr; Field Report</a>
 </div>
 <h1 style="word-break:break-word;">{{ group['name'] }}</h1>
 <p class="sub">{{ project['name'] }}</p>
