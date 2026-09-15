@@ -41,7 +41,7 @@ from reportlab.lib.utils import ImageReader
 from PIL import Image, ImageOps
 import pillow_heif
 pillow_heif.register_heif_opener()
-from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session, Response, stream_with_context
+from flask import Flask, render_template, request, redirect, url_for, flash, g, send_file, send_from_directory, session, Response, stream_with_context, jsonify
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_wtf import CSRFProtect
 from werkzeug.security import generate_password_hash, check_password_hash
