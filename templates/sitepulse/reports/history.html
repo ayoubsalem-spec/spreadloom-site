@@ -25,9 +25,9 @@
     {% for r in reports %}
     <div class="rep-history-row">
         <div>
-            <div style="font-weight:600; font-size:15px;">{{ r['report_date'] or 'No date' }}</div>
+            <div style="font-weight:600; font-size:15px;">Daily Field Report — {% if r['report_date'] %}{{ r['report_date'][5:7] }}/{{ r['report_date'][8:10] }}/{{ r['report_date'][0:4] }}{% else %}No date{% endif %}</div>
             <div class="sub" style="margin-top:2px;">
-                {{ r['status'] }}{% if r['current_version_number'] %} · Version {{ r['current_version_number'] }}{% endif %}
+                {{ r['status'] }}{% if r['current_version_number'] %} · Version {{ r['current_version_number'] }}{% endif %} · Report #{{ r['id'] }}
                 {% if r['created_by'] %} · {{ r['created_by'] }}{% endif %}
             </div>
         </div>

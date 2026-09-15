@@ -218,15 +218,15 @@ document.querySelectorAll(".share-pdf-btn").forEach(function (btn) {
     <div class="dep-section-title">Site Logistics</div>
     {% if mode == 'edit' %}
     <div class="dep-row"><div class="dep-row-label">Office needed?</div>
-        <select class="dep-row-select" name="office_needed"><option value="no" {{ 'selected' if not deployment['office_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['office_needed'] }}>Yes</option></select>
+        <select class="dep-row-select" name="office_needed"><option value="" {% if not deployment['office_needed_answered'] %}selected{% endif %}>Select...</option><option value="yes" {% if deployment['office_needed_answered'] and deployment['office_needed'] %}selected{% endif %}>Yes</option><option value="no" {% if deployment['office_needed_answered'] and not deployment['office_needed'] %}selected{% endif %}>No</option></select>
     </div>
     <div class="dep-row"><div class="dep-row-label">Storage Container needed?</div>
-        <select class="dep-row-select" name="storage_container_needed"><option value="no" {{ 'selected' if not deployment['storage_container_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['storage_container_needed'] }}>Yes</option></select>
+        <select class="dep-row-select" name="storage_container_needed"><option value="" {% if not deployment['storage_container_needed_answered'] %}selected{% endif %}>Select...</option><option value="yes" {% if deployment['storage_container_needed_answered'] and deployment['storage_container_needed'] %}selected{% endif %}>Yes</option><option value="no" {% if deployment['storage_container_needed_answered'] and not deployment['storage_container_needed'] %}selected{% endif %}>No</option></select>
     </div>
     <div class="dep-field-row" style="margin-top:8px;"><div><label>Working Hours</label><input class="dep-field-inline" type="text" name="working_hours" value="{{ deployment['working_hours'] or '' }}"></div></div>
 
     <div class="dep-row"><div class="dep-row-label">Dumpster needed?</div>
-        <select class="dep-row-select" name="dumpster_needed" onchange="toggleCond('dumpster', this.value)"><option value="no" {{ 'selected' if not deployment['dumpster_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['dumpster_needed'] }}>Yes</option></select>
+        <select class="dep-row-select" name="dumpster_needed" onchange="toggleCond('dumpster', this.value)"><option value="" {% if not deployment['dumpster_needed_answered'] %}selected{% endif %}>Select...</option><option value="yes" {% if deployment['dumpster_needed_answered'] and deployment['dumpster_needed'] %}selected{% endif %}>Yes</option><option value="no" {% if deployment['dumpster_needed_answered'] and not deployment['dumpster_needed'] %}selected{% endif %}>No</option></select>
     </div>
     <div id="dumpster_cond" class="dep-conditional" style="display:{{ 'block' if deployment['dumpster_needed'] else 'none' }};">
         <div class="dep-field-row">
@@ -236,7 +236,7 @@ document.querySelectorAll(".share-pdf-btn").forEach(function (btn) {
     </div>
 
     <div class="dep-row"><div class="dep-row-label">Portable Toilets needed?</div>
-        <select class="dep-row-select" name="toilets_needed" onchange="toggleCond('toilets', this.value)"><option value="no" {{ 'selected' if not deployment['toilets_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['toilets_needed'] }}>Yes</option></select>
+        <select class="dep-row-select" name="toilets_needed" onchange="toggleCond('toilets', this.value)"><option value="" {% if not deployment['toilets_needed_answered'] %}selected{% endif %}>Select...</option><option value="yes" {% if deployment['toilets_needed_answered'] and deployment['toilets_needed'] %}selected{% endif %}>Yes</option><option value="no" {% if deployment['toilets_needed_answered'] and not deployment['toilets_needed'] %}selected{% endif %}>No</option></select>
     </div>
     <div id="toilets_cond" class="dep-conditional" style="display:{{ 'block' if deployment['toilets_needed'] else 'none' }};">
         <div class="dep-field-row">
@@ -246,7 +246,7 @@ document.querySelectorAll(".share-pdf-btn").forEach(function (btn) {
     </div>
 
     <div class="dep-row"><div class="dep-row-label">Temp Fence needed?</div>
-        <select class="dep-row-select" name="fence_needed" onchange="toggleCond('fence', this.value)"><option value="no" {{ 'selected' if not deployment['fence_needed'] }}>No</option><option value="yes" {{ 'selected' if deployment['fence_needed'] }}>Yes</option></select>
+        <select class="dep-row-select" name="fence_needed" onchange="toggleCond('fence', this.value)"><option value="" {% if not deployment['fence_needed_answered'] %}selected{% endif %}>Select...</option><option value="yes" {% if deployment['fence_needed_answered'] and deployment['fence_needed'] %}selected{% endif %}>Yes</option><option value="no" {% if deployment['fence_needed_answered'] and not deployment['fence_needed'] %}selected{% endif %}>No</option></select>
     </div>
     <div id="fence_cond" class="dep-conditional" style="display:{{ 'block' if deployment['fence_needed'] else 'none' }};">
         <div class="dep-field-row">
@@ -260,12 +260,12 @@ document.querySelectorAll(".share-pdf-btn").forEach(function (btn) {
         <div><label>Parking Rules</label><textarea class="dep-field-inline" name="parking_rules" rows="2">{{ deployment['parking_rules'] or '' }}</textarea></div>
     </div>
     {% else %}
-    <div class="dep-view-row"><span class="lbl">Office needed</span><span>{{ 'Yes' if deployment['office_needed'] else 'No' }}</span></div>
-    <div class="dep-view-row"><span class="lbl">Storage Container needed</span><span>{{ 'Yes' if deployment['storage_container_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Office needed</span><span>{{ 'Yes' if deployment['office_needed'] else ('No' if deployment['office_needed_answered'] else '—') }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Storage Container needed</span><span>{{ 'Yes' if deployment['storage_container_needed'] else ('No' if deployment['storage_container_needed_answered'] else '—') }}</span></div>
     <div class="dep-view-row"><span class="lbl">Working Hours</span><span>{{ deployment['working_hours'] or '—' }}</span></div>
-    <div class="dep-view-row"><span class="lbl">Dumpster</span><span>{{ 'Yes — ' ~ (deployment['dumpster_size'] or '—') ~ ' by ' ~ (deployment['dumpster_date'] or '—') if deployment['dumpster_needed'] else 'No' }}</span></div>
-    <div class="dep-view-row"><span class="lbl">Portable Toilets</span><span>{{ 'Yes — Qty ' ~ (deployment['toilets_qty'] or '—') ~ ' by ' ~ (deployment['toilets_date'] or '—') if deployment['toilets_needed'] else 'No' }}</span></div>
-    <div class="dep-view-row"><span class="lbl">Temp Fence</span><span>{{ 'Yes — ' ~ (deployment['fence_linear_feet'] or '—') ~ ' ln ft by ' ~ (deployment['fence_date'] or '—') if deployment['fence_needed'] else 'No' }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Dumpster</span><span>{{ 'Yes — ' ~ (deployment['dumpster_size'] or '—') ~ ' by ' ~ (deployment['dumpster_date'] or '—') if deployment['dumpster_needed'] else ('No' if deployment['dumpster_needed_answered'] else '—') }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Portable Toilets</span><span>{{ 'Yes — Qty ' ~ (deployment['toilets_qty'] or '—') ~ ' by ' ~ (deployment['toilets_date'] or '—') if deployment['toilets_needed'] else ('No' if deployment['toilets_needed_answered'] else '—') }}</span></div>
+    <div class="dep-view-row"><span class="lbl">Temp Fence</span><span>{{ 'Yes — ' ~ (deployment['fence_linear_feet'] or '—') ~ ' ln ft by ' ~ (deployment['fence_date'] or '—') if deployment['fence_needed'] else ('No' if deployment['fence_needed_answered'] else '—') }}</span></div>
     <div class="dep-view-row"><span class="lbl">Site Access Points</span><span>{{ deployment['site_access_points'] or '—' }}</span></div>
     <div class="dep-view-row"><span class="lbl">Parking Rules</span><span>{{ deployment['parking_rules'] or '—' }}</span></div>
     {% endif %}

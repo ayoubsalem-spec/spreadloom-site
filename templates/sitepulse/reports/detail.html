@@ -27,21 +27,16 @@
     <a href="{{ url_for('sitepulse_project_reports', project_id=report['project_id']) }}" class="btn btn-sm">&larr; Back to Reports</a>
 </div>
 <h1 style="word-break:break-word;">{{ report['project_name'] }}</h1>
-<p class="sub">Field Report — {{ report['report_date'] or 'No date' }}</p>
+<p class="sub">Daily Field Report — {{ report['report_date'] or 'No date' }}</p>
 
 {% if report['status'] == 'Submitted' %}
 <div class="card">
-    <div style="display:flex; flex-wrap:wrap; gap:16px; font-size:14px;">
-        <div><strong>Status:</strong> Submitted</div>
-        {% if versions %}<div><strong>Current Version:</strong> V{{ versions[0]['version_number'] }}</div>{% endif %}
-        <div class="sub"><strong>Created By:</strong> {{ report['created_by'] or '—' }}</div>
-        {% if report['last_edited_by'] and report['last_edited_by'] != report['created_by'] %}<div class="sub"><strong>Last Edited By:</strong> {{ report['last_edited_by'] }}</div>{% endif %}
-    </div>
+    <div style="font-size:14px; font-weight:600;">Submitted · {{ report['report_date'] or 'No date' }}{% if versions %} · Version {{ versions[0]['version_number'] }}{% endif %}</div>
     <div class="rep-actions-bar">
         {% if versions %}
         <button type="button" class="btn btn-gold rep-btn-lg share-report-btn"
             data-pdf-url="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=versions[0]['id']) }}"
-            data-filename="{{ report['project_name'] }} Field Report v{{ versions[0]['version_number'] }}.pdf"
+            data-filename="{{ report['project_name'] }}_Field_Report_{{ report['report_date'] }}_V{{ versions[0]['version_number'] }}.pdf"
             data-title="{{ report['project_name'] }} Field Report">Share</button>
         <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=versions[0]['id']) }}" class="btn rep-btn-lg" target="_blank">Download PDF</a>
         {% endif %}
@@ -109,7 +104,7 @@
             <a href="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=v['id']) }}" class="btn btn-sm" target="_blank">Download PDF</a>
             <button type="button" class="btn btn-sm share-report-btn"
                 data-pdf-url="{{ url_for('sitepulse_report_version_pdf', report_id=report['id'], version_id=v['id']) }}"
-                data-filename="{{ report['project_name'] }} Field Report v{{ v['version_number'] }}.pdf"
+                data-filename="{{ report['project_name'] }}_Field_Report_{{ report['report_date'] }}_V{{ v['version_number'] }}.pdf"
                 data-title="{{ report['project_name'] }} Field Report">Share</button>
         </div>
     </div>

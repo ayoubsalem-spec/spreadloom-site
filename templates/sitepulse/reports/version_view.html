@@ -46,7 +46,7 @@
 {% set has_summary = snapshot['work_completed'] or (snapshot['has_issues'] and snapshot['issues_blockers']) or snapshot['next_steps'] or snapshot['general_notes'] %}
 {% if has_summary %}
 <div class="card" style="margin-top:16px;">
-    <h3 style="font-size:14px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px;">Optional Daily Summary</h3>
+    <h3 style="font-size:14px; color:var(--gold); text-transform:uppercase; letter-spacing:0.5px;">Daily Summary</h3>
     {% if snapshot['work_completed'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">Work Completed</h4><p>{{ snapshot['work_completed'] }}</p>{% endif %}
     {% if snapshot['has_issues'] and snapshot['issues_blockers'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">Issues / Blockers</h4><p>{{ snapshot['issues_blockers'] }}</p>{% endif %}
     {% if snapshot['next_steps'] %}<h4 style="font-size:13px; color:var(--gold); margin-top:12px;">Next Steps</h4><p>{{ snapshot['next_steps'] }}</p>{% endif %}

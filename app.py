@@ -237,6 +237,19 @@ def _pdf_write_wrapped(c, text, x, y, max_width, font="Helvetica", size=10, lead
     return y
 
 
+DARYCET_FORM_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "darycet-form-logo.png")
+
+def _draw_darycet_form_logo(c, x, y, width=1.45 * inch, height=0.46 * inch):
+    """Draw the approved Darycet logo on generated company forms/PDFs.
+    Missing logo must never break document generation.
+    """
+    try:
+        if os.path.exists(DARYCET_FORM_LOGO):
+            c.drawImage(DARYCET_FORM_LOGO, x, y, width=width, height=height, preserveAspectRatio=True, mask='auto', anchor='c')
+    except Exception:
+        pass
+
+
 def build_concrete_order_pdf(r):
     """One-page PDF summary of a placed concrete order -- project, pour
     details, and every vendor/contact, for attaching to the WhatsApp
@@ -255,6 +268,7 @@ def build_concrete_order_pdf(r):
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", 18)
     c.drawString(x, height - 0.65 * inch, "Concrete Order Confirmation")
+    _draw_darycet_form_logo(c, width - x - 1.45 * inch, height - 0.82 * inch)
     c.setFont("Helvetica", 10)
     c.drawString(x, height - 0.9 * inch, f"Darycet International  |  Order placed {date.today().isoformat()}")
 
@@ -334,6 +348,7 @@ def build_purchase_order_pdf(r, items):
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", 18)
     c.drawString(x, height - 0.65 * inch, "Purchase Order Confirmation")
+    _draw_darycet_form_logo(c, width - x - 1.45 * inch, height - 0.82 * inch)
     c.setFont("Helvetica", 10)
     c.drawString(x, height - 0.9 * inch, f"Darycet International  |  Order placed {friendly_date(date.today().isoformat())}")
 
@@ -407,14 +422,26 @@ def build_field_report_pdf(report_info, photos, version_number):
     page_num = [1]
 
     def new_page_header(title):
+        # Every page carries the company logo + compact project identity so
+        # printed/shared pages can never become detached from their project.
         c.setFillColor(navy)
-        c.rect(0, height - 1.1 * inch, width, 1.1 * inch, fill=1, stroke=0)
+        c.rect(0, height - 1.48 * inch, width, 1.48 * inch, fill=1, stroke=0)
         c.setFillColor(colors.white)
-        c.setFont("Helvetica-Bold", 18)
-        c.drawString(x, height - 0.65 * inch, title)
-        c.setFont("Helvetica", 10)
-        c.drawString(x, height - 0.9 * inch, f"BuildIQ SitePulse  |  Version {version_number}  |  {report_info.get('report_date') or ''}")
-        return height - 1.5 * inch
+        c.setFont("Helvetica-Bold", 15)
+        c.drawString(x, height - 0.36 * inch, title)
+        _draw_darycet_form_logo(c, width - x - 1.45 * inch, height - 0.58 * inch)
+        info_y = height - 0.62 * inch
+        c.setFont("Helvetica", 8.5)
+        info_lines = [
+            f"Project: {report_info.get('project_name') or '—'}",
+            f"Client: {report_info.get('project_client') or '—'}",
+            f"Address: {report_info.get('project_address') or '—'}",
+            f"Report Date: {report_info.get('report_date') or '—'}   |   Version: {version_number}",
+        ]
+        for info in info_lines:
+            c.drawString(x, info_y, info)
+            info_y -= 10
+        return height - 1.72 * inch
 
     def footer():
         c.setFont("Helvetica-Oblique", 8)
@@ -460,14 +487,6 @@ def build_field_report_pdf(report_info, photos, version_number):
         y -= 14
         y = _pdf_write_wrapped(c, value or "\u2014", x, y, width - 1.5 * inch, size=10)
         y -= 6
-
-    section("Project")
-    line("Project", report_info.get("project_name"))
-    line("Client", report_info.get("project_client"))
-    line("Address", report_info.get("project_address"))
-    line("Report Date", report_info.get("report_date"))
-    line("Prepared By", report_info.get("submitted_by") or report_info.get("created_by") or report_info.get("author") or "\u2014")
-    line("Total Photos", str(len(photos)) if photos else "0")
 
     missing_photo_ids = []
     # Use the printable width: two large photos side-by-side instead of
@@ -609,6 +628,7 @@ def build_deployment_checklist_pdf(deployment_info, items_by_code, subcontractor
         c.setFillColor(colors.white)
         c.setFont("Helvetica-Bold", 16)
         c.drawString(x, height - 0.55 * inch, f"Project Deployment Checklist{title_suffix}")
+        _draw_darycet_form_logo(c, width - x - 1.45 * inch, height - 0.72 * inch)
         c.setFont("Helvetica", 9)
         c.drawString(x, height - 0.78 * inch, f"{deployment_info.get('project_name') or ''}  |  {deployment_info.get('project_client') or ''}")
         return height - 1.35 * inch
@@ -723,21 +743,21 @@ def build_deployment_checklist_pdf(deployment_info, items_by_code, subcontractor
 
     # 4. SITE LOGISTICS
     section("Site Logistics")
-    field_line("Office Needed", "Yes" if deployment_info.get("office_needed") else "No")
-    field_line("Storage Container Needed", "Yes" if deployment_info.get("storage_container_needed") else "No")
+    field_line("Office Needed", "Yes" if deployment_info.get("office_needed") else ("No" if deployment_info.get("office_needed_answered") else "—"))
+    field_line("Storage Container Needed", "Yes" if deployment_info.get("storage_container_needed") else ("No" if deployment_info.get("storage_container_needed_answered") else "—"))
     field_line("Working Hours", deployment_info.get("working_hours"))
     if deployment_info.get("dumpster_needed"):
         field_line("Dumpster", f"Yes \u2014 {deployment_info.get('dumpster_size') or '?'}, needed by {deployment_info.get('dumpster_date') or '?'}")
     else:
-        field_line("Dumpster Needed", "No")
+        field_line("Dumpster Needed", "No" if deployment_info.get("dumpster_needed_answered") else "—")
     if deployment_info.get("toilets_needed"):
         field_line("Portable Toilets", f"Yes \u2014 Qty {deployment_info.get('toilets_qty') or '?'}, needed by {deployment_info.get('toilets_date') or '?'}")
     else:
-        field_line("Portable Toilets Needed", "No")
+        field_line("Portable Toilets Needed", "No" if deployment_info.get("toilets_needed_answered") else "—")
     if deployment_info.get("fence_needed"):
         field_line("Temp Fence", f"Yes \u2014 {deployment_info.get('fence_linear_feet') or '?'} ln ft, needed by {deployment_info.get('fence_date') or '?'}")
     else:
-        field_line("Temp Fence Needed", "No")
+        field_line("Temp Fence Needed", "No" if deployment_info.get("fence_needed_answered") else "—")
     field_line("Site Access Points", deployment_info.get("site_access_points"))
     field_line("Parking Rules", deployment_info.get("parking_rules"))
 
@@ -1619,11 +1639,11 @@ def init_db():
             inspections_required_list TEXT,
             working_hours TEXT,
             site_access_points TEXT, parking_rules TEXT,
-            office_needed INTEGER DEFAULT 0,
-            storage_container_needed INTEGER DEFAULT 0,
-            dumpster_needed INTEGER DEFAULT 0, dumpster_size TEXT, dumpster_date TEXT,
-            toilets_needed INTEGER DEFAULT 0, toilets_qty TEXT, toilets_date TEXT,
-            fence_needed INTEGER DEFAULT 0, fence_linear_feet TEXT, fence_date TEXT,
+            office_needed INTEGER DEFAULT 0, office_needed_answered INTEGER NOT NULL DEFAULT 0,
+            storage_container_needed INTEGER DEFAULT 0, storage_container_needed_answered INTEGER NOT NULL DEFAULT 0,
+            dumpster_needed INTEGER DEFAULT 0, dumpster_needed_answered INTEGER NOT NULL DEFAULT 0, dumpster_size TEXT, dumpster_date TEXT,
+            toilets_needed INTEGER DEFAULT 0, toilets_needed_answered INTEGER NOT NULL DEFAULT 0, toilets_qty TEXT, toilets_date TEXT,
+            fence_needed INTEGER DEFAULT 0, fence_needed_answered INTEGER NOT NULL DEFAULT 0, fence_linear_feet TEXT, fence_date TEXT,
             started_by TEXT, started_at TEXT,
             deployed_at TEXT,
             created_at TEXT, updated_at TEXT,
@@ -2072,6 +2092,13 @@ def init_db():
         # Field-report UX correction: sections belong to a specific daily
         # report. Nullable preserves all historical V1.4 project groups.
         "ALTER TABLE field_photo_groups ADD COLUMN report_id INTEGER",
+        # Project Checklist UX: distinguish an unanswered Select... from an
+        # explicit No without changing the existing boolean meaning.
+        "ALTER TABLE project_deployments ADD COLUMN office_needed_answered INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project_deployments ADD COLUMN storage_container_needed_answered INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project_deployments ADD COLUMN dumpster_needed_answered INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project_deployments ADD COLUMN toilets_needed_answered INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project_deployments ADD COLUMN fence_needed_answered INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE project_deployments ADD COLUMN inspections_required_list TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
@@ -2095,6 +2122,18 @@ def init_db():
     ]:
         try:
             db.execute(column_sql)
+        except sqlite3.OperationalError:
+            pass
+
+    # Preserve definite historical Yes answers while leaving legacy false
+    # values unanswered. The old UI defaulted false/No, so a stored 0 cannot
+    # prove that a person actually selected No; a stored 1 can safely be
+    # treated as an explicit Yes.
+    for _field in DEPLOYMENT_HEADER_CHECKBOX_FIELDS if 'DEPLOYMENT_HEADER_CHECKBOX_FIELDS' in globals() else (
+        "office_needed", "storage_container_needed", "dumpster_needed", "toilets_needed", "fence_needed"
+    ):
+        try:
+            db.execute(f"UPDATE project_deployments SET {_field}_answered=1 WHERE {_field}=1 AND {_field}_answered=0")
         except sqlite3.OperationalError:
             pass
 
@@ -3741,8 +3780,11 @@ def project_deployment_edit(deployment_id):
             set_clauses.append(f"{field} = ?")
             values.append((request.form.get(field) or "").strip() or None)
         for field in DEPLOYMENT_HEADER_CHECKBOX_FIELDS:
+            answer = request.form.get(field)
             set_clauses.append(f"{field} = ?")
-            values.append(1 if request.form.get(field) == "yes" else 0)
+            values.append(1 if answer == "yes" else 0)
+            set_clauses.append(f"{field}_answered = ?")
+            values.append(1 if answer in ("yes", "no") else 0)
         set_clauses.append("updated_at = ?")
         values.append(now)
         values.append(deployment_id)
@@ -4748,7 +4790,7 @@ def sitepulse_report_preview(report_id):
     snapshot = _build_report_snapshot(db, report)
     snapshot["submitted_by"] = current_user.name or current_user.email
     pdf_bytes, missing_photo_ids = build_field_report_pdf(snapshot, snapshot["photos"], version_number="Preview")
-    return Response(pdf_bytes, mimetype="application/pdf", headers={"Content-Disposition": "inline; filename=preview.pdf"})
+    return Response(pdf_bytes, mimetype="application/pdf", headers={"Content-Disposition": f"inline; filename={secure_filename((snapshot.get('project_name') or 'Project') + '_Field_Report_' + (snapshot.get('report_date') or 'Preview') + '_Preview.pdf')}"})
 
 
 @app.route("/sitepulse/reports/<int:report_id>/submit", methods=["POST"])
@@ -4869,7 +4911,12 @@ def sitepulse_report_version_pdf(version_id, report_id):
         return ("Not found", 404)
     if not _reporting_authorized_for_project(report["project_id"]):
         return ("Forbidden", 403)
-    return send_from_directory(UPLOAD_DIR, secure_filename(version["pdf_filename"]), mimetype="application/pdf")
+    report_info = db.execute("SELECT fr.report_date, tp.name AS project_name FROM field_reports fr JOIN tracker_projects tp ON tp.id=fr.project_id WHERE fr.id=?", (report_id,)).fetchone()
+    stored_path = os.path.join(UPLOAD_DIR, secure_filename(version["pdf_filename"]))
+    if not os.path.exists(stored_path):
+        return ("Not found", 404)
+    safe_name = secure_filename(f"{report_info['project_name']}_Field_Report_{report_info['report_date']}_V{version['version_number']}.pdf")
+    return send_file(stored_path, mimetype="application/pdf", as_attachment=False, download_name=safe_name)
 
 
 @app.route("/sitepulse/reports/<int:report_id>/versions/<int:version_id>")
