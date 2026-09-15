@@ -6316,6 +6316,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- You can safely operate BuildIQ actions that the server exposes. Never discuss rollout status, development phases, or call Atlas an early build; simply describe what you can currently do.\n"
         "- If the person asks to move or schedule a move for equipment, collect only what is missing: equipment name and destination are required; date/time/status/hours/reason are optional.\n"
         "- Never claim the move happened before confirmation. First summarize the proposed move clearly and ask for confirmation.\n"
+        "- NEVER say a BuildIQ write is done, completed, moved, created, submitted, approved, or otherwise successful based on your own reasoning. Only the server-side action executor may authoritatively report write success after the database operation returns success. Before that receipt, describe it only as proposed/pending/confirmed.\n"
         "- When proposing or confirming an equipment move, emit mode=buildiq_action, tool=move_equipment, action=submit, and params containing the exact known values. On the confirmation turn, repeat the exact same tool/params.\n"
         "- The server independently checks the user's Equipment Center permission and Atlas access before executing. If permission is denied, say so plainly.\n"
         "- For project summaries, lead with the answer and current activity. Summarize counts/status first; do not dump every row of a long list unless the person asks for details. Use tables only when they genuinely improve comparison.\n"
@@ -7094,7 +7095,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v6.4-conversation-context"
+ATLAS_BUILD = "TEST-v6.5-conversation-action-engine"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7395,25 +7396,38 @@ def _atlas_resolve_equipment(query, draft):
 
 
 def _atlas_parse_equipment_move(text, draft):
-    """Understand direct and conversational equipment move commands without
-    asking the model to invent the action target. Returns (asset, destination)
-    or (None, None).
+    """Resolve natural equipment-move instructions into deterministic BuildIQ
+    parameters. Conversational wording is allowed, but entity/location values
+    still come only from live BuildIQ data, explicit user text, or the last
+    successfully completed move stored in active_context.
     """
     raw = (text or "").strip()
-    # Conversational follow-up: "move it back" means the last successfully
-    # moved equipment and its prior location, but only when both are known.
-    m = re.match(r"^move\s+(it|that|that one|the same one|same one)\s+back\s*[.!?]*$", raw, re.I)
+    # Remove harmless conversational wrappers so employees do not have to learn
+    # command syntax: "ok move it back", "can you send it back", etc.
+    raw = re.sub(r"^[\s,]*(?:(?:ok(?:ay)?|alright|sure|hey|please)[\s,]+)+", "", raw, flags=re.I)
+    raw = re.sub(r"^(?:atlas[\s,:-]+)?(?:can|could|would|will)\s+you\s+", "", raw, flags=re.I)
+    raw = re.sub(r"^(?:atlas[\s,:-]+)?(?:i\s+(?:need|want)\s+you\s+to\s+)", "", raw, flags=re.I)
+    raw = re.sub(r"^atlas[\s,:-]+", "", raw, flags=re.I)
+    raw = raw.strip()
+
+    active = draft.get("active_context") or {}
+    referent = r"(?:it|that|that one|the same one|same one|the equipment|that equipment)"
+    verb = r"(?:move|send|take|put)"
+
+    # "move/send/take it back" -> previous successful location.
+    m = re.match(rf"^{verb}\s+({referent})\s+back(?:\s+(?:there|over there))?\s*[.!?]*$", raw, re.I)
     if m:
-        active = draft.get("active_context") or {}
         if active.get("entity_type") == "equipment" and active.get("name") and active.get("previous_location"):
             return _atlas_resolve_equipment(active["name"], draft), active["previous_location"]
         return None, None
-    # "move it back to Red Bluff" / "move it to Red Bluff"
-    m = re.match(r"^move\s+(it|that|that one|the same one|same one)(?:\s+back)?\s+to\s+(.+?)\s*[.!?]*$", raw, re.I)
+
+    # "move it back to Red Bluff" / "send it to Peninsula".
+    m = re.match(rf"^{verb}\s+({referent})(?:\s+back)?\s+(?:to|over to|back to)\s+(.+?)\s*[.!?]*$", raw, re.I)
     if m:
         return _atlas_resolve_equipment(m.group(1), draft), m.group(2).strip()
-    # Standard explicit command.
-    m = re.match(r"^move\s+(.+?)\s+to\s+(.+?)\s*[.!?]*$", raw, re.I)
+
+    # Natural explicit command: "send BOMAG over to Peninsula".
+    m = re.match(rf"^{verb}\s+(.+?)\s+(?:to|over to)\s+(.+?)\s*[.!?]*$", raw, re.I)
     if m:
         return _atlas_resolve_equipment(m.group(1).strip(), draft), m.group(2).strip()
     return None, None
@@ -8412,7 +8426,8 @@ def stream_atlas_turn(user_text, draft):
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": spoken},
     ]
-    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:], "pending_submit": None, "project_context": project_context}
+    new_draft = {"mode": mode, "fields": fields, "history": new_history[-20:], "pending_submit": None, "project_context": project_context,
+                 "active_context": dict(draft.get("active_context") or {})}
 
     submitted_id = None
     pending_write_token = None
@@ -8511,7 +8526,7 @@ def stream_atlas_turn(user_text, draft):
     # symptom was every "turn" after the first silently starting a
     # BRAND NEW conversation instead of continuing the same one, since
     # conversation_id kept getting wiped back to absent/None.
-    for _preserved_key in ("conversation_id", "interaction_mode"):
+    for _preserved_key in ("conversation_id", "interaction_mode", "active_context"):
         if _preserved_key in draft and _preserved_key not in new_draft:
             new_draft[_preserved_key] = draft[_preserved_key]
 
