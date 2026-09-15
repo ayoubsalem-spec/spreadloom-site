@@ -191,34 +191,44 @@ _SEVERITY_RANK = {"high": 0, "med": 1, "low": 2}
 
 
 def build_attention_items(user, limit=None):
-    """The single source of attention intelligence. Gathers every
-    candidate item from real data, then keeps only the ones whose
-    source_module the requesting user actually has permission to view --
-    an admin has every module permission and so sees the full set
-    naturally; a SitePulse-only user sees only sitepulse-sourced items,
-    etc. No item is ever returned to a user who lacks the permission for
-    its source_module, regardless of what asked for it (Product
-    Intelligence page or Atlas)."""
+    """The single source of attention intelligence. Each sub-source is
+    now called ONLY if the user already has that source's own
+    permission (via _ATTENTION_SOURCE_PERMISSION, the same map already
+    used elsewhere) -- an unauthorized source's query never runs at
+    all, rather than running and having its items filtered out
+    afterward. This is the retrieval-time security boundary; the final
+    result for any given user is IDENTICAL to the previous retrieve-
+    then-filter behavior (same permission map, same net set of items),
+    but Project-Hunt-protected columns (tracker_projects.status/
+    bid_due_date, queried by _bids_needing_attention/_bids_due_soon)
+    are simply never selected from the database at all for a user
+    without module:project_hunt:view -- not merely omitted from what's
+    returned.
+
+    Shared by three callers, all inside this module: _tool_get_project_
+    status (already gated behind module:project_hunt:view at its own
+    outer permission -- unaffected in practice), the standalone
+    get_attention_items Atlas tool, and _tool_get_project_intelligence's
+    attention scope (the actual target of this fix). No caller outside
+    Atlas uses this function -- confirmed by inspection, not assumed."""
     from app import get_db, user_has_permission
     db = get_db()
 
     candidates = []
-    candidates += _bids_needing_attention(db)
-    candidates += _bids_due_soon(db)
-    candidates += _pours_without_order(db)
-    candidates += _overdue_rentals(db)
-    candidates += _pending_requests(db)
+    if user_has_permission(user, _ATTENTION_SOURCE_PERMISSION["project_hunt"]):
+        candidates += _bids_needing_attention(db)
+        candidates += _bids_due_soon(db)
+    if user_has_permission(user, _ATTENTION_SOURCE_PERMISSION["sitepulse"]):
+        candidates += _pours_without_order(db)
+    if user_has_permission(user, _ATTENTION_SOURCE_PERMISSION["equipment_center"]):
+        candidates += _overdue_rentals(db)
+    if user_has_permission(user, _ATTENTION_SOURCE_PERMISSION["product_intelligence"]):
+        candidates += _pending_requests(db)
 
-    allowed = []
-    for item in candidates:
-        perm_key = _ATTENTION_SOURCE_PERMISSION.get(item["source_module"])
-        if perm_key and user_has_permission(user, perm_key):
-            allowed.append(item)
-
-    allowed.sort(key=lambda x: _SEVERITY_RANK.get(x["severity"], 3))
+    candidates.sort(key=lambda x: _SEVERITY_RANK.get(x["severity"], 3))
     if limit:
-        allowed = allowed[:limit]
-    return allowed
+        candidates = candidates[:limit]
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +239,22 @@ def _find_project(db, project_name=None, project_id=None):
     """Shared project-resolution helper: exact id, or fuzzy name match.
     Returns (project_row_or_None, ambiguous_matches_list). Never guesses
     between multiple plausible matches -- returns them for the caller
-    to disambiguate instead."""
+    to disambiguate instead.
+
+    Retrieves the FULL tracker_projects row (SELECT *), including
+    Project-Hunt-protected columns (status/bid_due_date/estimated_value)
+    -- this is correct and unchanged for its one remaining caller,
+    _tool_get_project_status, which is gated behind
+    module:project_hunt:view at the tool's own outer permission and
+    legitimately needs the full row every time it's reached at all.
+
+    _tool_set_project_context does NOT use this anymore -- see
+    _find_project_identity_only below -- specifically because
+    set_project_context is now reachable by users without Project Hunt
+    access (Equipment Center/SitePulse module permissions also
+    qualify), and it must never retrieve protected columns for them in
+    the first place, not merely omit those columns from what it
+    returns afterward."""
     if project_id:
         row = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
         return row, []
@@ -248,20 +273,59 @@ def _find_project(db, project_name=None, project_id=None):
     return None, []
 
 
+def _find_project_identity_only(db, project_name=None, project_id=None):
+    """SAME resolution semantics as _find_project (exact id, exact
+    name, unique-substring match, ambiguous-list fallback for 2+
+    matches) -- but every SELECT here is scoped to exactly
+    (id, name, client), the approved shared cross-module identity
+    fields, and NEVER touches status/bid_due_date/estimated_value at
+    the SQL level. This is the actual security boundary required: the
+    protected columns are never retrieved for this caller, not merely
+    dropped from the result afterward.
+
+    Used exclusively by _tool_set_project_context, which is now
+    reachable by users without module:project_hunt:view (Equipment
+    Center or SitePulse access also qualify) and never needs anything
+    beyond identity to establish session context regardless of who's
+    calling it.
+
+    _find_project itself (above) is completely unchanged and still
+    used, as before, by _tool_get_project_status -- that tool remains
+    gated behind module:project_hunt:view at its own outer permission
+    and legitimately needs the full row every time."""
+    if project_id:
+        row = db.execute("SELECT id, name, client FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+        return row, []
+    if project_name:
+        exact = db.execute("SELECT id, name, client FROM tracker_projects WHERE name = ?", (project_name,)).fetchone()
+        if exact:
+            return exact, []
+        matches = db.execute(
+            "SELECT id, name FROM tracker_projects WHERE name LIKE ? ORDER BY name LIMIT 8",
+            (f"%{project_name}%",)
+        ).fetchall()
+        if len(matches) == 1:
+            full = db.execute("SELECT id, name, client FROM tracker_projects WHERE id = ?", (matches[0]["id"],)).fetchone()
+            return full, []
+        return None, [dict(m) for m in matches]
+    return None, []
+
+
 def _tool_set_project_context(user, project_name=None, project_id=None):
     """Item 6 -- Atlas canonical project awareness. Resolves a project
-    exactly the same way get_project_status does (same _find_project
-    helper, same never-guess-on-ambiguity behavior) but returns only the
-    identity fields needed to establish session context, not the full
-    status payload. The actual writing of this result into the
-    session's project_context happens in execute_tool() (app.py) --
-    this handler, like every other tool handler, only ever touches the
-    database/read path and returns a plain dict; it has no access to
-    (and does not need) the session itself.
+    using _find_project_identity_only (see its own docstring for why
+    this is a SEPARATE lookup from _find_project's get_project_status
+    path, not the same one filtered afterward) and returns only the
+    identity fields needed to establish session context. The actual
+    writing of this result into the session's project_context happens
+    in execute_tool() (app.py) -- this handler, like every other tool
+    handler, only ever touches the database/read path and returns a
+    plain dict; it has no access to (and does not need) the session
+    itself.
     """
     from app import get_db
     db = get_db()
-    project, ambiguous = _find_project(db, project_name, project_id)
+    project, ambiguous = _find_project_identity_only(db, project_name, project_id)
     if not project:
         if ambiguous:
             return {"found": False, "reason": "ambiguous", "matches": ambiguous}
@@ -541,15 +605,37 @@ def _pi_source_failure(source, project_id, exc):
             pass  # even the stderr fallback must never propagate and take down the overall call.
 
 
-def _pi_project_core(db, project):
-    return {
+def _pi_project_core(db, project, include_project_hunt_fields):
+    """SHARED CROSS-MODULE IDENTITY (project_id/name/client) mirrors
+    what Equipment Center's and SitePulse's own existing project-picker
+    dropdowns already expose to any user with THEIR module's own
+    permission (confirmed by inspecting new_rental.html/new_concrete_
+    request.html/new_purchase_request.html, all of which already
+    SELECT id, name, client FROM tracker_projects for their authorized
+    users, independent of Project Hunt) -- this does not create any
+    broader exposure than the existing UI already has.
+
+    PROJECT HUNT PROTECTED (status/bid_due_date/estimated_value) are
+    only included when the caller has already confirmed
+    module:project_hunt:view AND already fetched a row that actually
+    contains those columns -- the one call site (in
+    _tool_get_project_intelligence) computes both of those together,
+    before calling this function, so this stays a pure data-shaping
+    function with no permission logic or SQL of its own. If
+    include_project_hunt_fields is True but the row lacks those
+    columns, that is a caller bug, not something this function should
+    paper over -- it will raise, loudly, rather than silently return
+    incomplete data."""
+    core = {
         "project_id": project["id"],
         "name": project["name"],
         "client": project["client"],
-        "status": project["status"],
-        "bid_due_date": project["bid_due_date"],
-        "estimated_value": project["estimated_value"],
     }
+    if include_project_hunt_fields:
+        core["status"] = project["status"]
+        core["bid_due_date"] = project["bid_due_date"]
+        core["estimated_value"] = project["estimated_value"]
+    return core
 
 
 def _pi_linked_via(row_project_id, canonical_pid):
@@ -700,14 +786,30 @@ def _tool_get_project_intelligence(user, scope=None, project_id=None):
 
     # Re-verify the project still exists and is still real RIGHT NOW --
     # never trust that it was valid whenever context was last set.
+    #
+    # SECURITY BOUNDARY: the actual SQL SELECT itself is scoped to
+    # exactly which columns this user is authorized to have retrieved
+    # at all -- Project-Hunt-protected columns (status/bid_due_date/
+    # estimated_value) are never fetched from the database for a
+    # non-Project-Hunt user, not merely dropped from the result
+    # afterward. This permission check is computed once, before either
+    # query variant runs, and its result is reused below (both for
+    # which SELECT to issue here, and for _pi_project_core's own
+    # shaping of the result -- the two must always agree, since
+    # _pi_project_core assumes the row actually HAS the protected
+    # columns whenever it's told to include them).
+    _has_project_hunt = user_has_permission(user, "module:project_hunt:view")
     _core_start = _time.perf_counter()
-    project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    if _has_project_hunt:
+        project = db.execute("SELECT * FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
+    else:
+        project = db.execute("SELECT id, name, client FROM tracker_projects WHERE id = ?", (project_id,)).fetchone()
     if not project:
         return {"found": False, "reason": "not_found"}
 
     pid = project["id"]
     pname = project["name"]
-    result = {"found": True, "project": _pi_project_core(db, project)}
+    result = {"found": True, "project": _pi_project_core(db, project, _has_project_hunt)}
     _atlas_trace("INTELLIGENCE_PROJECT_CORE_END", duration_ms=int((_time.perf_counter() - _core_start) * 1000))
 
     want = lambda s: scope == "overview" or scope == s
@@ -853,7 +955,7 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
             "scope": {"type": "string", "required": False, "enum": sorted(_PI_VALID_SCOPES)},
             "project_id": {"type": "integer", "required": False},
         },
-        permission="module:project_hunt:view",
+        permission=("module:project_hunt:view", "module:equipment_center:view", "module:sitepulse:view"),
         atlas_permission="atlas:view_business_data",
         kind="read",
         handler=_tool_get_project_intelligence,
@@ -877,7 +979,7 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
         # (via execute_tool's session_context handling) remembers it for
         # the rest of this Atlas session. The same permission
         # get_project_status already requires.
-        permission="module:project_hunt:view",
+        permission=("module:project_hunt:view", "module:equipment_center:view", "module:sitepulse:view"),
         atlas_permission="atlas:view_business_data",
         kind="read",
         handler=_tool_set_project_context,
