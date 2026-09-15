@@ -42,7 +42,7 @@
 {% for p in photos %}<div class="photo"><img src="{{ url_for('sitepulse_photo_file', photo_id=p['id']) }}" loading="lazy"><input class="photo-note" data-caption-url="{{ url_for('sitepulse_photo_caption', photo_id=p['id']) }}" value="{{ p['caption'] or '' }}" placeholder="Photo note"></div>{% endfor %}
 </div>
 {% if not photos %}<div class="empty" id="empty-{{ g['id'] }}">No photos yet. Take the first photo for {{ g['name'] }}.</div>{% endif %}
-{% if can_author and report_id %}<form class="upload-form" data-group="{{ g['id'] }}" data-refresh-url="{{ url_for('sitepulse_project_capture', project_id=project['id']) }}?open_group={{ g['id'] }}#group-{{ g['id'] }}" action="{{ url_for('sitepulse_group_photos_upload', group_id=g['id']) }}" method="POST" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="report_id" value="{{ report_id }}"><div class="photo-actions"><label class="btn btn-gold">📷 Take Photo<input type="file" name="photos" accept="image/*" capture="environment"></label><label class="btn">▣ Photo Library<input type="file" name="photos" accept="image/*" multiple></label></div><div class="upload-state" id="state-{{ g['id'] }}"></div></form>{% endif %}
+{% if can_author and report_id %}<form class="upload-form" data-group="{{ g['id'] }}" action="{{ url_for('sitepulse_group_photos_upload', group_id=g['id']) }}" method="POST" enctype="multipart/form-data"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="report_id" value="{{ report_id }}"><div class="photo-actions"><label class="btn btn-gold">📷 Take Photo<input type="file" name="photos" accept="image/*" capture="environment"></label><label class="btn">▣ Photo Library<input type="file" name="photos" accept="image/*" multiple></label></div><div class="upload-state" id="state-{{ g['id'] }}"></div></form>{% endif %}
 </div></details>
 {% else %}<p class="empty">Add the first report section to start documenting the job.</p>{% endfor %}
 
@@ -58,25 +58,27 @@ async function uploadFiles(form,files){
   fd.append('csrf_token',form.querySelector('[name=csrf_token]').value);
   fd.append('report_id',form.querySelector('[name=report_id]').value);
   Array.from(files).forEach(f=>fd.append('photos',f));
-  form.classList.add('busy'); state.textContent=files.length===1?'Saving photo…':'Saving photos…';
+  form.classList.add('busy'); state.textContent='Saving…';
   try{
-    const response=await fetch(form.action,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json'},cache:'no-store'});
-    if(!response.ok){
-      state.textContent='Photo was not saved. Try again.';
-      form.classList.remove('busy');
-      return;
+    const response=await fetch(form.action,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}});
+    let data=null; try{data=await response.json()}catch(e){}
+    if(!response.ok || !data || data.ok!==true || !data.saved_count){
+      state.textContent='Photo was not saved. Try again.'; return;
     }
-    // The server has accepted and committed the upload. Re-render this same
-    // report builder from the database instead of depending on fragile JSON/
-    // DOM reconstruction. open_group keeps the superintendent in the exact
-    // section they were photographing. This also makes the visible count and
-    // thumbnails authoritative immediately after every successful capture.
-    state.textContent=files.length===1?'Photo saved ✓':'Photos saved ✓';
-    window.location.replace(form.dataset.refreshUrl);
-  }catch(e){
-    state.textContent='Upload did not reach BuildIQ. Try again.';
-    form.classList.remove('busy');
-  }
+    state.textContent=data.saved_count===1?'Photo saved ✓':'Photos saved ✓';
+    // Server is the source of truth. After a confirmed save, immediately
+    // reload the SAME Draft with the SAME section open. This avoids fragile
+    // client-side reconstruction and leaves the camera/library controls ready
+    // for the next photo.
+    const reportId=form.querySelector('[name=report_id]').value;
+    const target=new URL(window.location.href);
+    target.searchParams.set('report_id', reportId);
+    target.searchParams.set('open_group', gid);
+    target.hash='group-'+gid;
+    window.location.replace(target.toString());
+    return;
+  }catch(e){state.textContent='Upload did not reach BuildIQ. Try again.'}
+  finally{form.classList.remove('busy')}
 }
 document.querySelectorAll('.upload-form input[type=file]').forEach(inp=>inp.addEventListener('change',()=>{const files=inp.files;uploadFiles(inp.closest('.upload-form'),files);inp.value=''}));
 </script>

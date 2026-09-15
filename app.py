@@ -4359,7 +4359,7 @@ def sitepulse_group_create(project_id):
     cur = db.execute("INSERT INTO field_photo_groups (project_id, report_id, name, created_by, created_at) VALUES (?,?,?,?,?)", (project_id, report_id, name, author, now))
     group_id = cur.lastrowid
     db.commit()
-    return redirect(url_for("sitepulse_project_capture", project_id=project_id, open_group=group_id) + f"#group-{group_id}")
+    return redirect(url_for("sitepulse_project_capture", project_id=project_id, report_id=report_id, open_group=group_id) + f"#group-{group_id}")
 
 
 @app.route("/sitepulse/groups/<int:group_id>/rename", methods=["POST"])
