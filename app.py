@@ -470,9 +470,11 @@ def build_field_report_pdf(report_info, photos, version_number):
     line("Total Photos", str(len(photos)) if photos else "0")
 
     missing_photo_ids = []
-    img_w = 2.6 * inch
-    img_h = 1.9 * inch
-    gap = 0.25 * inch
+    # Use the printable width: two large photos side-by-side instead of
+    # narrow thumbnails that waste the right side of the page.
+    gap = 0.18 * inch
+    img_w = ((width - (2 * x)) - gap) / 2
+    img_h = 2.35 * inch
 
     def draw_photo_group(group_photos, group_label=None):
         nonlocal y
@@ -1719,17 +1721,19 @@ def init_db():
             UNIQUE(report_id, version_number)
         );
 
-        -- V1.4: reusable, project-owned photo groups (e.g. "Plumbing",
-        -- "Structure") -- NOT global, NOT report-exclusive. A photo's
-        -- group_id is nullable so every pre-V1.4 photo/report/version
-        -- remains valid with zero backfill ("Ungrouped").
+        -- SitePulse field-report sections. report_id is nullable only for
+        -- backward compatibility with V1.4 project-level groups; every new
+        -- section is owned by one field report so a new daily report starts
+        -- clean instead of inheriting yesterday's sections.
         CREATE TABLE IF NOT EXISTS field_photo_groups (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER NOT NULL,
+            report_id INTEGER,
             name TEXT NOT NULL,
             created_by TEXT,
             created_at TEXT,
-            FOREIGN KEY (project_id) REFERENCES tracker_projects (id)
+            FOREIGN KEY (project_id) REFERENCES tracker_projects (id),
+            FOREIGN KEY (report_id) REFERENCES field_reports (id)
         );
 
         -- Site Inventory: concrete requests + material inventory, split out
@@ -2065,6 +2069,9 @@ def init_db():
         # were missing from the header form entirely.
         "ALTER TABLE project_deployments ADD COLUMN job_description TEXT",
         "ALTER TABLE project_field_photos ADD COLUMN group_id INTEGER",
+        # Field-report UX correction: sections belong to a specific daily
+        # report. Nullable preserves all historical V1.4 project groups.
+        "ALTER TABLE field_photo_groups ADD COLUMN report_id INTEGER",
         "ALTER TABLE project_deployments ADD COLUMN inspections_required_list TEXT",
         "ALTER TABLE users ADD COLUMN department TEXT",
         "ALTER TABLE inventory_purchase_request_items ADD COLUMN unit TEXT",
@@ -2155,6 +2162,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_report_photo_selections_report ON report_photo_selections(report_id, sort_order)",
         "CREATE INDEX IF NOT EXISTS idx_field_report_versions_report ON field_report_versions(report_id, version_number)",
         "CREATE INDEX IF NOT EXISTS idx_field_photo_groups_project ON field_photo_groups(project_id)",
+        "CREATE INDEX IF NOT EXISTS idx_field_photo_groups_report ON field_photo_groups(report_id)",
         "CREATE INDEX IF NOT EXISTS idx_field_photos_group ON project_field_photos(group_id)",
     ]:
         try:
@@ -4266,10 +4274,10 @@ def _get_or_create_draft_report(db, project_id):
 def sitepulse_project_capture(project_id):
     """Field Capture -- the Report & Run-style groups screen. Finds or
     creates today's Draft report as the explicit capture context, then
-    lists this project's reusable groups with a count of photos
-    CURRENTLY SELECTED FOR THIS DRAFT in each group (not the group's
-    all-time project photo count) -- matching Procurement's reference
-    screen, which shows today's capture, not permanent history."""
+    lists this report's own sections with a count of photos CURRENTLY
+    SELECTED FOR THIS DRAFT in each section -- matching Procurement's
+    reference screen, which shows today's capture, not permanent history.
+    New reports start with no inherited sections."""
     if not _reporting_authorized_for_project(project_id):
         flash("You don't have access to SitePulse.", "error")
         return redirect(url_for("home"))
@@ -4288,7 +4296,20 @@ def sitepulse_project_capture(project_id):
         existing = db.execute("SELECT id FROM field_reports WHERE project_id = ? AND status = 'Draft' ORDER BY created_at DESC LIMIT 1", (project_id,)).fetchone()
         report_id = existing["id"] if existing else None
     report = _report_row(db, report_id) if report_id else None
-    groups = db.execute("SELECT * FROM field_photo_groups WHERE project_id = ? ORDER BY id", (project_id,)).fetchall()
+    # A daily report owns its sections. Legacy V1.4 project-level groups
+    # (report_id IS NULL) are shown only when THIS report already contains a
+    # selected photo from that group. This preserves in-progress/old Drafts
+    # without making tomorrow's new report inherit yesterday's sections.
+    groups = []
+    if report_id:
+        groups = db.execute(
+            """SELECT DISTINCT fpg.* FROM field_photo_groups fpg
+               LEFT JOIN project_field_photos pfp ON pfp.group_id = fpg.id
+               LEFT JOIN report_photo_selections rps ON rps.photo_id = pfp.id AND rps.report_id = ?
+               WHERE fpg.project_id = ? AND (fpg.report_id = ? OR (fpg.report_id IS NULL AND rps.id IS NOT NULL))
+               ORDER BY fpg.id""",
+            (report_id, project_id, report_id)
+        ).fetchall()
     group_counts = {}
     if report_id:
         rows = db.execute(
@@ -4324,13 +4345,18 @@ def sitepulse_group_create(project_id):
     if not project:
         flash("Project not found.", "error")
         return redirect(url_for("inventory_home"))
+    report_id = request.form.get("report_id", type=int)
+    report = db.execute("SELECT id FROM field_reports WHERE id = ? AND project_id = ? AND status = 'Draft'", (report_id, project_id)).fetchone() if report_id else None
+    if not report:
+        flash("Open a Draft report before adding a section.", "error")
+        return redirect(url_for("sitepulse_project_capture", project_id=project_id))
     name = (request.form.get("name") or "").strip()
     if not name:
-        flash("Group name is required.", "error")
+        flash("Section name is required.", "error")
         return redirect(url_for("sitepulse_project_capture", project_id=project_id))
     now = datetime.utcnow().isoformat()
     author = current_user.name or current_user.email
-    cur = db.execute("INSERT INTO field_photo_groups (project_id, name, created_by, created_at) VALUES (?,?,?,?)", (project_id, name, author, now))
+    cur = db.execute("INSERT INTO field_photo_groups (project_id, report_id, name, created_by, created_at) VALUES (?,?,?,?,?)", (project_id, report_id, name, author, now))
     group_id = cur.lastrowid
     db.commit()
     return redirect(url_for("sitepulse_project_capture", project_id=project_id, open_group=group_id) + f"#group-{group_id}")
@@ -4417,6 +4443,10 @@ def sitepulse_group_photos_upload(group_id):
     report_row = None
     if report_id:
         report_row = db.execute("SELECT id FROM field_reports WHERE id = ? AND project_id = ? AND status = 'Draft'", (report_id, group["project_id"])).fetchone()
+        # New sections are report-owned: never allow a crafted request to
+        # upload into a section that belongs to a different daily report.
+        if report_row and group["report_id"] is not None and group["report_id"] != report_id:
+            return ("Not found", 404)
     now = datetime.utcnow().isoformat()
     uploader = current_user.name or current_user.email
     files = request.files.getlist("photos")
@@ -4443,12 +4473,21 @@ def sitepulse_group_photos_upload(group_id):
                 db.execute("INSERT OR IGNORE INTO report_photo_selections (report_id, photo_id, sort_order) VALUES (?,?,?)", (report_id, cur.lastrowid, next_sort))
                 next_sort += 1
     if saved_count:
+        # The photo rows/selections are the primary user action. Commit them
+        # before ancillary audit/flash work so a successful save can never be
+        # reported to the browser as a failure because a secondary activity
+        # log write failed afterward.
         db.commit()
-        log_activity("sitepulse_reporting", "field_photos", group["project_id"], "photos_added", field="group_id", new_value=f"{group_id} ({saved_count})")
-        db.commit()
-        flash(f"{saved_count} photo(s) saved to {group['name']}.")
+        try:
+            log_activity("sitepulse_reporting", "field_photos", group["project_id"], "photos_added", field="group_id", new_value=f"{group_id} ({saved_count})")
+            db.commit()
+        except Exception:
+            db.rollback()
+            app.logger.exception("Photo saved but SitePulse activity logging failed")
+        if request.headers.get("X-Requested-With") != "XMLHttpRequest":
+            flash(f"{saved_count} photo(s) saved to {group['name']}.")
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
-        return jsonify({"ok": True, "saved_count": saved_count, "photos": saved_photos, "group_id": group_id})
+        return jsonify({"ok": saved_count > 0, "saved_count": saved_count, "photos": saved_photos, "group_id": group_id}), (200 if saved_count > 0 else 400)
     return redirect(url_for("sitepulse_group_detail", group_id=group_id, report_id=report_id))
 
 
