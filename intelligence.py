@@ -1010,7 +1010,7 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
     from app import get_db, user_has_permission
     db = get_db()
     scope = (scope or "overview").strip().lower()
-    allowed = {"overview", "users_permissions", "deployment", "field_reports", "activity"}
+    allowed = {"overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity"}
     if scope not in allowed:
         return {"available": False, "reason": "invalid_scope", "scope": scope}
     out = {"available": True, "scope": scope, "sources": []}
@@ -1053,8 +1053,42 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
                 ).fetchall()}
                 deployments.append({**dict(d), "checklist_counts": counts})
             out["deployments"] = deployments
-            out["sources"].append("project_deployments + project_deployment_items")
+            # Dashboard parity: Project Deployment also surfaces Awarded projects
+            # that have not had a deployment row started yet. They are real
+            # actionable deployment state and must not disappear from Atlas merely
+            # because project_deployments is empty.
+            awarded_not_started = db.execute(
+                """SELECT tp.id project_id, tp.name project_name, tp.client, tp.address, tp.status
+                   FROM tracker_projects tp
+                   LEFT JOIN project_deployments pd ON pd.project_id=tp.id
+                   WHERE tp.status='Awarded' AND pd.id IS NULL
+                   ORDER BY tp.name"""
+            ).fetchall()
+            out["awarded_not_started"] = [dict(r) for r in awarded_not_started]
+            out["sources"].append("project_deployments + project_deployment_items + awarded projects not yet started")
         elif scope == "deployment":
+            return {"available": False, "scope": scope, "reason": "not_permitted"}
+
+    if scope in ("overview", "sitepulse"):
+        if user_has_permission(user, "module:sitepulse:view"):
+            # Same eligibility rule as the SitePulse Field Reports project picker:
+            # Awarded OR has a deployment row. This keeps Atlas aligned with the
+            # actual SitePulse UI rather than inferring projects from open requests.
+            rows = db.execute(
+                """SELECT tp.id project_id, tp.name project_name, tp.client, tp.address, tp.status,
+                          pd.id deployment_id, pd.status deployment_status,
+                          (SELECT MAX(fr.report_date) FROM field_reports fr WHERE fr.project_id=tp.id) last_report_date,
+                          (SELECT COUNT(*) FROM field_reports fr WHERE fr.project_id=tp.id) field_report_count,
+                          (SELECT COUNT(*) FROM inventory_concrete_requests c WHERE c.project_id=tp.id AND c.status!='Completed') open_concrete_count,
+                          (SELECT COUNT(*) FROM inventory_purchase_requests pr WHERE pr.project_id=tp.id AND pr.status!='Completed') open_purchase_count
+                   FROM tracker_projects tp
+                   LEFT JOIN project_deployments pd ON pd.project_id=tp.id
+                   WHERE tp.status='Awarded' OR pd.id IS NOT NULL
+                   ORDER BY tp.name"""
+            ).fetchall()
+            out["sitepulse_projects"] = [dict(r) for r in rows]
+            out["sources"].append("SitePulse eligibility + deployment + field reports + concrete/purchase current counts")
+        elif scope == "sitepulse":
             return {"available": False, "scope": scope, "reason": "not_permitted"}
 
     if scope in ("overview", "field_reports"):
@@ -1172,10 +1206,10 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
         name="get_buildiq_system_intelligence",
         description=(
             "Read live, permission-aware BuildIQ system intelligence outside a single project: users/effective permissions, "
-            "Project Deployment state, SitePulse field reports, and audit/activity history. Use the narrowest scope."
+            "Project Deployment state, SitePulse operational project state, SitePulse field reports, and audit/activity history. Use the narrowest scope."
         ),
         parameters={"scope": {"type": "string", "required": False,
-                               "enum": ["overview", "users_permissions", "deployment", "field_reports", "activity"]}},
+                               "enum": ["overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity"]}},
         permission="module:atlas:view",
         atlas_permission="atlas:view_business_data",
         kind="read",

@@ -7253,7 +7253,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.3-buildiq-system-brain"
+ATLAS_BUILD = "TEST-v9.3.1-system-brain-retrieval-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7817,11 +7817,11 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
     recent = (draft or {}).get("history", [])[-6:]
     system = (
         "Classify the user's intended BuildIQ information domain. Return JSON only with domain and scope. "
-        "Domains: product, users_permissions, deployment, field_reports, activity, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
+        "Domains: product, users_permissions, deployment, sitepulse, field_reports, activity, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
         "PRODUCT means BuildIQ ITSELF: employee-submitted feature/product requests, bugs/fixes employees reported, "
         "Product Intelligence, Requests Center, what needs to be fixed/built in BuildIQ, development lifecycle, roadmap. "
         "USERS_PERMISSIONS means people, users, roles, access, permissions, who can see/do/approve/manage something. "
-        "DEPLOYMENT means Project Deployment, mobilization/readiness/checklist/preconstruction state. FIELD_REPORTS means SitePulse field/daily reports, report issues, report history. "
+        "DEPLOYMENT means Project Deployment, mobilization/readiness/checklist/preconstruction state. SITEPULSE means questions about SitePulse itself, its active/eligible operational projects, or what is happening across SitePulse. FIELD_REPORTS means SitePulse field/daily reports, report issues, report history. "
         "ACTIVITY means audit/history/change questions such as what changed, who changed it, or what happened recently. "
         "PROJECT_OPERATIONS means a job/site/project operational picture. CONCRETE and PURCHASE are SitePulse operational "
         "request workflows. The bare word requests is ambiguous unless wording or conversation makes employee/product vs "
@@ -7848,7 +7848,7 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
         return {"domain":"general", "scope":"overview"}
     domain=str(obj.get("domain") or "general").strip().lower()
     scope=str(obj.get("scope") or "overview").strip().lower()
-    allowed={"product","users_permissions","deployment","field_reports","activity","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
+    allowed={"product","users_permissions","deployment","sitepulse","field_reports","activity","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
     if domain not in allowed: domain="general"
     if scope not in {"overview","requests","attention","roadmap"}: scope="overview"
     return {"domain":domain,"scope":scope}
@@ -8112,7 +8112,7 @@ def stream_atlas_turn(user_text, draft):
     _system_intelligence = None
     _system_scope_map = {
         "users_permissions": "users_permissions", "deployment": "deployment",
-        "field_reports": "field_reports", "activity": "activity",
+        "sitepulse": "sitepulse", "field_reports": "field_reports", "activity": "activity",
     }
     if _semantic_scope.get("domain") in _system_scope_map:
         _si_read = execute_tool(
@@ -8400,7 +8400,19 @@ If set_project_context is needed, call that tool exactly once with the appropria
 If it is not needed, output exactly: NO_TOOL
 Then stop."""
 
-    for event in _stream_claude_completion(api_key, pass1_router_system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=200, label="PASS1"):
+    # V9.3.1: only run the project-context router for turns that can actually
+    # establish/switch project context. Module-wide/system-wide reads (SitePulse,
+    # Deployment, permissions, Product Intelligence, etc.) already have a
+    # semantic scope and authoritative retrieval path; sending those through a
+    # second LLM router created needless failure surface and caused valid reads
+    # to fail closed when the hidden router hit max_tokens. This is a routing
+    # decision, not a phrase patch: the semantic domain classifier determines it.
+    _pass1_router_needed = _semantic_scope.get("domain") in {"project_operations", "general"}
+    if not _pass1_router_needed:
+        pass1_stop_reason["value"] = "end_turn"
+        _atlas_trace("PASS1_SKIPPED", reason="non_project_context_scope", domain=_semantic_scope.get("domain", "general"))
+
+    for event in (_stream_claude_completion(api_key, pass1_router_system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=200, label="PASS1") if _pass1_router_needed else []):
         kind = event[0]
         if kind == "block_start":
             _, btype, idx = event
