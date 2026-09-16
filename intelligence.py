@@ -998,6 +998,92 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
 
     return result
 
+
+# ---------------------------------------------------------------------------
+# BuildIQ system-wide intelligence (V9.3)
+# ---------------------------------------------------------------------------
+def _tool_get_buildiq_system_intelligence(user, scope=None):
+    """Permission-aware read-only intelligence for BuildIQ surfaces that are
+    not project-operational records. Each scope checks the SAME permission
+    boundary as the corresponding UI before its protected SELECTs run.
+    """
+    from app import get_db, user_has_permission
+    db = get_db()
+    scope = (scope or "overview").strip().lower()
+    allowed = {"overview", "users_permissions", "deployment", "field_reports", "activity"}
+    if scope not in allowed:
+        return {"available": False, "reason": "invalid_scope", "scope": scope}
+    out = {"available": True, "scope": scope, "sources": []}
+
+    if scope in ("overview", "users_permissions"):
+        if user_has_permission(user, "module:team_admin:view"):
+            rows = db.execute("SELECT id, name, email, department FROM users ORDER BY name, email").fetchall()
+            people = []
+            for u in rows:
+                roles = [r["name"] for r in db.execute(
+                    "SELECT r.name FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=? ORDER BY r.name", (u["id"],)
+                ).fetchall()]
+                perms = []
+                for pr in db.execute("SELECT key, category, label FROM permissions ORDER BY category, key").fetchall():
+                    if user_has_permission(type("AtlasSubject", (), {"id": u["id"], "is_authenticated": True})(), pr["key"]):
+                        perms.append({"key": pr["key"], "category": pr["category"], "label": pr["label"]})
+                overrides = [dict(x) for x in db.execute(
+                    """SELECT p.key, p.label, o.state FROM user_permission_overrides o
+                       JOIN permissions p ON p.id=o.permission_id WHERE o.user_id=? ORDER BY p.key""", (u["id"],)
+                ).fetchall()]
+                people.append({"user_id": u["id"], "name": u["name"], "email": u["email"], "department": u["department"],
+                               "roles": roles, "effective_permissions": perms, "explicit_overrides": overrides})
+            out["users_permissions"] = people
+            out["sources"].append("users + roles + role_permissions + user_permission_overrides")
+        elif scope == "users_permissions":
+            return {"available": False, "scope": scope, "reason": "not_permitted"}
+
+    if scope in ("overview", "deployment"):
+        if user_has_permission(user, "module:project_deployment:view"):
+            rows = db.execute(
+                """SELECT d.id, d.project_id, p.name project_name, p.client, d.status, d.start_date,
+                          d.expected_completion_date, d.supervisor_name, d.updated_at
+                   FROM project_deployments d JOIN tracker_projects p ON p.id=d.project_id
+                   ORDER BY d.updated_at DESC, d.id DESC LIMIT 40"""
+            ).fetchall()
+            deployments=[]
+            for d in rows:
+                counts={x["status"]: x["c"] for x in db.execute(
+                    "SELECT status, COUNT(*) c FROM project_deployment_items WHERE deployment_id=? AND applies=1 GROUP BY status", (d["id"],)
+                ).fetchall()}
+                deployments.append({**dict(d), "checklist_counts": counts})
+            out["deployments"] = deployments
+            out["sources"].append("project_deployments + project_deployment_items")
+        elif scope == "deployment":
+            return {"available": False, "scope": scope, "reason": "not_permitted"}
+
+    if scope in ("overview", "field_reports"):
+        if user_has_permission(user, "module:sitepulse:view"):
+            rows = db.execute(
+                """SELECT fr.id, fr.project_id, p.name project_name, fr.report_date, fr.status,
+                          fr.has_issues, fr.issues_blockers, fr.next_steps, fr.created_by,
+                          fr.last_edited_by, fr.updated_at
+                   FROM field_reports fr JOIN tracker_projects p ON p.id=fr.project_id
+                   ORDER BY COALESCE(fr.report_date, fr.updated_at) DESC LIMIT 40"""
+            ).fetchall()
+            out["field_reports"] = [dict(r) for r in rows]
+            out["sources"].append("field_reports")
+        elif scope == "field_reports":
+            return {"available": False, "scope": scope, "reason": "not_permitted"}
+
+    if scope in ("overview", "activity"):
+        if user_has_permission(user, "action:activity_log:view"):
+            rows = db.execute(
+                """SELECT id, section, entity_type, entity_id, action, field, old_value, new_value,
+                          user_email, created_at FROM activity_log ORDER BY id DESC LIMIT 60"""
+            ).fetchall()
+            out["activity"] = [dict(r) for r in rows]
+            out["sources"].append("activity_log")
+        elif scope == "activity":
+            return {"available": False, "scope": scope, "reason": "not_permitted"}
+
+    return out
+
 # ---------------------------------------------------------------------------
 # Registration -- called once from app.py after register_tool/get_db/
 # user_has_permission/SP_STATUS_OPTIONS/PURCHASE_STATUS_OPTIONS all exist.
@@ -1081,6 +1167,19 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
         atlas_permission="atlas:view_business_data",
         kind="read",
         handler=_tool_get_attention_items,
+    )
+    register_tool(
+        name="get_buildiq_system_intelligence",
+        description=(
+            "Read live, permission-aware BuildIQ system intelligence outside a single project: users/effective permissions, "
+            "Project Deployment state, SitePulse field reports, and audit/activity history. Use the narrowest scope."
+        ),
+        parameters={"scope": {"type": "string", "required": False,
+                               "enum": ["overview", "users_permissions", "deployment", "field_reports", "activity"]}},
+        permission="module:atlas:view",
+        atlas_permission="atlas:view_business_data",
+        kind="read",
+        handler=_tool_get_buildiq_system_intelligence,
     )
     register_tool(
         name="get_buildiq_product_intelligence",

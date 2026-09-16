@@ -6361,7 +6361,7 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
-def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None, semantic_scope=None, product_intelligence=None):
+def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None, semantic_scope=None, product_intelligence=None, system_intelligence=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
     messages array now, not flattened into this text.
@@ -6392,6 +6392,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
     entity_memory_line = "CANONICAL CONVERSATION ENTITY MEMORY: " + (json.dumps(entity_memory, ensure_ascii=False) if entity_memory else "none") + "\n\n"
     semantic_scope_line = "SEMANTIC BUILDIQ SCOPE: " + (json.dumps(semantic_scope, ensure_ascii=False) if semantic_scope else "general") + "\n\n"
     product_intelligence_line = "LIVE BUILDIQ PRODUCT INTELLIGENCE: " + (json.dumps(product_intelligence, ensure_ascii=False) if product_intelligence else "not requested or not authorized") + "\n\n"
+    system_intelligence_line = "LIVE BUILDIQ SYSTEM INTELLIGENCE: " + (json.dumps(system_intelligence, ensure_ascii=False) if system_intelligence else "not requested or not authorized") + "\n\n"
     return (
         "You are Atlas, the assistant inside BuildIQ. If asked your name, "
         "say Atlas. People talk to you like they'd talk to Claude or "
@@ -6466,6 +6467,11 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- Concrete Requests and Purchase Requests are operational workflows in BuildIQ; Rentals/Outside Rental lifecycle is tied to Equipment Center/SitePulse operations.\n"
         "- When asked what a BuildIQ module is, what it does, how modules relate, or what Atlas itself can do, answer from this product map plus live context. Do NOT require a database row to acknowledge a real BuildIQ module. Distinguish product/module knowledge from live operational records.\n"
         "- Never invent a module/capability just because a user asks about it. If it is not in this canonical map or live context, say what you can actually verify.\n\n"
+        "BUILDIQ SYSTEM INTELLIGENCE rules:\n"
+        "- When LIVE BUILDIQ SYSTEM INTELLIGENCE is present, it is authoritative for that turn. Never infer roles or permissions from employee activity; effective_permissions is the source of truth.\n"
+        "- For permission questions, distinguish roles from effective permissions and explicit overrides. Say when the caller is not permitted to view the directory rather than guessing.\n"
+        "- For Project Deployment, field-report, and activity/history questions, answer from the corresponding live system intelligence rather than the generic business snapshot.\n"
+        "- Never claim a future/placeholder module is operational unless the canonical BuildIQ product map or live data says it exists.\n\n"
         "PROJECT CONTEXT rules:\n"
         "- If the person establishes or changes which project they're "
         "talking about (e.g. \"let's talk about Patel Farm\", \"switch to "
@@ -6525,7 +6531,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "BuildIQ doesn't actually store.\n"
         "- If no project is established yet, this tool has nothing to "
         "act on -- establish one with set_project_context first.\n\n"
-        + context_line + active_context_line + entity_matches_line + entity_memory_line + semantic_scope_line + product_intelligence_line +
+        + context_line + active_context_line + entity_matches_line + entity_memory_line + semantic_scope_line + product_intelligence_line + system_intelligence_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
         + json.dumps(fields) + "\n\n"
@@ -7247,7 +7253,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.2-unified-buildiq-brain"
+ATLAS_BUILD = "TEST-v9.3-buildiq-system-brain"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7811,9 +7817,12 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
     recent = (draft or {}).get("history", [])[-6:]
     system = (
         "Classify the user's intended BuildIQ information domain. Return JSON only with domain and scope. "
-        "Domains: product, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
+        "Domains: product, users_permissions, deployment, field_reports, activity, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
         "PRODUCT means BuildIQ ITSELF: employee-submitted feature/product requests, bugs/fixes employees reported, "
         "Product Intelligence, Requests Center, what needs to be fixed/built in BuildIQ, development lifecycle, roadmap. "
+        "USERS_PERMISSIONS means people, users, roles, access, permissions, who can see/do/approve/manage something. "
+        "DEPLOYMENT means Project Deployment, mobilization/readiness/checklist/preconstruction state. FIELD_REPORTS means SitePulse field/daily reports, report issues, report history. "
+        "ACTIVITY means audit/history/change questions such as what changed, who changed it, or what happened recently. "
         "PROJECT_OPERATIONS means a job/site/project operational picture. CONCRETE and PURCHASE are SitePulse operational "
         "request workflows. The bare word requests is ambiguous unless wording or conversation makes employee/product vs "
         "operational meaning clear. Phrases about fixing/improving BuildIQ itself strongly indicate product. "
@@ -7839,7 +7848,7 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
         return {"domain":"general", "scope":"overview"}
     domain=str(obj.get("domain") or "general").strip().lower()
     scope=str(obj.get("scope") or "overview").strip().lower()
-    allowed={"product","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
+    allowed={"product","users_permissions","deployment","field_reports","activity","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
     if domain not in allowed: domain="general"
     if scope not in {"overview","requests","attention","roadmap"}: scope="overview"
     return {"domain":domain,"scope":scope}
@@ -8100,13 +8109,28 @@ def stream_atlas_turn(user_text, draft):
             _product_intelligence = _pi_read.data
         else:
             _product_intelligence = {"available": False, "error": _pi_read.error}
+    _system_intelligence = None
+    _system_scope_map = {
+        "users_permissions": "users_permissions", "deployment": "deployment",
+        "field_reports": "field_reports", "activity": "activity",
+    }
+    if _semantic_scope.get("domain") in _system_scope_map:
+        _si_read = execute_tool(
+            "get_buildiq_system_intelligence",
+            {"scope": _system_scope_map[_semantic_scope.get("domain")]},
+            current_user, confirmed=False, session_context=draft.get("project_context")
+        )
+        if _si_read.success:
+            _system_intelligence = _si_read.data
+        else:
+            _system_intelligence = {"available": False, "error": _si_read.error}
     _turn_entity_matches = []
     if not (draft.get("pending_submit") or {}).get("tool_name"):
         _subject = _atlas_semantic_subject(user_text, api_key)
         if _subject:
             _turn_entity_matches = _atlas_cross_entity_matches(_subject, draft, current_user)
             _atlas_trace("ENTITY_LOOKUP", subject=_subject[:80], matches=len(_turn_entity_matches))
-    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"), _semantic_scope, _product_intelligence)
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"), _semantic_scope, _product_intelligence, _system_intelligence)
 
     # Deterministic second-turn confirmation for non-form BuildIQ actions.
     # The prior turn stores the exact validated tool + params server-side.
