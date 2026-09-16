@@ -6863,6 +6863,13 @@ def _tool_move_equipment(user, equipment_name, to_location, status=None,
     new_location = (to_location or "").strip()
     if not new_location:
         raise ToolWriteRejected("destination_required")
+    # Defense in depth: proposals should already be grounded, but execution is
+    # the final write boundary. Re-resolve a short alias to the authoritative
+    # persisted location value before Equipment Center state is changed.
+    grounded_location = _atlas_ground_location(new_location, strict=True)
+    if not grounded_location:
+        raise ToolWriteRejected("destination_not_grounded")
+    new_location = grounded_location
     new_status = (status or a["status"] or "Available").strip()
     if new_status not in SP_STATUS_OPTIONS:
         raise ToolWriteRejected("invalid_equipment_status")
@@ -7123,7 +7130,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1.1-pass1-routing-fix"
+ATLAS_BUILD = "TEST-v9.1.2-canonical-location-write-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7465,6 +7472,20 @@ def _atlas_known_location_candidates():
         vals.append(r["location"])
     for r in db.execute("SELECT name FROM tracker_projects WHERE name IS NOT NULL AND trim(name) != ''").fetchall():
         vals.append(r["name"])
+    # Historical equipment moves are authoritative evidence too. A move must
+    # not erase a richer location identity (for example a full street address)
+    # merely because the current asset row now contains a short display alias.
+    try:
+        for r in db.execute("""SELECT from_location, to_location FROM sitepulse_usage_log
+                             WHERE entry_kind='move'""").fetchall():
+            if r["from_location"]:
+                vals.append(r["from_location"])
+            if r["to_location"]:
+                vals.append(r["to_location"])
+    except Exception:
+        # Older databases may not yet have the usage-log shape. Grounding can
+        # still use current asset/project state without weakening write safety.
+        pass
     # stable de-dupe, case insensitive
     out=[]; seen=set()
     for v in vals:
@@ -7475,32 +7496,72 @@ def _atlas_known_location_candidates():
 
 
 def _atlas_ground_location(raw_destination, strict=False):
-    """Ground destination language to a canonical BuildIQ place.
+    """Ground destination language to one authoritative BuildIQ place.
 
-    In strict mode this returns None unless the value resolves to one unique
-    existing BuildIQ location/project (or is an explicit street address).
-    This is the action-safety boundary: conversational/reference language may
-    never leak into a write parameter merely because it was text after "to".
+    Rich persisted values win over their short display aliases. This prevents a
+    round-trip move from replacing a full stored address with a conversational
+    label such as ``Red Bluff``. Historical applied moves are valid grounding
+    evidence, so moving an asset away does not make its former address vanish
+    from Atlas's canonical place vocabulary.
     """
     raw=(raw_destination or '').strip()
     nr=_atlas_norm_entity_text(raw)
     if not nr:
         return None if strict else raw
-    candidates=[]
-    for c in _atlas_known_location_candidates():
+
+    known=_atlas_known_location_candidates()
+    exact=[]
+    alias=[]
+    contained=[]
+    for c in known:
         nc=_atlas_norm_entity_text(c)
+        if not nc:
+            continue
         if nr == nc:
-            return c
+            exact.append(c)
+            continue
+        # A full address can canonically own a short human label derived from
+        # the street name. Keep the rich value for writes; the label is UI only.
+        label=_atlas_location_label(c)
+        if label and nr == _atlas_norm_entity_text(label):
+            alias.append(c)
+            continue
         if re.search(r'(?:^| )'+re.escape(nc)+r'(?: |$)', nr):
-            candidates.append((len(nc), c))
-    if candidates:
-        candidates.sort(reverse=True)
-        best_len=candidates[0][0]
-        best=list(dict.fromkeys(c for ln,c in candidates if ln==best_len))
-        if len(best)==1:
-            return best[0]
-    # Preserve legitimate explicit field locations such as a full street
-    # address, while refusing unresolved conversational descriptions.
+            contained.append((len(nc), c))
+
+    def _richer_unique(values):
+        vals=list(dict.fromkeys(values))
+        if not vals:
+            return None
+        rich=[v for v in vals if re.search(r"\b\d{2,6}\s+", v or "")]
+        if len(rich)==1:
+            return rich[0]
+        if len(vals)==1:
+            return vals[0]
+        return None
+
+    # If the raw value is both a current short value and the unique alias of a
+    # richer historical address, the richer canonical value must win.
+    rich_alias=_richer_unique(alias)
+    if rich_alias and re.search(r"\b\d{2,6}\s+", rich_alias):
+        return rich_alias
+    exact_hit=_richer_unique(exact)
+    if exact_hit:
+        return exact_hit
+    if alias:
+        alias_hit=_richer_unique(alias)
+        if alias_hit:
+            return alias_hit
+    if contained:
+        contained.sort(reverse=True)
+        best_len=contained[0][0]
+        best=[c for ln,c in contained if ln==best_len]
+        hit=_richer_unique(best)
+        if hit:
+            return hit
+
+    # Preserve a legitimate explicit full address even when it is new to the
+    # system, while refusing unresolved conversational descriptions.
     if strict and re.search(r'\b\d{2,6}\s+[A-Za-z0-9 .#-]+(?:rd|road|st|street|ave|avenue|blvd|boulevard|dr|drive|ln|lane|ct|court|hwy|highway|way)\b', raw, re.I):
         return raw
     return None if strict else raw
