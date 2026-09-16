@@ -6102,12 +6102,45 @@ def gather_business_snapshot():
         lines.append(f"  - {r['job_name'] or 'Untitled'}{client_note}: {r['status']}, needed {r['needed_on'] or 'TBD'}")
 
     try:
+        # PROJECT HUNT SOURCE-OF-TRUTH PARITY (V9.1.4)
+        # Keep Atlas on the exact same status semantics as tracker_dashboard().
+        # The Project Hunt page defines its working population as every row that
+        # is not Archived, then derives KPI cards from exact stored statuses.
+        # Do not call the whole population "active" and do not independently
+        # reinterpret legacy/status values here.
         projects = db.execute(
-            "SELECT name, client, status, bid_due_date FROM tracker_projects WHERE status != 'Lost' AND status != 'Archived' ORDER BY bid_due_date"
+            "SELECT name, client, status, bid_due_date FROM tracker_projects WHERE status != 'Archived' ORDER BY bid_due_date ASC"
         ).fetchall()
-        lines.append(f"\nBID TRACKER (active, {len(projects)}):")
-        for p in projects[:15]:
-            lines.append(f"  - {p['name']}" + (f" ({p['client']})" if p["client"] else "") + f": {p['status']}, due {p['bid_due_date'] or 'TBD'}")
+        ph_counts = {
+            "active": sum(1 for p in projects if p["status"] == "In Progress"),
+            "submitted": sum(1 for p in projects if p["status"] == "Submitted"),
+            "awarded": sum(1 for p in projects if p["status"] == "Awarded"),
+            "unmeant": sum(1 for p in projects if p["status"] == "Unmeant"),
+        }
+        status_counts = {}
+        for p in projects:
+            status = (p["status"] or "Unknown/TBD").strip() or "Unknown/TBD"
+            status_counts[status] = status_counts.get(status, 0) + 1
+
+        lines.append(
+            "\nPROJECT HUNT — AUTHORITATIVE PAGE KPIs: "
+            f"{ph_counts['active']} Active Bids; "
+            f"{ph_counts['submitted']} Submitted; "
+            f"{ph_counts['awarded']} Awarded; "
+            f"{ph_counts['unmeant']} Unmeant Projects; "
+            f"{len(projects)} total non-archived records."
+        )
+        lines.append(
+            "PROJECT HUNT — STORED STATUS BREAKDOWN: "
+            + "; ".join(f"{status}={count}" for status, count in sorted(status_counts.items()))
+        )
+        lines.append("PROJECT HUNT — IN PROGRESS (same rows as the default Active view):")
+        for p in [p for p in projects if p["status"] == "In Progress"][:15]:
+            lines.append(
+                f"  - {p['name']}"
+                + (f" ({p['client']})" if p["client"] else "")
+                + f", due {p['bid_due_date'] or 'TBD'}"
+            )
     except sqlite3.OperationalError:
         pass
 
@@ -6342,6 +6375,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "BUILDIQ SELF-KNOWLEDGE (canonical product map):\n"
         "- BuildIQ is the construction operating system. Core lifecycle: Project Hunt -> Project Deployment -> SitePulse -> Finance.\n"
         "- Project Hunt: chase/win work; bid and opportunity tracking.\n"
+        "- Project Hunt counts/statuses: treat the PROJECT HUNT — AUTHORITATIVE PAGE KPIs snapshot as the source of truth. Active Bids means status exactly In Progress, matching the Project Hunt dashboard. Never call total non-archived records active bids, and never infer that Unknown/TBD, Unmeant, Cancelled, or On Hold means not actioned unless authoritative data says so.\n"
         "- Project Deployment: preconstruction/mobilization; get a won job ready, with a deployment checklist, while sharing the canonical project identity.\n"
         "- SitePulse: run the field. Field Reports belong inside SitePulse. It also surfaces field/project operational activity.\n"
         "- Equipment Center: source of truth for equipment status/location/usage and equipment/rental lifecycle operations.\n"
@@ -7133,7 +7167,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1.3-rich-project-intelligence"
+ATLAS_BUILD = "TEST-v9.1.4-project-hunt-source-parity"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
