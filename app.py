@@ -7123,7 +7123,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1-canonical-memory-natural-voice"
+ATLAS_BUILD = "TEST-v9.1.1-pass1-routing-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8118,7 +8118,29 @@ def stream_atlas_turn(user_text, draft):
     protocol_anomaly = {"value": None}  # e.g. "orphan_block_stop", "orphan_tool_input_delta", "duplicate_block_stop", "duplicate_content_block_start", "duplicate_tool_use_start"
     pass1_error = {"value": None}
     pass1_stop_reason = {"value": None}
-    for event in _stream_claude_completion(api_key, system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=200, label="PASS1"):
+
+    # V9.1.1: PASS 1 is a ROUTER, not an answer-generation pass.
+    # Do not give this hidden pass Atlas's full answer-generation system
+    # prompt: on ordinary/module questions Claude can otherwise start writing
+    # the real answer here, hit this pass's intentionally-small token cap, and
+    # trigger the fail-closed stop-reason gate before visible Pass 2 runs.
+    # Keep the full conversation messages so references such as "there" or
+    # "switch back" remain resolvable, but constrain the system instruction to
+    # exactly one routing decision: call set_project_context when a project
+    # context change is needed; otherwise emit the tiny sentinel NO_TOOL and
+    # end. PASS 1 text remains invisible and is never authoritative.
+    pass1_router_system = """You are Atlas's hidden project-context router.
+Your ONLY job is to decide whether this user turn requires the set_project_context tool.
+
+Use set_project_context ONLY when the user is asking to establish, switch, change, or resolve the active BuildIQ project context and the tool is needed to do that safely. Use the conversation to resolve natural references when possible.
+
+Do NOT answer the user's question. Do NOT explain BuildIQ, projects, modules, entities, actions, or prior events. Do NOT produce conversational prose.
+
+If set_project_context is needed, call that tool exactly once with the appropriate input.
+If it is not needed, output exactly: NO_TOOL
+Then stop."""
+
+    for event in _stream_claude_completion(api_key, pass1_router_system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=200, label="PASS1"):
         kind = event[0]
         if kind == "block_start":
             _, btype, idx = event
