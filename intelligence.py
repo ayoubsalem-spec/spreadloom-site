@@ -898,6 +898,106 @@ def _tool_get_project_intelligence(user, scope=None, project_id=None):
     return result
 
 
+
+# ---------------------------------------------------------------------------
+# BuildIQ product / employee-request intelligence
+# ---------------------------------------------------------------------------
+
+def _tool_get_buildiq_product_intelligence(user, scope=None):
+    """Read-only management intelligence about BuildIQ ITSELF.
+
+    This is deliberately separate from SitePulse operational Concrete/Purchase
+    Requests.  It reads the same feature_requests / Product Intelligence data
+    model used by the employee Requests Center and admin Command Center.
+    """
+    from app import get_db
+    db = get_db()
+    scope = (scope or "overview").strip().lower()
+    if scope not in {"overview", "requests", "attention", "roadmap"}:
+        scope = "overview"
+
+    rows = db.execute(
+        """SELECT f.id, f.requester_name, f.requester_email, f.department,
+                  f.original_request, f.status, f.approval_status, f.created_at, f.updated_at,
+                  i.buildiq_module, i.internal_notes, i.solution_built,
+                  i.testing_notes, i.user_feedback, i.release_date
+           FROM feature_requests f
+           LEFT JOIN feature_request_intelligence i ON i.feature_request_id = f.id
+           ORDER BY f.created_at DESC"""
+    ).fetchall()
+
+    total = len(rows)
+    approved = [r for r in rows if r["approval_status"] == "Approved"]
+    def count_status(*statuses):
+        return sum(1 for r in approved if r["status"] in statuses)
+
+    result = {
+        "scope": scope,
+        "source": "feature_requests + feature_request_intelligence (Product Intelligence / employee Requests)",
+        "kpis": {
+            "total_requests": total,
+            "pending_approval": sum(1 for r in rows if r["approval_status"] == "Pending"),
+            "new_or_reviewing": count_status("Submitted", "Reviewing"),
+            "approved": count_status("Approved"),
+            "building": count_status("Building"),
+            "testing": count_status("Testing"),
+            "released": count_status("Released"),
+            "on_hold": count_status("On Hold"),
+            "not_planned": count_status("Not Planned"),
+        },
+    }
+
+    if scope in ("overview", "requests", "attention"):
+        request_records = []
+        for r in rows[:40]:
+            request_records.append({
+                "request_id": r["id"],
+                "request": r["original_request"],
+                "requester": r["requester_name"] or r["requester_email"],
+                "department": r["department"],
+                "status": r["status"],
+                "approval_status": r["approval_status"],
+                "buildiq_module": r["buildiq_module"],
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+                "internal_notes": r["internal_notes"],
+                "solution_built": r["solution_built"],
+                "testing_notes": r["testing_notes"],
+                "user_feedback": r["user_feedback"],
+            })
+        result["requests"] = request_records
+
+    if scope in ("overview", "attention"):
+        # Factual queues only; no fabricated priority score.  Ordering is
+        # management-oriented but every reason comes directly from stored state.
+        attention = []
+        for r in rows:
+            reason = None
+            if r["approval_status"] == "Pending":
+                reason = "Pending approval"
+            elif r["approval_status"] == "Approved" and r["status"] in ("Submitted", "Reviewing"):
+                reason = f"Approved request still {r['status']}"
+            elif r["approval_status"] == "Approved" and r["status"] in ("Building", "Testing", "On Hold"):
+                reason = f"Development lifecycle: {r['status']}"
+            if reason:
+                attention.append({
+                    "request_id": r["id"], "request": r["original_request"],
+                    "requester": r["requester_name"] or r["requester_email"],
+                    "department": r["department"], "status": r["status"],
+                    "approval_status": r["approval_status"],
+                    "buildiq_module": r["buildiq_module"], "reason": reason,
+                    "updated_at": r["updated_at"],
+                })
+        result["attention"] = attention[:30]
+
+    if scope in ("overview", "roadmap"):
+        roadmap = db.execute(
+            "SELECT id, name, lane, note, progress_pct, sort_order, updated_at FROM roadmap_items ORDER BY sort_order ASC"
+        ).fetchall()
+        result["roadmap"] = [dict(r) for r in roadmap]
+
+    return result
+
 # ---------------------------------------------------------------------------
 # Registration -- called once from app.py after register_tool/get_db/
 # user_has_permission/SP_STATUS_OPTIONS/PURCHASE_STATUS_OPTIONS all exist.
@@ -981,6 +1081,22 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
         atlas_permission="atlas:view_business_data",
         kind="read",
         handler=_tool_get_attention_items,
+    )
+    register_tool(
+        name="get_buildiq_product_intelligence",
+        description=(
+            "Get live management intelligence about BuildIQ itself from Product Intelligence and employee Requests. "
+            "Use for questions about what needs to be fixed/built in BuildIQ, employee feature/product requests, "
+            "request lifecycle, pending approvals, product attention, or the BuildIQ roadmap. This is NOT Concrete "
+            "Requests or Purchase Requests; those are operational SitePulse workflows."
+        ),
+        parameters={
+            "scope": {"type": "string", "required": False, "enum": ["overview", "requests", "attention", "roadmap"]},
+        },
+        permission="module:product_intelligence:view",
+        atlas_permission="atlas:view_business_data",
+        kind="read",
+        handler=_tool_get_buildiq_product_intelligence,
     )
     register_tool(
         name="get_project_intelligence",

@@ -6061,7 +6061,7 @@ def tr_format_phone(value):
     return value
 
 
-def gather_business_snapshot():
+def gather_business_snapshot(user):
     """Pull a compact, current business-wide snapshot for Atlas.
 
     V9.1.5: the global snapshot now carries deterministic Houston-local date
@@ -6089,14 +6089,15 @@ def gather_business_snapshot():
 
     lines.append(f"AUTHORITATIVE CURRENT DATE (America/Chicago): {today.isoformat()}")
 
-    assets = db.execute("SELECT name, status, location FROM sitepulse_assets ORDER BY name").fetchall()
-    equipment_counts = {}
-    for a in assets:
-        equipment_counts[a["status"]] = equipment_counts.get(a["status"], 0) + 1
-    lines.append("EQUIPMENT (" + ", ".join(f"{v} {k}" for k, v in equipment_counts.items()) + f", {len(assets)} total):")
-    for a in assets:
-        if a["status"] != "Available":
-            lines.append(f"  - {a['name']}: {a['status']}" + (f" @ {a['location']}" if a["location"] else ""))
+    if user_has_permission(user, "module:equipment_center:view"):
+        assets = db.execute("SELECT name, status, location FROM sitepulse_assets ORDER BY name").fetchall()
+        equipment_counts = {}
+        for a in assets:
+            equipment_counts[a["status"]] = equipment_counts.get(a["status"], 0) + 1
+        lines.append("EQUIPMENT (" + ", ".join(f"{v} {k}" for k, v in equipment_counts.items()) + f", {len(assets)} total):")
+        for a in assets:
+            if a["status"] != "Available":
+                lines.append(f"  - {a['name']}: {a['status']}" + (f" @ {a['location']}" if a["location"] else ""))
 
     open_concrete = db.execute(
         """SELECT c.id, c.project, c.pour_date, c.pour_time, c.status,
@@ -6108,28 +6109,29 @@ def gather_business_snapshot():
            LEFT JOIN tracker_projects tp ON tp.id = c.project_id
            WHERE c.status != 'Completed'
            ORDER BY c.pour_date, c.pour_time"""
-    ).fetchall()
-    lines.append(f"\nCONCRETE REQUESTS (open, {len(open_concrete)}):")
-    for r in open_concrete[:15]:
-        client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
-        details = []
-        if present(r["area_description"]): details.append(f"area={r['area_description']}")
-        if present(r["concrete_amount"]): details.append(f"amount={r['concrete_amount']}")
-        if present(r["mix_design_psi"]): details.append(f"psi={r['mix_design_psi']}")
-        if present(r["mix_slump"]): details.append(f"slump={r['mix_slump']}")
-        if present(r["pump_type"]):
-            pump = str(r["pump_type"])
-            if present(r["pump_size"]): pump += f" ({r['pump_size']})"
-            details.append(f"pump={pump}")
-        if present(r["concrete_company"]): details.append(f"supplier={r['concrete_company']}")
-        if present(r["lab_required"]): details.append(f"lab={r['lab_required']}")
-        if present(r["requested_by"]): details.append(f"requested_by={r['requested_by']}")
-        detail_text = "; ".join(details) if details else "no additional populated request detail"
-        lines.append(
-            f"  - request_id={r['id']}; {r['project'] or 'Untitled'}{client_note}; "
-            f"status={r['status']}; pour={r['pour_date'] or 'TBD'} {r['pour_time'] or ''}; "
-            f"{temporal(r['pour_date'])}; {detail_text}"
-        )
+    ).fetchall() if user_has_permission(user, "module:sitepulse:view") else []
+    if user_has_permission(user, "module:sitepulse:view"):
+        lines.append(f"\nCONCRETE REQUESTS (open, {len(open_concrete)}):")
+        for r in open_concrete[:15]:
+            client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
+            details = []
+            if present(r["area_description"]): details.append(f"area={r['area_description']}")
+            if present(r["concrete_amount"]): details.append(f"amount={r['concrete_amount']}")
+            if present(r["mix_design_psi"]): details.append(f"psi={r['mix_design_psi']}")
+            if present(r["mix_slump"]): details.append(f"slump={r['mix_slump']}")
+            if present(r["pump_type"]):
+                pump = str(r["pump_type"])
+                if present(r["pump_size"]): pump += f" ({r['pump_size']})"
+                details.append(f"pump={pump}")
+            if present(r["concrete_company"]): details.append(f"supplier={r['concrete_company']}")
+            if present(r["lab_required"]): details.append(f"lab={r['lab_required']}")
+            if present(r["requested_by"]): details.append(f"requested_by={r['requested_by']}")
+            detail_text = "; ".join(details) if details else "no additional populated request detail"
+            lines.append(
+                f"  - request_id={r['id']}; {r['project'] or 'Untitled'}{client_note}; "
+                f"status={r['status']}; pour={r['pour_date'] or 'TBD'} {r['pour_time'] or ''}; "
+                f"{temporal(r['pour_date'])}; {detail_text}"
+            )
 
     open_purchase = db.execute(
         """SELECT p.id, p.pr_number, p.job_name, p.needed_on, p.request_date,
@@ -6139,44 +6141,47 @@ def gather_business_snapshot():
            LEFT JOIN tracker_projects tp ON tp.id = p.project_id
            WHERE p.status != 'Completed'
            ORDER BY p.needed_on, p.request_date"""
-    ).fetchall()
-    lines.append(f"\nPURCHASE REQUESTS (open, {len(open_purchase)}):")
-    for r in open_purchase[:15]:
-        client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
-        item_rows = db.execute(
-            """SELECT item, description, supplier, qty, unit
-               FROM inventory_purchase_request_items
-               WHERE purchase_request_id = ? ORDER BY id LIMIT 8""",
-            (r["id"],)
-        ).fetchall()
-        item_count = db.execute(
-            "SELECT COUNT(*) c FROM inventory_purchase_request_items WHERE purchase_request_id = ?",
-            (r["id"],)
-        ).fetchone()["c"]
-        item_bits = []
-        for x in item_rows:
-            name = x["item"] or x["description"] or "item"
-            qty = ""
-            if present(x["qty"]):
-                qty = f" x{x['qty']}" + (f" {x['unit']}" if present(x["unit"]) else "")
-            supplier = f" supplier={x['supplier']}" if present(x["supplier"]) else ""
-            item_bits.append(f"{name}{qty}{supplier}")
-        if item_count > len(item_rows):
-            item_bits.append(f"+{item_count-len(item_rows)} more line item(s)")
-        meta = []
-        if present(r["location_description"]): meta.append(f"location={r['location_description']}")
-        if present(r["requested_by"]): meta.append(f"requested_by={r['requested_by']}")
-        if present(r["source_of_supply"]): meta.append(f"source={r['source_of_supply']}")
-        if present(r["vendor_company"]): meta.append(f"vendor={r['vendor_company']}")
-        lines.append(
-            f"  - PURCHASE_REQUEST_RECORD; request_id={r['id']}; pr={r['pr_number'] or 'TBD'}; "
-            f"{r['job_name'] or 'Untitled'}{client_note}; status={r['status']}; "
-            f"needed={r['needed_on'] or 'TBD'}; {temporal(r['needed_on'])}; "
-            f"items=[{'; '.join(item_bits) if item_bits else 'no line items'}]"
-            + (f"; {'; '.join(meta)}" if meta else "")
-        )
+    ).fetchall() if user_has_permission(user, "module:sitepulse:view") else []
+    if user_has_permission(user, "module:sitepulse:view"):
+        lines.append(f"\nPURCHASE REQUESTS (open, {len(open_purchase)}):")
+        for r in open_purchase[:15]:
+            client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
+            item_rows = db.execute(
+                """SELECT item, description, supplier, qty, unit
+                   FROM inventory_purchase_request_items
+                   WHERE purchase_request_id = ? ORDER BY id LIMIT 8""",
+                (r["id"],)
+            ).fetchall()
+            item_count = db.execute(
+                "SELECT COUNT(*) c FROM inventory_purchase_request_items WHERE purchase_request_id = ?",
+                (r["id"],)
+            ).fetchone()["c"]
+            item_bits = []
+            for x in item_rows:
+                name = x["item"] or x["description"] or "item"
+                qty = ""
+                if present(x["qty"]):
+                    qty = f" x{x['qty']}" + (f" {x['unit']}" if present(x["unit"]) else "")
+                supplier = f" supplier={x['supplier']}" if present(x["supplier"]) else ""
+                item_bits.append(f"{name}{qty}{supplier}")
+            if item_count > len(item_rows):
+                item_bits.append(f"+{item_count-len(item_rows)} more line item(s)")
+            meta = []
+            if present(r["location_description"]): meta.append(f"location={r['location_description']}")
+            if present(r["requested_by"]): meta.append(f"requested_by={r['requested_by']}")
+            if present(r["source_of_supply"]): meta.append(f"source={r['source_of_supply']}")
+            if present(r["vendor_company"]): meta.append(f"vendor={r['vendor_company']}")
+            lines.append(
+                f"  - PURCHASE_REQUEST_RECORD; request_id={r['id']}; pr={r['pr_number'] or 'TBD'}; "
+                f"{r['job_name'] or 'Untitled'}{client_note}; status={r['status']}; "
+                f"needed={r['needed_on'] or 'TBD'}; {temporal(r['needed_on'])}; "
+                f"items=[{'; '.join(item_bits) if item_bits else 'no line items'}]"
+                + (f"; {'; '.join(meta)}" if meta else "")
+            )
 
     try:
+        if not user_has_permission(user, "module:project_hunt:view"):
+            return "\n".join(lines)
         # PROJECT HUNT SOURCE-OF-TRUTH PARITY (V9.1.4+)
         projects = db.execute(
             "SELECT name, client, status, bid_due_date FROM tracker_projects WHERE status != 'Archived' ORDER BY bid_due_date ASC"
@@ -6356,7 +6361,7 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
-def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None):
+def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None, semantic_scope=None, product_intelligence=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
     messages array now, not flattened into this text.
@@ -6385,6 +6390,8 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
     active_context_line = "ACTIVE CONVERSATION CONTEXT: " + (json.dumps(active_context, ensure_ascii=False) if active_context else "none") + "\n\n"
     entity_matches_line = "TURN ENTITY MATCHES (live cross-BuildIQ lookup): " + (json.dumps(turn_entity_matches, ensure_ascii=False) if turn_entity_matches else "none") + "\n\n"
     entity_memory_line = "CANONICAL CONVERSATION ENTITY MEMORY: " + (json.dumps(entity_memory, ensure_ascii=False) if entity_memory else "none") + "\n\n"
+    semantic_scope_line = "SEMANTIC BUILDIQ SCOPE: " + (json.dumps(semantic_scope, ensure_ascii=False) if semantic_scope else "general") + "\n\n"
+    product_intelligence_line = "LIVE BUILDIQ PRODUCT INTELLIGENCE: " + (json.dumps(product_intelligence, ensure_ascii=False) if product_intelligence else "not requested or not authorized") + "\n\n"
     return (
         "You are Atlas, the assistant inside BuildIQ. If asked your name, "
         "say Atlas. People talk to you like they'd talk to Claude or "
@@ -6392,11 +6399,10 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "said, and don't repeat a question that's already been answered. "
         "Replies may be read aloud by text-to-speech, so keep them "
         "conversational. MATCH THE PERSON'S TONE naturally: if they are casual, playful, use slang, or joke, you may answer with the same warmth and a light emoji when it genuinely fits; if they are serious, stay professional. Never sound like a canned workflow bot, and never force slang or emojis. In text mode, use short headings, bullets and whitespace whenever they make the answer easier to scan. Never dump a dense wall of text. In voice mode, keep it natural and concise.\n\n"
-        "You can do two things:\n"
-        "1. Answer questions about the current state of the business using "
-        "the snapshot below.\n"
-        "2. Help someone submit a new concrete request by asking for "
-        "whatever's still missing, one or two things at a time -- never "
+        "You are the conversational front door to the BuildIQ capabilities and data this user is authorized to access. "
+        "Understand what they mean first, then use the grounded live context supplied by BuildIQ. Answer across BuildIQ, "
+        "drill into the right domain without making them name a module, and use controlled actions only where the server exposes them.\n"
+        "You can also help someone submit a new concrete request by asking for whatever's still missing, one or two things at a time -- never "
         "more than that in one turn. A concrete request has these fields:\n"
         f"{CONCRETE_REQUEST_FIELDS}\n\n"
         "Rules for filling out a request:\n"
@@ -6451,7 +6457,10 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- SitePulse: run the field. Field Reports belong inside SitePulse. It also surfaces field/project operational activity.\n"
         "- Equipment Center: source of truth for equipment status/location/usage and equipment/rental lifecycle operations.\n"
         "- Product Intelligence: a REAL BuildIQ module/Command Center for product/request intelligence, priorities, lifecycle, attention, pulse/resolved, build direction and requests. Never say Product Intelligence is not a BuildIQ feature.\n"
-        "- Requests Center: feature/product requests with status/history and department context.\n"
+        "- Requests Center: the EMPLOYEE-facing feature/product request workflow. Employees submit ideas, bugs, fixes, and product needs here and see their own status/history.\n"
+        "- Product Intelligence: the MANAGEMENT/admin view over BuildIQ product work and employee Requests. It is where authorized managers review request state, approvals, lifecycle, attention and build direction.\n"
+        "- REQUEST ONTOLOGY: unqualified 'requests' about fixing/improving BuildIQ itself means employee feature/product Requests when semantic context supports that. 'Purchase Request' and 'Concrete Request' are explicitly operational SitePulse workflows and must never be substituted for employee Requests. If the meaning is genuinely ambiguous, ask one concise clarification instead of dumping every request type.\n"
+        "- BUILD-IQ-ITSELF INTENT: questions like what needs fixing/building/improving in BuildIQ are product-management questions. Use LIVE BUILDIQ PRODUCT INTELLIGENCE when supplied; prioritize real employee requests and Product Intelligence state, not project concrete/purchase records.\n"
         "- Atlas: BuildIQ's conversational intelligence/action interface.\n"
         "- Finance: the next lifecycle area; do not invent capabilities that are not actually exposed in the live system.\n"
         "- Concrete Requests and Purchase Requests are operational workflows in BuildIQ; Rentals/Outside Rental lifecycle is tied to Equipment Center/SitePulse operations.\n"
@@ -6516,7 +6525,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "BuildIQ doesn't actually store.\n"
         "- If no project is established yet, this tool has nothing to "
         "act on -- establish one with set_project_context first.\n\n"
-        + context_line + active_context_line + entity_matches_line + entity_memory_line +
+        + context_line + active_context_line + entity_matches_line + entity_memory_line + semantic_scope_line + product_intelligence_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
         + json.dumps(fields) + "\n\n"
@@ -7238,7 +7247,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1.6-purchase-request-detail"
+ATLAS_BUILD = "TEST-v9.2-unified-buildiq-brain"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7740,7 +7749,7 @@ def _atlas_memory_matches(subject, draft):
     return out[:8]
 
 
-def _atlas_cross_entity_matches(subject, draft=None):
+def _atlas_cross_entity_matches(subject, draft=None, user=None):
     """Search BuildIQ across entity types before Atlas assumes what a name means.
     Read-only. Returns compact grounded facts for the reasoning model.
     """
@@ -7748,17 +7757,19 @@ def _atlas_cross_entity_matches(subject, draft=None):
     if not q:
         return []
     db=get_db(); like=f"%{q}%"; matches=_atlas_memory_matches(q, draft)
-    # Projects
-    for r in db.execute("SELECT id,name,client,status FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
-        matches.append({"type":"project","id":r["id"],"name":r["name"],"client":r["client"],"status":r["status"]})
-    # Equipment by name
-    for r in db.execute("SELECT id,name,status,location,hours_mileage FROM sitepulse_assets WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
-        matches.append({"type":"equipment","id":r["id"],"name":r["name"],"status":r["status"],"location":r["location"],"hours_mileage":r["hours_mileage"]})
-    # Locations are first-class conversational entities even if no Project Hunt row exists.
-    locs=db.execute("SELECT location, COUNT(*) AS equipment_count FROM sitepulse_assets WHERE location IS NOT NULL AND lower(location) LIKE lower(?) GROUP BY location ORDER BY location LIMIT 8", (like,)).fetchall()
-    for r in locs:
-        equipment=db.execute("SELECT name,status FROM sitepulse_assets WHERE location=? ORDER BY name LIMIT 12", (r["location"],)).fetchall()
-        matches.append({"type":"location","name":r["location"],"equipment_count":r["equipment_count"],"equipment":[{"name":e["name"],"status":e["status"]} for e in equipment]})
+    # Cross-entity grounding is permission-filtered just like the final read.
+    # Atlas must never learn a protected entity merely because semantic lookup ran first.
+    if user is not None and user_has_permission(user, "module:project_hunt:view"):
+        for r in db.execute("SELECT id,name,client,status FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
+            matches.append({"type":"project","id":r["id"],"name":r["name"],"client":r["client"],"status":r["status"]})
+    if user is not None and user_has_permission(user, "module:equipment_center:view"):
+        for r in db.execute("SELECT id,name,status,location,hours_mileage FROM sitepulse_assets WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (like,)).fetchall():
+            matches.append({"type":"equipment","id":r["id"],"name":r["name"],"status":r["status"],"location":r["location"],"hours_mileage":r["hours_mileage"]})
+        # Locations are first-class conversational entities even if no Project Hunt row exists.
+        locs=db.execute("SELECT location, COUNT(*) AS equipment_count FROM sitepulse_assets WHERE location IS NOT NULL AND lower(location) LIKE lower(?) GROUP BY location ORDER BY location LIMIT 8", (like,)).fetchall()
+        for r in locs:
+            equipment=db.execute("SELECT name,status FROM sitepulse_assets WHERE location=? ORDER BY name LIMIT 12", (r["location"],)).fetchall()
+            matches.append({"type":"location","name":r["location"],"equipment_count":r["equipment_count"],"equipment":[{"name":e["name"],"status":e["status"]} for e in equipment]})
     return matches[:16]
 
 
@@ -7789,6 +7800,50 @@ def _atlas_semantic_subject(text, api_key):
         return None
     subject=(obj.get('subject') or '').strip() if obj.get('is_lookup') else ''
     return subject or None
+
+def _atlas_semantic_buildiq_scope(text, draft, api_key):
+    """Classify the user's requested BuildIQ scope semantically, not by phrase list.
+
+    This only chooses a READ domain. It grants no permission and performs no write.
+    """
+    if not api_key or not (text or '').strip():
+        return {"domain":"general", "scope":"overview"}
+    recent = (draft or {}).get("history", [])[-6:]
+    system = (
+        "Classify the user's intended BuildIQ information domain. Return JSON only with domain and scope. "
+        "Domains: product, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
+        "PRODUCT means BuildIQ ITSELF: employee-submitted feature/product requests, bugs/fixes employees reported, "
+        "Product Intelligence, Requests Center, what needs to be fixed/built in BuildIQ, development lifecycle, roadmap. "
+        "PROJECT_OPERATIONS means a job/site/project operational picture. CONCRETE and PURCHASE are SitePulse operational "
+        "request workflows. The bare word requests is ambiguous unless wording or conversation makes employee/product vs "
+        "operational meaning clear. Phrases about fixing/improving BuildIQ itself strongly indicate product. "
+        "Scopes for product: overview, requests, attention, roadmap. Choose attention for what needs fixing/attention; "
+        "requests for employee/feature request lists; roadmap for build direction; otherwise overview. "
+        "Do not answer the user and do not invent facts."
+    )
+    msgs=[]
+    for h in recent:
+        if h.get("role") in ("user","assistant"):
+            msgs.append({"role":h["role"],"content":str(h.get("content") or "")[:1200]})
+    msgs.append({"role":"user","content":text})
+    pieces=[]; failed=False
+    for ev in _stream_claude_completion(api_key, system, msgs, tools=None, max_tokens=90, label="BUILDIQ_SCOPE_CLASSIFY"):
+        if ev[0]=='text_delta': pieces.append(ev[1])
+        elif ev[0]=='error': failed=True
+    if failed: return {"domain":"general", "scope":"overview"}
+    raw=''.join(pieces).strip()
+    try:
+        if raw.startswith('```'): raw=re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.I|re.S)
+        obj=json.loads(raw)
+    except Exception:
+        return {"domain":"general", "scope":"overview"}
+    domain=str(obj.get("domain") or "general").strip().lower()
+    scope=str(obj.get("scope") or "overview").strip().lower()
+    allowed={"product","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
+    if domain not in allowed: domain="general"
+    if scope not in {"overview","requests","attention","roadmap"}: scope="overview"
+    return {"domain":domain,"scope":scope}
+
 
 def _atlas_semantic_equipment_move(text, draft, api_key):
     """Understand a natural equipment move, then ground every action value.
@@ -8032,14 +8087,26 @@ def stream_atlas_turn(user_text, draft):
             yield f"data: {json.dumps({'type':'delta','text':_spoken})}\n\n"
             yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
             return
-    snapshot = gather_business_snapshot()
+    snapshot = gather_business_snapshot(current_user)
+    _semantic_scope = _atlas_semantic_buildiq_scope(user_text, draft, api_key)
+    _product_intelligence = None
+    if _semantic_scope.get("domain") == "product":
+        _pi_read = execute_tool(
+            "get_buildiq_product_intelligence",
+            {"scope": _semantic_scope.get("scope") or "overview"},
+            current_user, confirmed=False, session_context=draft.get("project_context")
+        )
+        if _pi_read.success:
+            _product_intelligence = _pi_read.data
+        else:
+            _product_intelligence = {"available": False, "error": _pi_read.error}
     _turn_entity_matches = []
     if not (draft.get("pending_submit") or {}).get("tool_name"):
         _subject = _atlas_semantic_subject(user_text, api_key)
         if _subject:
-            _turn_entity_matches = _atlas_cross_entity_matches(_subject, draft)
+            _turn_entity_matches = _atlas_cross_entity_matches(_subject, draft, current_user)
             _atlas_trace("ENTITY_LOOKUP", subject=_subject[:80], matches=len(_turn_entity_matches))
-    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"))
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"), _semantic_scope, _product_intelligence)
 
     # Deterministic second-turn confirmation for non-form BuildIQ actions.
     # The prior turn stores the exact validated tool + params server-side.
