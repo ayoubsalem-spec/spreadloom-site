@@ -6169,7 +6169,7 @@ def gather_business_snapshot():
         if present(r["source_of_supply"]): meta.append(f"source={r['source_of_supply']}")
         if present(r["vendor_company"]): meta.append(f"vendor={r['vendor_company']}")
         lines.append(
-            f"  - request_id={r['id']}; pr={r['pr_number'] or 'TBD'}; "
+            f"  - PURCHASE_REQUEST_RECORD; request_id={r['id']}; pr={r['pr_number'] or 'TBD'}; "
             f"{r['job_name'] or 'Untitled'}{client_note}; status={r['status']}; "
             f"needed={r['needed_on'] or 'TBD'}; {temporal(r['needed_on'])}; "
             f"items=[{'; '.join(item_bits) if item_bits else 'no line items'}]"
@@ -6430,6 +6430,8 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- CURRENT-STATE REASONING: date_state/days_from_today are factual helpers from BuildIQ. If an open record's relevant date is in the past, surface that mismatch near the top as something to review, but do NOT relabel it overdue/late unless BuildIQ itself says that. Distinguish historical/completed records from current/open work.\n"
         "- EXECUTIVE PRIORITY: for broad site/project questions, lead with what needs attention now, then the current operational picture, then supporting detail. Do not merely enumerate modules.\n"        "- AUTHORITATIVE TIME: the business snapshot states the current America/Chicago date and supplies date_state/days_from_today. Use those computed facts. Never say a past date is 'coming fast', 'nearest upcoming', or 'may have passed'. date_state=today outranks future deadlines for immediate attention; past dates on still-open records are state mismatches to review, not automatically 'overdue' unless BuildIQ says so.\n"
         "- BUSINESS-WIDE REQUEST DETAIL: for broad attention/business questions, use the populated concrete and purchase request details in CURRENT BUSINESS SNAPSHOT. Tables must identify what the request is for, not only project/status/date. Prefer concise useful columns (request/PR, work or line items, quantity/amount, status, relevant date, and vendor/supplier when populated); omit empty columns.\n"
+        "- PURCHASE REQUEST RENDERING INVARIANT: when CURRENT BUSINESS SNAPSHOT contains 2 or more open PURCHASE REQUESTS and the answer discusses them, render a dedicated Markdown Purchase Requests table. Do not replace the table with only a count or prose summary. Each row must identify the actual request contents from items=[...]. Use PR/request ID, Items (including quantities/units when returned), Needed By, and Status; add Requester, Vendor, Source, or Location only when populated and useful. If one request has multiple line items, keep those line items together in its Items cell rather than losing them.\n"
+        "- TERMINOLOGY ACCURACY: records from inventory_purchase_requests are Purchase Requests (PRs), never call them purchase orders or POs unless authoritative BuildIQ data explicitly identifies a separate purchase-order record/type. Do not upgrade a request into an order by inference.\n"
         "- For project summaries, do not dump every row of a long list unless the person asks for details; preserve useful detail instead of compressing distinct records into a single crowded line.\n"
         "- Never describe historical location evidence as a current location. Clearly distinguish current assignment/location from recent or historical activity.\n\n"
         "ENTITY-FIRST INTELLIGENCE rules:\n"
@@ -7236,7 +7238,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1.5-temporal-rich-business-intelligence"
+ATLAS_BUILD = "TEST-v9.1.6-purchase-request-detail"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
