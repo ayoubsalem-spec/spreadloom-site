@@ -6062,52 +6062,122 @@ def tr_format_phone(value):
 
 
 def gather_business_snapshot():
-    """Pull a compact, current snapshot of the business for the voice
-    assistant to answer questions against -- equipment status, open
-    requests, and active bids. Kept short on purpose: this gets stuffed
-    into every assistant prompt, so it's a summary, not a full export.
+    """Pull a compact, current business-wide snapshot for Atlas.
+
+    V9.1.5: the global snapshot now carries deterministic Houston-local date
+    context and useful request detail.  Atlas should not have to infer whether
+    a date is past/today/future, and a request should not collapse to merely
+    project + status + date when BuildIQ has the actual work details.
     """
     db = get_db()
     lines = []
+    today = datetime.now(HOUSTON_TZ).date()
+
+    def temporal(value):
+        if not value:
+            return "date_state=unknown"
+        try:
+            d = date.fromisoformat(str(value)[:10])
+        except (TypeError, ValueError):
+            return "date_state=unknown"
+        delta = (d - today).days
+        state = "past" if delta < 0 else "today" if delta == 0 else "future"
+        return f"date_state={state}, days_from_today={delta}"
+
+    def present(value):
+        return value is not None and str(value).strip() != ""
+
+    lines.append(f"AUTHORITATIVE CURRENT DATE (America/Chicago): {today.isoformat()}")
 
     assets = db.execute("SELECT name, status, location FROM sitepulse_assets ORDER BY name").fetchall()
-    status_counts = {}
+    equipment_counts = {}
     for a in assets:
-        status_counts[a["status"]] = status_counts.get(a["status"], 0) + 1
-    lines.append("EQUIPMENT (" + ", ".join(f"{v} {k}" for k, v in status_counts.items()) + f", {len(assets)} total):")
+        equipment_counts[a["status"]] = equipment_counts.get(a["status"], 0) + 1
+    lines.append("EQUIPMENT (" + ", ".join(f"{v} {k}" for k, v in equipment_counts.items()) + f", {len(assets)} total):")
     for a in assets:
         if a["status"] != "Available":
             lines.append(f"  - {a['name']}: {a['status']}" + (f" @ {a['location']}" if a["location"] else ""))
 
     open_concrete = db.execute(
-        """SELECT c.project, c.pour_date, c.status, tp.client AS linked_client
+        """SELECT c.id, c.project, c.pour_date, c.pour_time, c.status,
+                  c.area_description, c.mix_design_psi, c.mix_slump,
+                  c.concrete_amount, c.pump_type, c.pump_size,
+                  c.concrete_company, c.lab_required, c.requested_by,
+                  tp.client AS linked_client
            FROM inventory_concrete_requests c
            LEFT JOIN tracker_projects tp ON tp.id = c.project_id
-           WHERE c.status != 'Completed' ORDER BY c.pour_date"""
+           WHERE c.status != 'Completed'
+           ORDER BY c.pour_date, c.pour_time"""
     ).fetchall()
     lines.append(f"\nCONCRETE REQUESTS (open, {len(open_concrete)}):")
     for r in open_concrete[:15]:
         client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
-        lines.append(f"  - {r['project'] or 'Untitled'}{client_note}: {r['status']}, pour {r['pour_date'] or 'TBD'}")
+        details = []
+        if present(r["area_description"]): details.append(f"area={r['area_description']}")
+        if present(r["concrete_amount"]): details.append(f"amount={r['concrete_amount']}")
+        if present(r["mix_design_psi"]): details.append(f"psi={r['mix_design_psi']}")
+        if present(r["mix_slump"]): details.append(f"slump={r['mix_slump']}")
+        if present(r["pump_type"]):
+            pump = str(r["pump_type"])
+            if present(r["pump_size"]): pump += f" ({r['pump_size']})"
+            details.append(f"pump={pump}")
+        if present(r["concrete_company"]): details.append(f"supplier={r['concrete_company']}")
+        if present(r["lab_required"]): details.append(f"lab={r['lab_required']}")
+        if present(r["requested_by"]): details.append(f"requested_by={r['requested_by']}")
+        detail_text = "; ".join(details) if details else "no additional populated request detail"
+        lines.append(
+            f"  - request_id={r['id']}; {r['project'] or 'Untitled'}{client_note}; "
+            f"status={r['status']}; pour={r['pour_date'] or 'TBD'} {r['pour_time'] or ''}; "
+            f"{temporal(r['pour_date'])}; {detail_text}"
+        )
 
     open_purchase = db.execute(
-        """SELECT p.job_name, p.needed_on, p.status, tp.client AS linked_client
+        """SELECT p.id, p.pr_number, p.job_name, p.needed_on, p.request_date,
+                  p.status, p.location_description, p.requested_by,
+                  p.source_of_supply, p.vendor_company, tp.client AS linked_client
            FROM inventory_purchase_requests p
            LEFT JOIN tracker_projects tp ON tp.id = p.project_id
-           WHERE p.status != 'Completed' ORDER BY p.needed_on"""
+           WHERE p.status != 'Completed'
+           ORDER BY p.needed_on, p.request_date"""
     ).fetchall()
     lines.append(f"\nPURCHASE REQUESTS (open, {len(open_purchase)}):")
     for r in open_purchase[:15]:
         client_note = f" for {r['linked_client']}" if r["linked_client"] else ""
-        lines.append(f"  - {r['job_name'] or 'Untitled'}{client_note}: {r['status']}, needed {r['needed_on'] or 'TBD'}")
+        item_rows = db.execute(
+            """SELECT item, description, supplier, qty, unit
+               FROM inventory_purchase_request_items
+               WHERE purchase_request_id = ? ORDER BY id LIMIT 8""",
+            (r["id"],)
+        ).fetchall()
+        item_count = db.execute(
+            "SELECT COUNT(*) c FROM inventory_purchase_request_items WHERE purchase_request_id = ?",
+            (r["id"],)
+        ).fetchone()["c"]
+        item_bits = []
+        for x in item_rows:
+            name = x["item"] or x["description"] or "item"
+            qty = ""
+            if present(x["qty"]):
+                qty = f" x{x['qty']}" + (f" {x['unit']}" if present(x["unit"]) else "")
+            supplier = f" supplier={x['supplier']}" if present(x["supplier"]) else ""
+            item_bits.append(f"{name}{qty}{supplier}")
+        if item_count > len(item_rows):
+            item_bits.append(f"+{item_count-len(item_rows)} more line item(s)")
+        meta = []
+        if present(r["location_description"]): meta.append(f"location={r['location_description']}")
+        if present(r["requested_by"]): meta.append(f"requested_by={r['requested_by']}")
+        if present(r["source_of_supply"]): meta.append(f"source={r['source_of_supply']}")
+        if present(r["vendor_company"]): meta.append(f"vendor={r['vendor_company']}")
+        lines.append(
+            f"  - request_id={r['id']}; pr={r['pr_number'] or 'TBD'}; "
+            f"{r['job_name'] or 'Untitled'}{client_note}; status={r['status']}; "
+            f"needed={r['needed_on'] or 'TBD'}; {temporal(r['needed_on'])}; "
+            f"items=[{'; '.join(item_bits) if item_bits else 'no line items'}]"
+            + (f"; {'; '.join(meta)}" if meta else "")
+        )
 
     try:
-        # PROJECT HUNT SOURCE-OF-TRUTH PARITY (V9.1.4)
-        # Keep Atlas on the exact same status semantics as tracker_dashboard().
-        # The Project Hunt page defines its working population as every row that
-        # is not Archived, then derives KPI cards from exact stored statuses.
-        # Do not call the whole population "active" and do not independently
-        # reinterpret legacy/status values here.
+        # PROJECT HUNT SOURCE-OF-TRUTH PARITY (V9.1.4+)
         projects = db.execute(
             "SELECT name, client, status, bid_due_date FROM tracker_projects WHERE status != 'Archived' ORDER BY bid_due_date ASC"
         ).fetchall()
@@ -6117,29 +6187,27 @@ def gather_business_snapshot():
             "awarded": sum(1 for p in projects if p["status"] == "Awarded"),
             "unmeant": sum(1 for p in projects if p["status"] == "Unmeant"),
         }
-        status_counts = {}
+        ph_status_counts = {}
         for p in projects:
             status = (p["status"] or "Unknown/TBD").strip() or "Unknown/TBD"
-            status_counts[status] = status_counts.get(status, 0) + 1
+            ph_status_counts[status] = ph_status_counts.get(status, 0) + 1
 
         lines.append(
             "\nPROJECT HUNT — AUTHORITATIVE PAGE KPIs: "
-            f"{ph_counts['active']} Active Bids; "
-            f"{ph_counts['submitted']} Submitted; "
-            f"{ph_counts['awarded']} Awarded; "
-            f"{ph_counts['unmeant']} Unmeant Projects; "
+            f"{ph_counts['active']} Active Bids; {ph_counts['submitted']} Submitted; "
+            f"{ph_counts['awarded']} Awarded; {ph_counts['unmeant']} Unmeant Projects; "
             f"{len(projects)} total non-archived records."
         )
         lines.append(
             "PROJECT HUNT — STORED STATUS BREAKDOWN: "
-            + "; ".join(f"{status}={count}" for status, count in sorted(status_counts.items()))
+            + "; ".join(f"{status}={count}" for status, count in sorted(ph_status_counts.items()))
         )
         lines.append("PROJECT HUNT — IN PROGRESS (same rows as the default Active view):")
         for p in [p for p in projects if p["status"] == "In Progress"][:15]:
             lines.append(
                 f"  - {p['name']}"
                 + (f" ({p['client']})" if p["client"] else "")
-                + f", due {p['bid_due_date'] or 'TBD'}"
+                + f"; due={p['bid_due_date'] or 'TBD'}; {temporal(p['bid_due_date'])}"
             )
     except sqlite3.OperationalError:
         pass
@@ -6360,7 +6428,8 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- Tables must use useful record-level columns supported by the returned data, not a cramped one-row category summary. Never invent columns/values. If a dataset is long, show the most relevant/current rows and summarize the remainder.\n"
         "- RECORD RICHNESS: when project intelligence returns detailed concrete or purchase records, use the fields that explain the work (for example pour date/time, amount, PSI/area/supplier for concrete; PR number, item/quantity, needed date, vendor/delivery for purchases). Do not collapse rich records to only date + status when more useful returned fields exist. Omit empty columns rather than printing blanks.\n"
         "- CURRENT-STATE REASONING: date_state/days_from_today are factual helpers from BuildIQ. If an open record's relevant date is in the past, surface that mismatch near the top as something to review, but do NOT relabel it overdue/late unless BuildIQ itself says that. Distinguish historical/completed records from current/open work.\n"
-        "- EXECUTIVE PRIORITY: for broad site/project questions, lead with what needs attention now, then the current operational picture, then supporting detail. Do not merely enumerate modules.\n"
+        "- EXECUTIVE PRIORITY: for broad site/project questions, lead with what needs attention now, then the current operational picture, then supporting detail. Do not merely enumerate modules.\n"        "- AUTHORITATIVE TIME: the business snapshot states the current America/Chicago date and supplies date_state/days_from_today. Use those computed facts. Never say a past date is 'coming fast', 'nearest upcoming', or 'may have passed'. date_state=today outranks future deadlines for immediate attention; past dates on still-open records are state mismatches to review, not automatically 'overdue' unless BuildIQ says so.\n"
+        "- BUSINESS-WIDE REQUEST DETAIL: for broad attention/business questions, use the populated concrete and purchase request details in CURRENT BUSINESS SNAPSHOT. Tables must identify what the request is for, not only project/status/date. Prefer concise useful columns (request/PR, work or line items, quantity/amount, status, relevant date, and vendor/supplier when populated); omit empty columns.\n"
         "- For project summaries, do not dump every row of a long list unless the person asks for details; preserve useful detail instead of compressing distinct records into a single crowded line.\n"
         "- Never describe historical location evidence as a current location. Clearly distinguish current assignment/location from recent or historical activity.\n\n"
         "ENTITY-FIRST INTELLIGENCE rules:\n"
@@ -7167,7 +7236,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1.4-project-hunt-source-parity"
+ATLAS_BUILD = "TEST-v9.1.5-temporal-rich-business-intelligence"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
