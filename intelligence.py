@@ -642,14 +642,30 @@ def _pi_linked_via(row_project_id, canonical_pid):
     return "project_id" if row_project_id == canonical_pid else "legacy_exact_name_match"
 
 
+def _pi_date_context(value):
+    """Return factual date context without inventing an overdue business rule.
+
+    A request can have a date in the past while still carrying an open status in
+    BuildIQ. Atlas needs both facts so it can surface the mismatch as something
+    worth reviewing, without relabeling the record as overdue/late.
+    """
+    if not value:
+        return {"date_state": "unknown", "days_from_today": None}
+    try:
+        d = date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return {"date_state": "unknown", "days_from_today": None}
+    delta = (d - date.today()).days
+    return {
+        "date_state": "past" if delta < 0 else "today" if delta == 0 else "future",
+        "days_from_today": delta,
+    }
+
+
 def _pi_concrete(db, project_id, project_name):
-    # LEGACY FALLBACK RULE (explicit precedence, exact match only, no
-    # LIKE/substring): a record with a real project_id is matched ONLY
-    # by that id, never additionally by free text. A record with
-    # project_id IS NULL may match ONLY via an EXACT equality against
-    # the canonical project's own name -- the same raw SQLite `=`
-    # semantics _find_project()'s own exact-match tier already uses,
-    # not a new normalization scheme.
+    # Preserve the existing canonical-linking rule, but return enough bounded
+    # record detail for Atlas to explain what is actually happening instead of
+    # reducing every pour to only date + status.
     where = "(project_id = ? OR (project_id IS NULL AND project = ?))"
     params_base = (project_id, project_name)
     total = db.execute(f"SELECT COUNT(*) c FROM inventory_concrete_requests WHERE {where}", params_base).fetchone()["c"]
@@ -657,20 +673,28 @@ def _pi_concrete(db, project_id, project_name):
         f"SELECT COUNT(*) c FROM inventory_concrete_requests WHERE {where} AND status != 'Completed'", params_base
     ).fetchone()["c"]
     rows = db.execute(
-        f"""SELECT id, status, pour_date, project_id FROM inventory_concrete_requests WHERE {where}
-           ORDER BY (status != 'Completed') DESC, pour_date DESC LIMIT ?""",
+        f"""SELECT id, status, pour_date, pour_time, area_description, mix_design_psi, mix_slump,
+                   concrete_amount, truck_spacing, pump_type, pump_size, concrete_company,
+                   lab_required, drilling_required, project_id
+            FROM inventory_concrete_requests WHERE {where}
+            ORDER BY (status != 'Completed') DESC, pour_date DESC, pour_time DESC LIMIT ?""",
         params_base + (_PI_CONCRETE_LIMIT,)
     ).fetchall()
-    return {
-        "open_count": open_total,
-        "total_count": total,
-        "truncated": total > len(rows),
-        "items": [
-            {"record_type": "concrete_request", "record_id": r["id"], "status": r["status"],
-             "relevant_date": r["pour_date"], "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id)}
-            for r in rows
-        ],
-    }
+    items = []
+    for r in rows:
+        item = {
+            "record_type": "concrete_request", "record_id": r["id"], "status": r["status"],
+            "pour_date": r["pour_date"], "pour_time": r["pour_time"],
+            "area_description": r["area_description"], "mix_design_psi": r["mix_design_psi"],
+            "mix_slump": r["mix_slump"], "concrete_amount": r["concrete_amount"],
+            "truck_spacing": r["truck_spacing"], "pump_type": r["pump_type"],
+            "pump_size": r["pump_size"], "concrete_company": r["concrete_company"],
+            "lab_required": r["lab_required"], "drilling_required": r["drilling_required"],
+            "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id),
+        }
+        item.update(_pi_date_context(r["pour_date"]))
+        items.append(item)
+    return {"open_count": open_total, "total_count": total, "truncated": total > len(rows), "items": items}
 
 
 def _pi_purchases(db, project_id, project_name):
@@ -681,20 +705,36 @@ def _pi_purchases(db, project_id, project_name):
         f"SELECT COUNT(*) c FROM inventory_purchase_requests WHERE {where} AND status != 'Completed'", params_base
     ).fetchone()["c"]
     rows = db.execute(
-        f"""SELECT id, status, needed_on, project_id FROM inventory_purchase_requests WHERE {where}
-           ORDER BY (status != 'Completed') DESC, request_date DESC LIMIT ?""",
+        f"""SELECT id, pr_number, status, request_date, needed_on, location_description, requested_by,
+                   source_of_supply, vendor_company, expected_delivery_date, project_id
+            FROM inventory_purchase_requests WHERE {where}
+            ORDER BY (status != 'Completed') DESC, request_date DESC LIMIT ?""",
         params_base + (_PI_PURCHASE_LIMIT,)
     ).fetchall()
-    return {
-        "open_count": open_total,
-        "total_count": total,
-        "truncated": total > len(rows),
-        "items": [
-            {"record_type": "purchase_request", "record_id": r["id"], "status": r["status"],
-             "relevant_date": r["needed_on"], "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id)}
-            for r in rows
-        ],
-    }
+    items = []
+    for r in rows:
+        line_rows = db.execute(
+            """SELECT item, description, supplier, qty, unit
+               FROM inventory_purchase_request_items WHERE purchase_request_id = ? ORDER BY id LIMIT 8""",
+            (r["id"],)
+        ).fetchall()
+        line_count = db.execute(
+            "SELECT COUNT(*) c FROM inventory_purchase_request_items WHERE purchase_request_id = ?", (r["id"],)
+        ).fetchone()["c"]
+        item = {
+            "record_type": "purchase_request", "record_id": r["id"], "pr_number": r["pr_number"],
+            "status": r["status"], "request_date": r["request_date"], "needed_on": r["needed_on"],
+            "location_description": r["location_description"], "requested_by": r["requested_by"],
+            "source_of_supply": r["source_of_supply"], "vendor_company": r["vendor_company"],
+            "expected_delivery_date": r["expected_delivery_date"],
+            "line_items": [{"item": x["item"], "description": x["description"], "supplier": x["supplier"],
+                            "qty": x["qty"], "unit": x["unit"]} for x in line_rows],
+            "line_items_truncated": line_count > len(line_rows),
+            "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id),
+        }
+        item.update(_pi_date_context(r["needed_on"]))
+        items.append(item)
+    return {"open_count": open_total, "total_count": total, "truncated": total > len(rows), "items": items}
 
 
 def _pi_equipment(db, project_id):

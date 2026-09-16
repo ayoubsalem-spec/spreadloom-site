@@ -6325,6 +6325,9 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- For broad project/site/operational summaries, lead with a compact answer/current-status sentence, then render EACH section in the form that best fits its data. Do not force the whole answer into one summary table and do not cram multi-record operational data into prose.\n"
         "- ADAPTIVE RENDERING: use a Markdown table for a section when it contains multiple structured records with repeated fields (for example several concrete pours, purchase requests, equipment items, rentals, or side-by-side project comparisons). Give Concrete its own table when several pours exist; give Purchases its own table when several requests exist. Keep a single simple rental/equipment fact as a sentence or bullet. Keep empty states as one short sentence. Use bullets for short heterogeneous facts. Use direct prose for focused questions.\n"
         "- Tables must use useful record-level columns supported by the returned data, not a cramped one-row category summary. Never invent columns/values. If a dataset is long, show the most relevant/current rows and summarize the remainder.\n"
+        "- RECORD RICHNESS: when project intelligence returns detailed concrete or purchase records, use the fields that explain the work (for example pour date/time, amount, PSI/area/supplier for concrete; PR number, item/quantity, needed date, vendor/delivery for purchases). Do not collapse rich records to only date + status when more useful returned fields exist. Omit empty columns rather than printing blanks.\n"
+        "- CURRENT-STATE REASONING: date_state/days_from_today are factual helpers from BuildIQ. If an open record's relevant date is in the past, surface that mismatch near the top as something to review, but do NOT relabel it overdue/late unless BuildIQ itself says that. Distinguish historical/completed records from current/open work.\n"
+        "- EXECUTIVE PRIORITY: for broad site/project questions, lead with what needs attention now, then the current operational picture, then supporting detail. Do not merely enumerate modules.\n"
         "- For project summaries, do not dump every row of a long list unless the person asks for details; preserve useful detail instead of compressing distinct records into a single crowded line.\n"
         "- Never describe historical location evidence as a current location. Clearly distinguish current assignment/location from recent or historical activity.\n\n"
         "ENTITY-FIRST INTELLIGENCE rules:\n"
@@ -7130,7 +7133,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.1.2-canonical-location-write-fix"
+ATLAS_BUILD = "TEST-v9.1.3-rich-project-intelligence"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
