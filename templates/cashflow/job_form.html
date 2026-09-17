@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% block title %}Create Project / Job · CashFlow{% endblock %}{% block content %}
+<div class="section-row"><div><div class="eyebrow">CASHFLOW · PROJECT / JOB</div><h1>Create Project / Job</h1><p class="sub">For billing work that does not need to be a Project Hunt award. If the project already exists in BuildIQ, go back and select it instead.</p></div></div>
+<form class="card" method="post" style="max-width:900px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+<div class="form-row"><div style="flex:2"><label>Project / Job Name</label><input required name="name" placeholder="Example: Metro — Service Work"></div><div style="flex:2"><label>Client</label><input required name="client" placeholder="Client / owner"></div></div>
+<div class="form-row"><div style="flex:1"><label>Job / PO / Contract # <span class="sub">(optional)</span></label><input name="job_number" placeholder="PO, contract or internal #"></div><div style="flex:1"><label>Budget / Contract Amount <span class="sub">(optional)</span></label><input type="number" min="0" step="0.01" name="budget" placeholder="0.00"></div></div>
+<label>Notes <span class="sub">(optional)</span></label><textarea name="notes" placeholder="Anything the invoice team should know about this job"></textarea>
+<div style="margin-top:18px"><button class="btn btn-gold">Create Project / Job</button> <a class="btn" href="{{ url_for('cashflow_invoice_new') }}">Cancel</a></div></form>
+<div class="card" style="max-width:900px;margin-top:14px"><b>This does not mark anything Awarded.</b><p class="sub" style="margin-bottom:0">It creates a lightweight CashFlow billing workspace only. Existing BuildIQ projects stay connected to their normal Project Hunt / Deployment lifecycle.</p></div>
+{% endblock %}
