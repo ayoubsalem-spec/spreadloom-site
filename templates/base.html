@@ -197,21 +197,13 @@
         <nav>
             <div class="nav-primary">
                 {% if has_project_hunt_access %}<a href="{{ url_for('tracker_dashboard') }}" class="{{ 'active' if request.path.startswith('/tracker') }}">Project Hunt</a>{% endif %}
-                <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') and not (request.path.startswith('/sitepulse/reports') or request.path.startswith('/sitepulse/project') or request.path.startswith('/sitepulse/photos')) }}">Equipment Center</a>
+                {% if has_project_deployment_access %}<a href="{{ url_for('project_deployment_dashboard') }}" class="{{ 'active' if request.path.startswith('/deployment') }}">Project Deployment</a>{% endif %}
                 <a href="{{ url_for('inventory_home') }}" class="{{ 'active' if request.path.startswith('/inventory') or request.path.startswith('/sitepulse/reports') or request.path.startswith('/sitepulse/project') or request.path.startswith('/sitepulse/photos') }}">SitePulse</a>
-                {% if has_atlas_access %}
-                <a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>
-                {% endif %}
+                <a href="{{ url_for('sitepulse_dashboard') }}" class="{{ 'active' if request.path.startswith('/sitepulse') and not (request.path.startswith('/sitepulse/reports') or request.path.startswith('/sitepulse/project') or request.path.startswith('/sitepulse/photos')) }}">Equipment Center</a>
+                {% if has_atlas_access %}<a href="{{ url_for('assistant_page') }}" class="{{ 'active' if request.path.startswith('/assistant') }}">Atlas</a>{% endif %}
                 <a href="{{ url_for('request_center') }}" class="{{ 'active' if request.path == '/requests' }}">Requests</a>
-                {% if has_product_intelligence_access %}
-                <a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>
-                {% endif %}
-                {% if has_project_deployment_access %}
-                <a href="{{ url_for('project_deployment_dashboard') }}" class="{{ 'active' if request.path.startswith('/deployment') }}">Project Deployment</a>
-                {% endif %}
-                {% if has_cashflow_access %}
-                <a href="{{ url_for('cashflow_dashboard') }}" class="{{ 'active' if request.path.startswith('/cashflow') }}">CashFlow</a>
-                {% endif %}
+                {% if has_product_intelligence_access %}<a href="{{ url_for('product_intelligence') }}" class="{{ 'active' if request.path.startswith('/admin/product-intelligence') }}">Product Intelligence</a>{% endif %}
+                {% if has_cashflow_access %}<a href="{{ url_for('cashflow_dashboard') }}" class="{{ 'active' if request.path.startswith('/cashflow') }}">CashFlow</a>{% endif %}
             </div>
         </nav>
 
