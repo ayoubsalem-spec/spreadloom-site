@@ -12,6 +12,14 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+        (function(){
+            try {
+                var saved = localStorage.getItem('buildiq-theme');
+                document.documentElement.setAttribute('data-theme', saved === 'light' ? 'light' : 'dark');
+            } catch(e) { document.documentElement.setAttribute('data-theme','dark'); }
+        })();
+    </script>
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         :root {
@@ -27,6 +35,14 @@
             --navy:var(--ink); --navy-light:var(--surface); --navy-card:var(--surface-2);
             --green:var(--teal); --yellow:var(--brass); --blue:var(--cyan);
             --text-light:var(--text); --border:var(--line);
+            --header-bg:rgba(10,20,32,0.88); --menu-shadow:0 12px 28px rgba(0,0,0,0.45);
+        }
+        html[data-theme="light"] {
+            --ink:#F4F7FA; --surface:#FFFFFF; --surface-2:#EDF3F8; --line:#CBD7E2;
+            --line-faint:rgba(44,82,110,0.075);
+            --brass:#A77C22; --brass-dim:#8A681F; --cyan:#167C9B; --teal:#0B8F7C; --pink:#B84B87;
+            --text:#142233; --text-dim:#536B80; --text-faint:#71879A; --red:#C33E45;
+            --header-bg:rgba(255,255,255,0.92); --menu-shadow:0 12px 28px rgba(24,42,58,0.14);
         }
         body {
             background: linear-gradient(var(--line-faint) 1px, transparent 1px) 0 0/48px 48px,
@@ -41,7 +57,7 @@
             display:flex; justify-content:space-between; align-items:center;
             padding:14px 32px; border-bottom:1px solid var(--line);
             font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text-dim);
-            letter-spacing:0.5px; background:rgba(10,20,32,0.85); backdrop-filter:blur(6px);
+            letter-spacing:0.5px; background:var(--header-bg); backdrop-filter:blur(8px);
             position:sticky; top:0; z-index:50; flex-wrap:nowrap; gap:16px;
         }
         .titlebar .brand { display:flex; align-items:center; gap:10px; color:var(--text); font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; letter-spacing:0.3px; text-decoration:none; flex-shrink:0; }
@@ -73,6 +89,16 @@
            clipped. */
         .nav-primary { display:flex; align-items:center; gap:22px; }
 
+        .theme-toggle {
+            width:34px; height:34px; flex:0 0 34px; border:1px solid var(--line); border-radius:50%;
+            background:var(--surface); color:var(--text-dim); cursor:pointer; display:flex; align-items:center; justify-content:center;
+            font-size:16px; line-height:1; transition:transform .16s ease,border-color .16s ease,color .16s ease,background .16s ease;
+        }
+        .theme-toggle:hover { color:var(--brass); border-color:var(--brass-dim); transform:translateY(-1px); }
+        .theme-toggle .sun { display:none; }
+        html[data-theme="light"] .theme-toggle .sun { display:inline; }
+        html[data-theme="light"] .theme-toggle .moon { display:none; }
+        html[data-theme="light"] img:not(.theme-preserve) { }
         .nav-admin { position:relative; flex-shrink:0; margin-left:4px; }
         .nav-admin-trigger {
             display:flex; align-items:center; gap:6px; background:none; border:1px solid transparent;
@@ -85,7 +111,7 @@
         .nav-admin-menu {
             display:none; position:absolute; top:calc(100% + 8px); right:0; min-width:210px;
             background:var(--surface-2); border:1px solid var(--line); border-radius:6px;
-            box-shadow:0 12px 28px rgba(0,0,0,0.45); padding:8px 0; z-index:60;
+            box-shadow:var(--menu-shadow); padding:8px 0; z-index:60;
         }
         .nav-admin.open .nav-admin-menu { display:block; }
         .nav-admin-group + .nav-admin-group { border-top:1px solid var(--line); margin-top:6px; padding-top:6px; }
@@ -209,6 +235,9 @@
 
         {% set show_admin_group = has_team_admin_access %}
         {% set show_whatsapp = has_whatsapp_admin_access %}
+        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch light or dark mode" title="Light / Dark mode">
+            <span class="moon" aria-hidden="true">☾</span><span class="sun" aria-hidden="true">☀</span>
+        </button>
         <div class="nav-admin" id="nav-admin">
             <button type="button" class="nav-admin-trigger" id="nav-admin-trigger" aria-haspopup="true" aria-expanded="false">
                 {{ current_user.name.split(' ')[0] if current_user.name else current_user.email.split('@')[0] }}
@@ -245,6 +274,26 @@
         </div>
     </div>
     <script>
+        (function () {
+            var toggle = document.getElementById('theme-toggle');
+            if (toggle) {
+                function syncLabel() {
+                    var light = document.documentElement.getAttribute('data-theme') === 'light';
+                    toggle.setAttribute('aria-label', light ? 'Switch to dark mode' : 'Switch to light mode');
+                    toggle.setAttribute('title', light ? 'Dark mode' : 'Light mode');
+                    var meta = document.querySelector('meta[name="theme-color"]');
+                    if (meta) meta.setAttribute('content', light ? '#F4F7FA' : '#0A1420');
+                }
+                syncLabel();
+                toggle.addEventListener('click', function () {
+                    var light = document.documentElement.getAttribute('data-theme') === 'light';
+                    var next = light ? 'dark' : 'light';
+                    document.documentElement.setAttribute('data-theme', next);
+                    try { localStorage.setItem('buildiq-theme', next); } catch(e) {}
+                    syncLabel();
+                });
+            }
+        })();
         (function () {
             var wrap = document.getElementById('nav-admin');
             var trigger = document.getElementById('nav-admin-trigger');
