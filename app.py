@@ -2334,6 +2334,18 @@ def init_db():
             db.execute("ALTER TABLE finance_invoices ADD COLUMN retainage_percent REAL NOT NULL DEFAULT 0")
         if "cashflow_job_id" not in finance_cols:
             db.execute("ALTER TABLE finance_invoices ADD COLUMN cashflow_job_id INTEGER")
+        # CashFlow V5: simple in-app review handoff. Additive only.
+        for col, ddl in [
+            ("review_status", "TEXT NOT NULL DEFAULT 'Not Sent'"),
+            ("reviewer_user_id", "INTEGER"),
+            ("review_requested_at", "TEXT"),
+            ("review_requested_by", "TEXT"),
+            ("reviewed_at", "TEXT"),
+            ("reviewed_by", "TEXT"),
+            ("review_comment", "TEXT")
+        ]:
+            if col not in finance_cols:
+                db.execute(f"ALTER TABLE finance_invoices ADD COLUMN {col} {ddl}")
         sub_cols = {r[1] for r in db.execute("PRAGMA table_info(finance_sub_invoices)").fetchall()}
         if "cashflow_job_id" not in sub_cols:
             db.execute("ALTER TABLE finance_sub_invoices ADD COLUMN cashflow_job_id INTEGER")
@@ -3723,6 +3735,18 @@ def _cashflow_resolve_workspace(db, key):
     return None
 
 
+def _cashflow_reviewers(db):
+    """Users who can actually view CashFlow, respecting explicit deny overrides."""
+    perm=db.execute("SELECT id FROM permissions WHERE key='module:finance:view'").fetchone()
+    if not perm: return []
+    pid=perm['id']
+    return db.execute("""SELECT DISTINCT u.id,u.name,u.email FROM users u
+        WHERE NOT EXISTS (SELECT 1 FROM user_permission_overrides o WHERE o.user_id=u.id AND o.permission_id=? AND o.state='deny')
+          AND (EXISTS (SELECT 1 FROM user_permission_overrides o WHERE o.user_id=u.id AND o.permission_id=? AND o.state='grant')
+               OR EXISTS (SELECT 1 FROM user_roles ur JOIN role_permissions rp ON rp.role_id=ur.role_id WHERE ur.user_id=u.id AND rp.permission_id=?))
+        ORDER BY COALESCE(NULLIF(u.name,''),u.email) COLLATE NOCASE""",(pid,pid,pid)).fetchall()
+
+
 @app.route("/cashflow")
 @login_required
 def cashflow_dashboard():
@@ -3818,7 +3842,10 @@ def cashflow_invoice_detail(invoice_id):
         try: d["days_overdue"]=(date.today()-date.fromisoformat(d["due_date"])).days
         except ValueError: pass
     payments=db.execute("SELECT * FROM finance_payments WHERE invoice_id=? ORDER BY payment_date DESC,id DESC",(invoice_id,)).fetchall(); notes=db.execute("SELECT * FROM finance_invoice_notes WHERE invoice_id=? ORDER BY id DESC",(invoice_id,)).fetchall(); docs=db.execute("SELECT * FROM finance_invoice_documents WHERE invoice_id=? ORDER BY id DESC",(invoice_id,)).fetchall(); activity=db.execute("SELECT * FROM finance_invoice_activity WHERE invoice_id=? ORDER BY id DESC",(invoice_id,)).fetchall()
-    return render_template("cashflow/detail.html",invoice=d,payments=payments,notes=notes,documents=docs,activity=activity)
+    reviewer=None
+    if d.get("reviewer_user_id"):
+        reviewer=db.execute("SELECT id,name,email FROM users WHERE id=?",(d["reviewer_user_id"],)).fetchone()
+    return render_template("cashflow/detail.html",invoice=d,payments=payments,notes=notes,documents=docs,activity=activity,reviewers=_cashflow_reviewers(db),reviewer=reviewer)
 
 
 @app.route("/cashflow/invoices/<int:invoice_id>/edit",methods=["GET","POST"])
@@ -3878,6 +3905,38 @@ def cashflow_document_file(document_id):
     if not d: abort(404)
     return send_from_directory(UPLOAD_DIR,d["filename"],as_attachment=True,download_name=d["original_name"])
 
+
+@app.route("/cashflow/invoices/<int:invoice_id>/send-review",methods=["POST"])
+@login_required
+def cashflow_send_review(invoice_id):
+    if not _authorized("action:finance:manage"): return redirect(url_for("cashflow_dashboard"))
+    db=get_db(); inv=_cashflow_invoice_row(db,invoice_id)
+    try: reviewer_id=int(request.form.get("reviewer_user_id") or 0)
+    except ValueError: reviewer_id=0
+    eligible={r['id'] for r in _cashflow_reviewers(db)}
+    if not inv or reviewer_id not in eligible:
+        flash("Choose a CashFlow user to review this invoice.","error"); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+    now=datetime.utcnow().isoformat(); reviewer=db.execute("SELECT name,email FROM users WHERE id=?",(reviewer_id,)).fetchone()
+    db.execute("""UPDATE finance_invoices SET review_status='Waiting for Review',reviewer_user_id=?,review_requested_at=?,review_requested_by=?,reviewed_at=NULL,reviewed_by=NULL,review_comment=NULL,updated_at=? WHERE id=?""",(reviewer_id,now,current_user.email,now,invoice_id))
+    _cashflow_log(db,invoice_id,"Sent for review",f"Reviewer: {reviewer['name'] or reviewer['email']}"); db.commit(); flash("Invoice sent to the review queue.")
+    return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+
+@app.route("/cashflow/invoices/<int:invoice_id>/review",methods=["POST"])
+@login_required
+def cashflow_review_action(invoice_id):
+    if not _authorized("module:finance:view"): return redirect(url_for("home"))
+    db=get_db(); inv=db.execute("SELECT * FROM finance_invoices WHERE id=?",(invoice_id,)).fetchone()
+    if not inv or inv['review_status']!='Waiting for Review' or inv['reviewer_user_id']!=current_user.id:
+        flash("This invoice is not assigned to you for review.","error"); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+    action=request.form.get("action"); comment=request.form.get("comment","").strip(); now=datetime.utcnow().isoformat()
+    if action=='reviewed':
+        db.execute("UPDATE finance_invoices SET review_status='Reviewed',reviewed_at=?,reviewed_by=?,review_comment=?,updated_at=? WHERE id=?",(now,current_user.email,comment,now,invoice_id)); _cashflow_log(db,invoice_id,"Invoice reviewed",comment)
+        flash("Marked reviewed.")
+    elif action=='return':
+        if not comment:
+            flash("Add a short note explaining what needs to be changed.","error"); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+        db.execute("UPDATE finance_invoices SET review_status='Sent Back',reviewed_at=?,reviewed_by=?,review_comment=?,updated_at=? WHERE id=?",(now,current_user.email,comment,now,invoice_id)); _cashflow_log(db,invoice_id,"Invoice sent back",comment); flash("Sent back with your note.")
+    db.commit(); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
 
 @app.route("/cashflow/invoices/<int:invoice_id>/mark-sent",methods=["POST"])
 @login_required
@@ -7588,7 +7647,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.3.1-system-brain-retrieval-fix+cashflow-v4-flexible-jobs"
+ATLAS_BUILD = "TEST-v9.3.1-system-brain-retrieval-fix+cashflow-v5-simple-review"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
