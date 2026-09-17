@@ -5,7 +5,7 @@
        -- no new palette introduced, nothing here touches base.html or any
        other module's styles. */
 
-    .rc-hero { margin-bottom:32px; }
+    .rc-hero { margin-bottom:22px; }
     .rc-eyebrow {
         font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--brass);
         text-transform:uppercase; letter-spacing:1.5px; margin-bottom:8px; display:block;
@@ -16,14 +16,14 @@
     /* --- Submit box --- */
     .rc-submit {
         background:var(--surface); border:1px solid var(--line); border-radius:8px;
-        padding:26px 28px; margin-bottom:40px; position:relative; overflow:hidden;
+        padding:20px 24px; margin-bottom:30px; position:relative; overflow:hidden;
     }
     .rc-submit::before {
         content:''; position:absolute; top:0; left:0; width:3px; height:100%;
         background:linear-gradient(var(--brass), var(--brass-dim));
     }
     .rc-submit textarea {
-        font-size:15px; min-height:76px; resize:vertical;
+        font-size:14px; min-height:64px; resize:vertical;
     }
     .rc-submit-foot { display:flex; justify-content:space-between; align-items:center; margin-top:14px; }
     .rc-submit-hint { font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--text-faint); }
@@ -340,4 +340,52 @@
     #cc-tab-activity:checked ~ .cc-tab-labels label[for="cc-tab-activity"] { color:var(--brass); border-color:var(--brass-dim); background:rgba(201,162,75,0.08); }
     #cc-tab-resolved:checked ~ .cc-panel-resolved { display:block; }
     #cc-tab-activity:checked ~ .cc-panel-activity { display:block; }
+
+    /* Request Center employee cleanup — compact by default, full history on demand. */
+    .rc-empty-state { text-align:center; padding:34px 24px; }
+    .rc-section-head { display:flex; justify-content:space-between; align-items:end; margin:0 0 12px; }
+    .rc-section-head .rc-section-label { margin:0; }
+    .rc-section-help { margin:5px 0 0; color:var(--text-faint); font-size:12px; }
+    details.req-card { padding:0; overflow:hidden; }
+    details.req-card > summary { list-style:none; }
+    details.req-card > summary::-webkit-details-marker, .resolved-group > summary::-webkit-details-marker, .resolved-row > summary::-webkit-details-marker { display:none; }
+    .req-summary { cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:18px; padding:17px 20px; }
+    .req-summary:hover { background:rgba(255,255,255,.018); }
+    .req-summary-main { min-width:0; flex:1; }
+    .req-summary .req-card-text { max-width:none; font-size:14px; line-height:1.42; font-weight:600; }
+    .req-summary .req-card-meta { margin-top:5px; font-size:10.5px; }
+    .req-summary-side { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+    .req-chevron { color:var(--text-faint); font-size:24px; line-height:1; transform:rotate(0deg); transition:transform .15s ease; }
+    details.req-card[open] .req-chevron { transform:rotate(90deg); }
+    .req-expanded { border-top:1px solid var(--line); padding:17px 20px 20px; background:rgba(255,255,255,.012); }
+    .req-full-text { margin:0; font-size:13.5px; line-height:1.6; color:var(--text-dim); white-space:pre-wrap; }
+    .req-procurement-note { font-size:11.5px; margin:10px 0; color:var(--teal); }
+    .req-resubmit-btn { margin-top:10px; display:inline-block; }
+
+    .resolved-group { margin-top:28px; border:1px solid var(--line); border-radius:8px; background:var(--surface); overflow:hidden; }
+    .resolved-group-summary { list-style:none; cursor:pointer; padding:16px 20px; display:flex; justify-content:space-between; align-items:center; gap:16px; }
+    .resolved-group-summary:hover { background:rgba(255,255,255,.018); }
+    .resolved-label { margin:0 0 3px !important; color:var(--teal); }
+    .resolved-help { display:block; color:var(--text-faint); font-size:11.5px; }
+    .resolved-toggle { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--teal); text-transform:uppercase; letter-spacing:.6px; }
+    .resolved-group[open] .resolved-toggle { font-size:0; }
+    .resolved-group[open] .resolved-toggle::after { content:'Hide'; font-size:10px; }
+    .resolved-list { border-top:1px solid var(--line); }
+    .resolved-row { border-bottom:1px solid var(--line); }
+    .resolved-row:last-child { border-bottom:0; }
+    .resolved-row-summary { list-style:none; cursor:pointer; display:grid; grid-template-columns:22px minmax(0,1fr) 150px 42px; gap:10px; align-items:center; padding:13px 20px; }
+    .resolved-row-summary:hover { background:rgba(94,234,212,.035); }
+    .resolved-check { color:var(--teal); font-weight:700; }
+    .resolved-title { font-size:13px; line-height:1.35; color:var(--text-dim); }
+    .resolved-date { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--text-faint); text-align:right; }
+    .resolved-view { font-family:'IBM Plex Mono',monospace; font-size:9px; color:var(--teal); text-transform:uppercase; text-align:right; }
+    .resolved-detail { padding:4px 20px 17px 52px; }
+    .resolved-detail .req-released-note { margin-top:12px; padding:12px 14px; border:1px solid rgba(94,234,212,.18); border-radius:6px; background:rgba(94,234,212,.025); }
+    @media (max-width:760px) {
+        .req-summary { align-items:flex-start; }
+        .req-summary-side { gap:7px; }
+        .resolved-row-summary { grid-template-columns:22px minmax(0,1fr) 38px; }
+        .resolved-date { display:none; }
+        .resolved-detail { padding-left:20px; }
+    }
 </style>
