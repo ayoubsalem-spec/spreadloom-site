@@ -209,6 +209,9 @@
                 {% if has_project_deployment_access %}
                 <a href="{{ url_for('project_deployment_dashboard') }}" class="{{ 'active' if request.path.startswith('/deployment') }}">Project Deployment</a>
                 {% endif %}
+                {% if has_cashflow_access %}
+                <a href="{{ url_for('cashflow_dashboard') }}" class="{{ 'active' if request.path.startswith('/cashflow') }}">CashFlow</a>
+                {% endif %}
             </div>
         </nav>
 
