@@ -3752,7 +3752,7 @@ def _cashflow_reviewers(db):
 def cashflow_dashboard():
     if not _authorized("module:finance:view"):
         flash("You don't have access to CashFlow.","error"); return redirect(url_for("home"))
-    db=get_db(); q=request.args.get("q","").strip(); status=request.args.get("status","").strip(); project_id=request.args.get("project_id","").strip(); client=request.args.get("client","").strip(); due=request.args.get("due","").strip()
+    db=get_db(); q=request.args.get("q","").strip(); status=request.args.get("status","").strip(); project_id=request.args.get("project_id","").strip(); client=request.args.get("client","").strip(); due=request.args.get("due","").strip(); quick=request.args.get("quick","").strip()
     sql="""SELECT fi.*,COALESCE(tp.name,fj.name) project_name,COALESCE((SELECT SUM(fp.amount) FROM finance_payments fp WHERE fp.invoice_id=fi.id),0) paid_total FROM finance_invoices fi LEFT JOIN tracker_projects tp ON tp.id=fi.project_id LEFT JOIN finance_jobs fj ON fj.id=fi.cashflow_job_id WHERE 1=1"""; args=[]
     if q: sql+=" AND (fi.invoice_number LIKE ? OR fi.client LIKE ? OR COALESCE(tp.name,fj.name) LIKE ?)"; args += [f"%{q}%"]*3
     if project_id:
@@ -3772,9 +3772,15 @@ def cashflow_dashboard():
     all_rows=db.execute("""SELECT fi.*,COALESCE((SELECT SUM(fp.amount) FROM finance_payments fp WHERE fp.invoice_id=fi.id),0) paid_total FROM finance_invoices fi""").fetchall(); totals={"invoiced":0,"paid":0,"outstanding":0,"overdue":0,"retainage":0,"attention":0}
     for r in all_rows:
         if r["status"]=="Void" or r["voided_at"]: continue
-        gross,ret,due_now,paid,bal=_cashflow_amounts(r,r["paid_total"]); st=_cashflow_status(r,paid); totals["invoiced"]+=gross; totals["paid"]+=paid; totals["outstanding"]+=bal; totals["retainage"]+=ret
-        if st=="Overdue": totals["overdue"]+=bal; totals["attention"]+=1
-        elif st in ("To Invoice","Partially Paid"): totals["attention"]+=1
+        gross,ret,due_now,paid,bal=_cashflow_amounts(r,r["paid_total"]); st=_cashflow_status(r,paid)
+        # Dashboard money is intentionally simple: only sent/invoiced work enters
+        # Invoiced and Balance. Retainage stays behind the scenes unless an invoice uses it.
+        if r["status"] != "To Invoice" or paid > 0:
+            totals["invoiced"]+=gross; totals["outstanding"]+=bal
+        totals["paid"]+=paid; totals["retainage"]+=ret
+        needs_review=(r["review_status"] in ("Waiting for Review","Sent Back"))
+        if st=="Overdue": totals["overdue"]+=bal
+        if st in ("To Invoice","Partially Paid","Overdue") or needs_review: totals["attention"]+=1
     projects=_cashflow_projects(db); workspaces=_cashflow_workspaces(db); clients=[r["client"] for r in db.execute("SELECT DISTINCT client FROM finance_invoices WHERE client IS NOT NULL AND trim(client)<>'' ORDER BY client").fetchall()]
     project_summaries=[]
     for w in workspaces:
@@ -3783,13 +3789,23 @@ def cashflow_dashboard():
             matches=(w["cashflow_job_id"] is not None and r["cashflow_job_id"]==w["cashflow_job_id"]) or (w["cashflow_job_id"] is None and r["cashflow_job_id"] is None and r["project_id"]==w["project_id"])
             if not matches or r["status"]=="Void" or r["voided_at"]: continue
             gross,ret,due_now,paid,bal=_cashflow_amounts(r,r["paid_total"]); st=_cashflow_status(r,paid)
-            ps["invoice_count"]+=1; ps["invoiced"]+=gross; ps["received"]+=paid; ps["open"]+=bal; ps["retainage"]+=ret
+            ps["invoice_count"]+=1; ps["received"]+=paid; ps["retainage"]+=ret
+            if r["status"] != "To Invoice" or paid > 0: ps["invoiced"]+=gross; ps["open"]+=bal
             if st=="To Invoice": ps["to_invoice"]+=1
-            if st in ("To Invoice","Partially Paid","Overdue"): ps["attention"]+=1
+            if st in ("To Invoice","Partially Paid","Overdue") or r["review_status"] in ("Waiting for Review","Sent Back"): ps["attention"]+=1
         if ps["invoice_count"]: project_summaries.append(ps)
     project_summaries.sort(key=lambda x:(-x["attention"],x["name"].lower()))
+    if quick:
+        def _quick_match(i):
+            if quick=="invoiced": return i["status"] != "To Invoice" and i["display_status"] != "Void"
+            if quick=="paid": return float(i["paid_total"] or 0) > 0 and i["display_status"] != "Void"
+            if quick=="balance": return i["balance"] > .005 and i["status"] != "To Invoice" and i["display_status"] != "Void"
+            if quick=="overdue": return i["display_status"] == "Overdue"
+            if quick=="attention": return i["display_status"] in ("To Invoice","Partially Paid","Overdue") or i.get("review_status") in ("Waiting for Review","Sent Back")
+            return True
+        invoices=[i for i in invoices if _quick_match(i)]
     subs=db.execute("""SELECT si.*,COALESCE(tp.name,fj.name) project_name FROM finance_sub_invoices si LEFT JOIN tracker_projects tp ON tp.id=si.project_id LEFT JOIN finance_jobs fj ON fj.id=si.cashflow_job_id ORDER BY si.id DESC""").fetchall()
-    return render_template("cashflow/dashboard.html",invoices=invoices,totals=totals,projects=projects,workspaces=workspaces,project_summaries=project_summaries,clients=clients,subs=subs,filters={"q":q,"status":status,"project_id":project_id,"client":client,"due":due})
+    return render_template("cashflow/dashboard.html",invoices=invoices,totals=totals,projects=projects,workspaces=workspaces,project_summaries=project_summaries,clients=clients,subs=subs,filters={"q":q,"status":status,"project_id":project_id,"client":client,"due":due,"quick":quick})
 
 
 @app.route("/cashflow/invoices/new",methods=["GET","POST"])
@@ -3798,12 +3814,25 @@ def cashflow_invoice_new():
     if not _authorized("action:finance:manage"): flash("You don't have permission to manage CashFlow.","error"); return redirect(url_for("cashflow_dashboard"))
     db=get_db(); projects=_cashflow_projects(db); workspaces=_cashflow_workspaces(db)
     if request.method=="POST":
-        number=request.form.get("invoice_number","").strip(); workspace=_cashflow_resolve_workspace(db,request.form.get("workspace")); project_id=workspace["project_id"] if workspace else None; cashflow_job_id=workspace["cashflow_job_id"] if workspace else None
+        number=request.form.get("invoice_number","").strip(); workspace_key=request.form.get("workspace","").strip(); workspace=None
+        if workspace_key=="new":
+            job_name=request.form.get("new_job_name","").strip(); job_client=request.form.get("new_job_client","").strip()
+            try: job_budget=max(0,float(request.form.get("new_job_budget") or 0))
+            except ValueError: job_budget=0
+            if not job_name or not job_client:
+                flash("Enter the new project/job name and client.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
+            now_job=datetime.utcnow().isoformat(); cur_job=db.execute("INSERT INTO finance_jobs(name,client,job_number,budget,notes,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(job_name,job_client,request.form.get("new_job_number","").strip(),job_budget,"",current_user.email,now_job,now_job))
+            workspace={"project_id":None,"cashflow_job_id":cur_job.lastrowid,"client":job_client}
+        else:
+            workspace=_cashflow_resolve_workspace(db,workspace_key)
+        project_id=workspace["project_id"] if workspace else None; cashflow_job_id=workspace["cashflow_job_id"] if workspace else None
         try: amount=float(request.form.get("amount") or 0); rp=float(request.form.get("retainage_percent") or 0); retainage=float(request.form.get("retainage") or 0)
         except ValueError: flash("Enter valid dollar amounts and retainage.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
         if not number or not workspace: flash("Invoice number and project/job are required.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
         if amount<=0 or rp<0 or rp>100: flash("Invoice amount must be greater than $0 and retainage must be 0–100%.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
-        if request.form.get("retainage_mode")=="percent": retainage=round(amount*rp/100,2)
+        if not request.form.get("retainage_enabled"):
+            rp=0; retainage=0
+        elif request.form.get("retainage_mode")=="percent": retainage=round(amount*rp/100,2)
         if retainage>amount: flash("Retainage cannot be more than the invoice amount.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
         client=request.form.get("client","").strip() or workspace["client"]
         now=datetime.utcnow().isoformat()
@@ -3859,7 +3888,9 @@ def cashflow_invoice_edit(invoice_id):
         except ValueError: flash("Enter valid dollar amounts and retainage.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=inv)
         workspace=_cashflow_resolve_workspace(db,request.form.get("workspace")); project_id=workspace["project_id"] if workspace else None; cashflow_job_id=workspace["cashflow_job_id"] if workspace else None
         if not workspace: flash("Select a project/job.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=inv)
-        if request.form.get("retainage_mode")=="percent": retainage=round(amount*rp/100,2)
+        if not request.form.get("retainage_enabled"):
+            rp=0; retainage=0
+        elif request.form.get("retainage_mode")=="percent": retainage=round(amount*rp/100,2)
         if amount<=0 or retainage>amount or rp<0 or rp>100: flash("Check invoice amount and retainage.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=inv)
         client=request.form.get("client","").strip() or workspace["client"]
         db.execute("""UPDATE finance_invoices SET invoice_number=?,project_id=?,cashflow_job_id=?,client=?,invoice_date=?,due_date=?,amount=?,retainage=?,retainage_percent=?,status=?,description=?,updated_at=? WHERE id=?""",(request.form.get("invoice_number","").strip(),project_id,cashflow_job_id,client,request.form.get("invoice_date") or None,request.form.get("due_date") or None,amount,retainage,rp,request.form.get("status") or "To Invoice",request.form.get("description","").strip(),datetime.utcnow().isoformat(),invoice_id)); _cashflow_log(db,invoice_id,"Invoice updated"); db.commit(); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
@@ -7647,7 +7678,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.3.1-system-brain-retrieval-fix+cashflow-v5-simple-review"
+ATLAS_BUILD = "TEST-v9.3.1-system-brain-retrieval-fix+cashflow-v6-easy-workflow"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
