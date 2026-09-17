@@ -431,4 +431,27 @@
     .released-original[open] > summary::before { content:'⌄ '; }
     .released-original .req-full-text { margin-top:10px; padding:12px 14px; border-left:2px solid var(--line); }
 
+
+
+    /* --- Request Center V3: compact, inviting idea composer --- */
+    .rc-submit-v3 { padding:18px 22px 16px; margin-bottom:24px; }
+    .rc-idea-head { display:flex; justify-content:space-between; align-items:flex-end; gap:18px; margin-bottom:12px; }
+    .rc-idea-kicker { display:block; font-family:'IBM Plex Mono',monospace; color:var(--brass); font-size:9.5px; text-transform:uppercase; letter-spacing:1.2px; margin-bottom:3px; }
+    .rc-idea-head h2 { font-size:18px; margin:0; }
+    .rc-idea-note { color:var(--text-faint); font-size:12px; }
+    .rc-submit-v3 .rc-idea-textarea { min-height:78px; margin:0; font-size:14px; line-height:1.5; padding:13px 14px; }
+    .rc-submit-tools { display:grid; grid-template-columns:minmax(190px, 0.9fr) minmax(190px, 1fr) auto; gap:12px; align-items:end; margin-top:12px; }
+    .rc-tool-field label { display:block; margin:0 0 5px; font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:var(--text-faint); text-transform:uppercase; letter-spacing:.8px; }
+    .rc-tool-field label span { text-transform:none; letter-spacing:0; }
+    .rc-tool-field select { margin:0; min-height:40px; }
+    .rc-file-button { min-height:40px; border:1px solid var(--line); border-radius:4px; background:var(--surface-2); display:flex !important; align-items:center; padding:0 12px; cursor:pointer; color:var(--text-dim) !important; transition:border-color .16s ease, background .16s ease; text-transform:none !important; letter-spacing:0 !important; font-family:'Space Grotesk',sans-serif !important; font-size:12.5px !important; margin:0 !important; }
+    .rc-file-button:hover { border-color:var(--brass-dim); background:rgba(201,162,75,.04); }
+    .rc-file-button input { position:absolute; width:1px; height:1px; opacity:0; overflow:hidden; pointer-events:none; }
+    .rc-submit-button { min-height:40px; white-space:nowrap; margin:0; }
+    .rc-submit-hint-v3 { margin:10px 0 0; }
+    @media (max-width:760px) {
+        .rc-idea-head { align-items:flex-start; flex-direction:column; gap:4px; }
+        .rc-submit-tools { grid-template-columns:1fr; }
+        .rc-submit-button { width:100%; }
+    }
 </style>

@@ -5,27 +5,40 @@
 <div class="rc-hero">
     <span class="rc-eyebrow">Request Center</span>
     <h1>Your ideas shape BuildIQ</h1>
-    <p class="sub">Tell us what you need. Every request gets a real answer -- and if we build it, you'll see it land here.</p>
+    <p class="sub">Tell us what would make BuildIQ better or make your job easier.</p>
 </div>
 
-<div class="rc-submit">
+<div class="rc-submit rc-submit-v3">
     <form method="POST" enctype="multipart/form-data">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <label style="margin-top:0;">What do you need?</label>
-        <textarea name="original_request" required placeholder="Describe what you need..."></textarea>
-        <label style="margin-top:14px;">Department</label>
-        <select name="department">
-            <option value="">&mdash; Select department &mdash;</option>
-            {% for opt in department_options %}
-            <option value="{{ opt }}">{{ opt }}</option>
-            {% endfor %}
-        </select>
-        <label style="margin-top:14px;">Screenshots (optional)</label>
-        <input type="file" name="screenshots" accept="image/*" multiple>
-        <div class="rc-submit-foot">
-            <span class="rc-submit-hint">We review every request personally</span>
-            <button type="submit" class="btn btn-gold">Submit Request</button>
+        <div class="rc-idea-head">
+            <div>
+                <span class="rc-idea-kicker">Share an idea</span>
+                <h2>What can we improve?</h2>
+            </div>
+            <span class="rc-idea-note">Big or small — tell us what would help.</span>
         </div>
+        <textarea class="rc-idea-textarea" name="original_request" required placeholder="Tell us what would make BuildIQ better or make your job easier..."></textarea>
+        <div class="rc-submit-tools">
+            <div class="rc-tool-field rc-tool-department">
+                <label>Department</label>
+                <select name="department">
+                    <option value="">Select department</option>
+                    {% for opt in department_options %}
+                    <option value="{{ opt }}">{{ opt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="rc-tool-field rc-tool-upload">
+                <label>Screenshot <span>(optional)</span></label>
+                <label class="rc-file-button">
+                    <span>+ Add screenshot</span>
+                    <input type="file" name="screenshots" accept="image/*" multiple>
+                </label>
+            </div>
+            <button type="submit" class="btn btn-gold rc-submit-button">Submit Request</button>
+        </div>
+        <p class="rc-submit-hint rc-submit-hint-v3">We'll keep you updated here as your request moves forward.</p>
     </form>
 </div>
 
