@@ -7,6 +7,16 @@
 {% endif %}
 
 {% set has_active = requests_with_history|map(attribute='r.status')|reject('equalto', 'Released')|list %}
+{% set has_released = requests_with_history|map(attribute='r.status')|select('equalto', 'Released')|list %}
+{% set being_built = requests_with_history|map(attribute='r.status')|select('equalto', 'Building')|list %}
+{% if requests_with_history %}
+<div class="rc-impact-strip">
+    <span class="rc-impact-mark">✦</span>
+    <span><strong>{{ has_released|length }}</strong> idea{{ '' if has_released|length == 1 else 's' }} released</span>
+    <span class="rc-impact-sep">·</span>
+    <span><strong>{{ being_built|length }}</strong> being built</span>
+</div>
+{% endif %}
 {% if has_active %}
 <div class="rc-section-head">
     <div><p class="rc-section-label">In Progress <span class="count">{{ has_active|length }}</span></p><p class="rc-section-help">What still needs attention or is being worked on.</p></div>
@@ -19,6 +29,15 @@
         <div class="req-summary-main">
             <p class="req-card-text">{{ r['original_request']|truncate(170, True, '…') }}</p>
             <p class="req-card-meta">Submitted {{ r['created_at']|friendly_short_dt }}</p>
+            {% if r['approval_status'] == 'Approved' and r['status'] not in ('On Hold', 'Not Planned') %}
+            <div class="req-mini-pipeline" aria-label="Request progress">
+                {% for step in pipeline_steps %}
+                {% set reached = item.history|selectattr('status', 'equalto', step)|list %}
+                {% set is_current = r['status'] == step %}
+                <span class="mini-step {{ 'done' if reached and not is_current else 'current' if is_current else '' }}" title="{{ step }}"></span>
+                {% endfor %}
+            </div>
+            {% endif %}
         </div>
         <div class="req-summary-side">
             {% if r['status'] == 'On Hold' %}<span class="rc-badge b-stalled">On Hold</span>
@@ -67,11 +86,10 @@
 {% endfor %}
 {% endif %}
 
-{% set has_released = requests_with_history|map(attribute='r.status')|select('equalto', 'Released')|list %}
 {% if has_released %}
 <details class="resolved-group">
     <summary class="resolved-group-summary">
-        <div><span class="rc-section-label resolved-label">Released <span class="count">{{ has_released|length }}</span></span><span class="resolved-help">Completed requests — click to view history</span></div>
+        <div><span class="rc-section-label resolved-label">Released <span class="count">{{ has_released|length }}</span></span><span class="resolved-help">What’s now in BuildIQ</span></div>
         <span class="resolved-toggle">Show</span>
     </summary>
     <div class="resolved-list">
@@ -84,12 +102,18 @@
             <span class="resolved-check">✓</span>
             <span class="resolved-title">{{ r['original_request']|truncate(150, True, '…') }}</span>
             <span class="resolved-date">{{ r['created_at']|friendly_short_dt }}</span>
-            <span class="resolved-view">View</span>
+            <span class="resolved-view">›</span>
         </summary>
         <div class="resolved-detail">
-            <p class="req-full-text">{{ r['original_request'] }}</p>
-            {% if release_row and release_row[0]['release_note'] %}<div class="req-released-note"><strong>Now in BuildIQ</strong>{{ release_row[0]['release_note'] }}</div>{% endif %}
-            {% if item.attachments %}<div class="req-attachments">{% for att in item.attachments %}<a href="{{ url_for('uploaded_photo', filename=att['filename']) }}" target="_blank"><img src="{{ url_for('uploaded_photo', filename=att['filename']) }}" alt="Screenshot"></a>{% endfor %}</div>{% endif %}
+            <div class="released-result">
+                <span class="released-result-kicker">✓ Now in BuildIQ</span>
+                <p>{% if release_row and release_row[0]['release_note'] %}{{ release_row[0]['release_note'] }}{% else %}Released{% endif %}</p>
+            </div>
+            <details class="released-original">
+                <summary>Original request</summary>
+                <p class="req-full-text">{{ r['original_request'] }}</p>
+                {% if item.attachments %}<div class="req-attachments">{% for att in item.attachments %}<a href="{{ url_for('uploaded_photo', filename=att['filename']) }}" target="_blank"><img src="{{ url_for('uploaded_photo', filename=att['filename']) }}" alt="Screenshot"></a>{% endfor %}</div>{% endif %}
+            </details>
         </div>
     </details>
     {% endif %}
