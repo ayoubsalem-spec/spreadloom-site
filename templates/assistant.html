@@ -744,11 +744,16 @@
         }).then(function (r) { return r.json(); }).then(function (data) {
             if (data.success) {
                 var r = data.result || {};
-                if (r.equipment && r.to) {
-                    var whenText = r.scheduled ? (' scheduled for ' + (r.schedule_date || 'later')) : ' moved';
-                    addMessage('system', '\u2713 ' + r.equipment + whenText + ' to ' + r.to);
+                // V11.2: the backend owns the authoritative, action-specific
+                // success receipt. Atlas now supports many write actions, so
+                // the old non-equipment => Concrete Request fallback was wrong
+                // (for example Project Hunt Awarded changes displayed as a
+                // green Concrete Request confirmation).
+                var receipt = data.receipt || r.receipt || '';
+                if (receipt) {
+                    addMessage('system', receipt);
                 } else {
-                    addMessage('system', '\u2713 Concrete request #' + data.submitted_id + ' submitted');
+                    addMessage('system', '\u2713 BuildIQ action completed');
                 }
                 resetBtn.style.display = 'none';
             } else if (data.error) {

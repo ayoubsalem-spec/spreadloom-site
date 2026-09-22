@@ -7891,7 +7891,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v11.1-action-catalog"
+ATLAS_BUILD = "TEST-v11.2-action-receipt-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -10757,7 +10757,17 @@ def assistant_confirm_write():
         h=list(draft.get("history", [])); h.append({"role":"assistant","content":receipt}); draft["history"]=h[-80:]
         cid=draft.get("conversation_id") or session.get("atlas_conversation_id")
         if cid: _append_atlas_message_owned(cid, current_user, "assistant", receipt, "text")
-    return {"success": True, "submitted_id": (result.data or {}).get("submitted_id") or (result.data or {}).get("id"), "error": None, "result": result.data}
+    return {
+        "success": True,
+        "submitted_id": (result.data or {}).get("submitted_id") or (result.data or {}).get("id"),
+        "error": None,
+        "result": result.data,
+        # Frontend must render the authoritative action-specific receipt.
+        # Never infer a Concrete Request merely because an action is not an
+        # equipment move; Atlas now has a broad action catalog.
+        "receipt": receipt or None,
+        "action": tool_name,
+    }
 
 
 
