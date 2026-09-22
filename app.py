@@ -6724,15 +6724,69 @@ CONCRETE_REQUEST_FIELDS = """
 VOICE_REQUIRED_FIELDS = [f for f in CONCRETE_REQUEST_REQUIRED_FIELDS if f != "requested_date"]
 
 
+def _atlas_strip_protocol_artifacts(text):
+    """Remove model/tool protocol markup from anything that could become
+    employee-visible text. Tool/control syntax is never valid UI content.
+    This is defense-in-depth: normal action handling should recover a
+    structured proposal before this sanitizer is needed.
+    """
+    text = str(text or "")
+    text = re.sub(r"<function_calls>.*?</function_calls>", "", text, flags=re.I | re.S)
+    text = re.sub(r"<invoke\b[^>]*>.*?</invoke>", "", text, flags=re.I | re.S)
+    text = re.sub(r"<parameter\b[^>]*>.*?</parameter>", "", text, flags=re.I | re.S)
+    text = re.sub(r"</?(?:function_calls|invoke|parameter)\b[^>]*>", "", text, flags=re.I)
+    return text.strip()
+
+
+def _atlas_legacy_write_state(raw_text):
+    """Recover a *proposal only* from legacy textual function-call markup.
+
+    Some model responses can emit XML-ish <function_calls>/<invoke> text
+    instead of the required trailing <state> JSON. We never execute from
+    this markup. If, and only if, it names a registered WRITE tool and all
+    parameter names are declared by that tool, convert it into the same
+    buildiq_action proposal state used by the normal confirmation path.
+    The existing schema validation, permission check, confirmation token,
+    executor, audit log and post-write verification still apply later.
+    """
+    m = re.search(r'<invoke\s+name=["\']([^"\']+)["\']\s*>(.*?)</invoke>', str(raw_text or ""), re.I | re.S)
+    if not m:
+        return None
+    tool_name = m.group(1).strip()
+    tool = globals().get("ATLAS_TOOLS", {}).get(tool_name)
+    if not tool or getattr(tool, "kind", None) != "write":
+        return None
+    body = m.group(2)
+    params = {}
+    for pm in re.finditer(r'<parameter\s+name=["\']([^"\']+)["\']\s*>(.*?)</parameter>', body, re.I | re.S):
+        name = pm.group(1).strip()
+        if name not in tool.parameters:
+            return None
+        value = re.sub(r"<[^>]+>", "", pm.group(2)).strip()
+        params[name] = value
+    if not params:
+        return None
+    return {"mode": "buildiq_action", "fields": {}, "tool": tool_name, "params": params, "action": "submit"}
+
+
 def _parse_assistant_reply(raw_text):
-    """Split Claude's raw response into the spoken part and the trailing
-    <state>...</state> JSON block. Falls back gracefully if the model
-    didn't include a state block (treats it as a plain chat answer)."""
-    import re
+    """Split Claude's raw response into employee-visible text and control
+    state. Never surface model/tool protocol markup. If the model falls back
+    to legacy textual function-call syntax, recover it as a confirmation-
+    gated proposal rather than exposing the markup or executing anything.
+    """
     match = re.search(r"<state>(.*?)</state>", raw_text, re.DOTALL)
     if not match:
-        return raw_text.strip(), {"mode": "chat", "fields": {}, "action": "none"}
-    spoken = raw_text[:match.start()].strip()
+        recovered = _atlas_legacy_write_state(raw_text)
+        spoken = _atlas_strip_protocol_artifacts(raw_text)
+        if recovered:
+            # Legacy output sometimes says "Done" even though no write has
+            # occurred. Strip that false-success sentence before proposal UI.
+            spoken = re.sub(r"^(?:Done!?\s*)", "", spoken, flags=re.I).strip()
+            spoken = re.sub(r"\bhas been moved\b", "is proposed to move", spoken, flags=re.I)
+            return spoken, recovered
+        return spoken, {"mode": "chat", "fields": {}, "action": "none"}
+    spoken = _atlas_strip_protocol_artifacts(raw_text[:match.start()])
     try:
         state = json.loads(match.group(1))
     except (json.JSONDecodeError, ValueError):
@@ -7891,7 +7945,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v11.2-action-receipt-fix"
+ATLAS_BUILD = "TEST-v11.3-confirmation-protocol-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8105,6 +8159,50 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
 def _atlas_normalize_pending_reply(text):
     normalized = re.sub(r"[^a-z0-9\s']", " ", (text or "").lower())
     return " ".join(normalized.split())
+
+
+def _atlas_recover_project_status_proposal(draft):
+    """Recover a lost Project Hunt status proposal from the immediately
+    preceding Atlas message. This exists only as a fail-safe for a model turn
+    that rendered a proper human confirmation card/question but omitted its
+    hidden <state> block. Recovery is intentionally strict:
+      * last visible Atlas message must contain Project + Status Change labels
+      * destination must be a real Project Hunt status
+      * project name must resolve EXACTLY to one live project
+      * live DB status must still equal the displayed FROM status
+    Nothing is executed here; this only reconstructs pending_submit so the
+    normal confirmation-token path can proceed.
+    """
+    hist = list((draft or {}).get("history") or [])
+    if not hist or hist[-1].get("role") != "assistant":
+        return None
+    msg = str(hist[-1].get("content") or "")
+    if not re.search(r"\b(?:to confirm|before i make that change|good to go|go ahead and submit)\b", msg, re.I):
+        return None
+    pm = re.search(r"(?:^|\n)\s*(?:\*\*)?Project(?:\*\*)?\s*:\s*([^\n]+)", msg, re.I)
+    sm = re.search(r"(?:^|\n)\s*(?:\*\*)?Status\s*Change(?:\*\*)?\s*:\s*([^\n]+?)\s*(?:→|->)\s*([^\n]+)", msg, re.I)
+    if not pm or not sm:
+        return None
+    project_name = re.sub(r"[\*_`]+", "", pm.group(1)).strip()
+    from_status = re.sub(r"[\*_`]+", "", sm.group(1)).strip()
+    to_status = re.sub(r"[\*_`?]+", "", sm.group(2)).strip()
+    if to_status not in TR_STATUS_OPTIONS or from_status not in TR_STATUS_OPTIONS:
+        return None
+    rows = get_db().execute("SELECT id,name,status FROM tracker_projects WHERE lower(name)=lower(?)", (project_name,)).fetchall()
+    if len(rows) != 1 or rows[0]["status"] != from_status:
+        return None
+    tool = ATLAS_TOOLS.get("update_project_status")
+    params = {"project_id": rows[0]["id"], "status": to_status}
+    clean, err = _validate_tool_params(tool, params) if tool else (None, "missing tool")
+    if err:
+        return None
+    return {
+        "fields_hash": hashlib.sha256(json.dumps({"tool":"update_project_status","params":clean}, sort_keys=True).encode("utf-8")).hexdigest(),
+        "tool_name": "update_project_status",
+        "params": clean,
+        "issued_at": time.time(),
+        "action_context": {"entity_type":"project","project_id":rows[0]["id"],"name":rows[0]["name"],"from_status":from_status,"status":to_status},
+    }
 
 
 def _atlas_classify_pending_reply(text, api_key):
@@ -8979,6 +9077,17 @@ def stream_atlas_turn(user_text, draft):
     # A short explicit confirmation reuses that snapshot instead of asking
     # the model to reconstruct parameters from conversation text.
     _pending_action = draft.get("pending_submit") or {}
+    # V11.3 fail-safe: if a valid visible Project Hunt proposal was shown
+    # but the model omitted its hidden state, a bare confirmation must not
+    # fall back into another model turn (which caused double-confirmation and
+    # leaked raw <function_calls> markup). Reconstruct only that exact, DB-
+    # verified proposal, then continue through the normal tokenized write path.
+    if not _pending_action and _atlas_normalize_pending_reply(user_text) in {"yes","yep","yup","yeah","yea","sure","confirm","confirmed","proceed","do it","go ahead","go for it","make it happen","sounds good","please do"}:
+        _recovered = _atlas_recover_project_status_proposal(draft)
+        if _recovered:
+            draft["pending_submit"] = _recovered
+            _pending_action = _recovered
+            _atlas_trace("PENDING_PROPOSAL_RECOVERED", tool="update_project_status")
     if _pending_action.get("tool_name") and _pending_action.get("params"):
         if not _pending_action.get("issued_at") or (time.time() - _pending_action.get("issued_at", 0)) > PENDING_WRITE_TTL_SECONDS:
             draft["pending_submit"] = None
