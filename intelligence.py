@@ -1046,7 +1046,9 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
     reports what the current application exposes rather than inferring module
     existence from an older roadmap label.
     """
-    from app import get_db, user_has_permission, current_user, current_app
+    from app import get_db, user_has_permission
+    from flask import current_app
+    from flask_login import current_user
     db = get_db()
     scope = (scope or "overview").strip().lower()
     allowed = {"overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity",
