@@ -1000,7 +1000,21 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
                 "created_at": r["created_at"], "updated_at": r["updated_at"],
                 "internal_notes": r["internal_notes"], "solution_built": r["solution_built"],
                 "testing_notes": r["testing_notes"], "user_feedback": r["user_feedback"],
-                "release_date": r["release_date"], "status_history": status_history,
+                "release_date": r["release_date"],
+                # Two independent histories exist for employee Requests:
+                # 1) the procurement approval gate (approval_*), and
+                # 2) the development lifecycle status timeline.
+                # Keep both explicit so Atlas never treats a lifecycle
+                # transition to status=Approved as the approval-gate event.
+                "approval_gate": {
+                    "decision": r["approval_status"],
+                    "actor": r["approval_decided_by"],
+                    "at": r["approval_decided_at"],
+                    "reason": r["approval_reason"],
+                    "source": "feature_requests.approval_* (canonical current approval-gate state)",
+                },
+                "lifecycle_status_history": status_history,
+                "status_history": status_history,
                 "approval_history": approval_history,
             })
         result["requests"] = request_records
