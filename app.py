@@ -7744,7 +7744,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v10.5-deterministic-purchase-status-counts"
+ATLAS_BUILD = "TEST-v10.6-purchase-project-match-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8426,7 +8426,8 @@ def _atlas_purchase_status_breakdown_reply(text, draft, user):
     rows = db.execute(
         """SELECT COALESCE(NULLIF(TRIM(status), ''), 'Unknown') AS status, COUNT(*) AS c
            FROM inventory_purchase_requests
-           WHERE project_id = ? OR (project_id IS NULL AND job_name = ?)
+           WHERE project_id = ?
+              OR LOWER(TRIM(COALESCE(job_name, ''))) = LOWER(TRIM(?))
            GROUP BY COALESCE(NULLIF(TRIM(status), ''), 'Unknown')
            ORDER BY status""",
         (project_id, project_name),
