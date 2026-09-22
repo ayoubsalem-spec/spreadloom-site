@@ -6948,7 +6948,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- Product Intelligence: a REAL BuildIQ module/Command Center for product/request intelligence, priorities, lifecycle, attention, pulse/resolved, build direction and requests. Never say Product Intelligence is not a BuildIQ feature.\n"
         "- Requests Center: the EMPLOYEE-facing feature/product request workflow. Employees submit ideas, bugs, fixes, and product needs here and see their own status/history.\n"
         "- Product Intelligence: the MANAGEMENT/admin view over BuildIQ product work and employee Requests. It is where authorized managers review request state, approvals, lifecycle, attention and build direction.\n"
-        "- REQUEST ONTOLOGY: unqualified 'requests' about fixing/improving BuildIQ itself means employee feature/product Requests when semantic context supports that. 'Purchase Request' and 'Concrete Request' are explicitly operational SitePulse workflows and must never be substituted for employee Requests. If the meaning is genuinely ambiguous, ask one concise clarification instead of dumping every request type.\n"
+        "- REQUEST ONTOLOGY: unqualified 'requests' about fixing/improving BuildIQ itself means employee feature/product Requests when semantic context supports that. 'Purchase Request' and 'Concrete Request' are explicitly operational SitePulse workflows and must never be substituted for employee Requests. IDs are namespaced: employee Request #24 is not Concrete Request #24 merely because the number matches. Building/Testing/Released/Reviewing/Approved/On Hold/Not Planned are employee-request lifecycle terms unless the user explicitly names an operational request type. If the meaning is genuinely ambiguous, ask one concise clarification instead of dumping every request type.\n"
         "- BUILD-IQ-ITSELF INTENT: questions like what needs fixing/building/improving in BuildIQ are product-management questions. Use LIVE BUILDIQ PRODUCT INTELLIGENCE when supplied; prioritize real employee requests and Product Intelligence state, not project concrete/purchase records.\n"
         "- Atlas: BuildIQ's conversational intelligence/action interface.\n"
         "- CashFlow: a currently deployed BuildIQ module for project/job financial tracking, owner invoices, payments, retainage, review handoff, notes/documents, and export. Its legacy internal permission/database namespace is finance, but the user-facing module name is CashFlow.\n"
@@ -7743,7 +7743,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v10.0-atlas-consolidated-regression-fix"
+ATLAS_BUILD = "TEST-v10.3-request-namespace-disambiguation"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8298,11 +8298,38 @@ def _atlas_semantic_subject(text, api_key):
     return subject or None
 
 def _atlas_semantic_buildiq_scope(text, draft, api_key):
-    """Classify the user's requested BuildIQ scope semantically, not by phrase list.
+    """Classify the user's requested BuildIQ scope semantically.
 
     This only chooses a READ domain. It grants no permission and performs no write.
+
+    IMPORTANT: BuildIQ has multiple independent request ID namespaces. Employee
+    feature Requests, Concrete Requests, and Purchase Requests can legitimately
+    share the same numeric ID.  A lifecycle word that only belongs to the
+    employee Requests workflow (Building/Testing/Released/etc.) therefore wins
+    over the bare number.  This deterministic guard prevents ``Request #24``
+    from being silently re-bound to ``Concrete Request #24`` just because both
+    exist.
     """
-    if not api_key or not (text or '').strip():
+    raw_text = (text or '').strip()
+    if not raw_text:
+        return {"domain":"general", "scope":"overview"}
+
+    _scope_text = raw_text.lower()
+    _explicit_operational = bool(re.search(r"\b(?:concrete|pour|purchase|procurement)\s+request\b", _scope_text))
+    _employee_request_lifecycle = bool(re.search(
+        r"\b(?:building|testing|released|reviewing|not\s+planned|on\s+hold|approval|approved)\b",
+        _scope_text
+    ))
+    _request_reference = bool(re.search(r"\brequest\s*#?\s*\d+\b|#\s*\d+", _scope_text))
+    _request_history_question = bool(re.search(
+        r"\b(?:who\s+(?:moved|changed|approved)|status\s+history|approval\s+history|when\s+(?:was|did)|moved\s+.*\s+into)\b",
+        _scope_text
+    ))
+    if (not _explicit_operational and _request_reference and
+            (_employee_request_lifecycle or _request_history_question)):
+        return {"domain":"product", "scope":"requests"}
+
+    if not api_key:
         return {"domain":"general", "scope":"overview"}
     recent = (draft or {}).get("history", [])[-6:]
     system = (
@@ -8316,6 +8343,8 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
         "PROJECT_OPERATIONS means a job/site/project operational picture. CONCRETE and PURCHASE are SitePulse operational "
         "request workflows. The bare word requests is ambiguous unless wording or conversation makes employee/product vs "
         "operational meaning clear. Phrases about fixing/improving BuildIQ itself strongly indicate product. "
+        "REQUEST IDS ARE NAMESPACED: employee Request #24, Concrete Request #24, and Purchase Request #24 may all be different records. "
+        "Never bind a bare request number to Concrete/Purchase merely because that numeric ID exists. Lifecycle terms Building, Testing, Released, Reviewing, Approved, On Hold, and Not Planned indicate the employee/product Requests workflow unless the user explicitly says Concrete Request or Purchase Request. "
         "Scopes for product: overview, requests, attention, roadmap. Choose attention for what needs fixing/attention; "
         "requests for employee/feature request lists; roadmap for build direction; otherwise overview. "
         "Do not answer the user and do not invent facts."
