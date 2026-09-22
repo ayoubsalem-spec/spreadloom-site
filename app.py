@@ -7945,7 +7945,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v11.3-confirmation-protocol-fix"
+ATLAS_BUILD = "TEST-v11.4-confirmation-protocol-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8174,9 +8174,28 @@ def _atlas_recover_project_status_proposal(draft):
     normal confirmation-token path can proceed.
     """
     hist = list((draft or {}).get("history") or [])
-    if not hist or hist[-1].get("role") != "assistant":
+    msg = ""
+    if hist and hist[-1].get("role") == "assistant":
+        msg = str(hist[-1].get("content") or "")
+    # V11.4: confirmation state must survive an in-memory session miss/restart.
+    # If the draft history does not contain the immediately preceding assistant
+    # proposal, recover ONLY the latest persisted assistant message from the
+    # authenticated user's current conversation.  This never executes a write;
+    # the proposal is still re-resolved against the live DB and goes through the
+    # normal one-time confirmation token + permission + post-write verification.
+    if not msg:
+        conversation_id = (draft or {}).get("conversation_id") or session.get("atlas_conversation_id")
+        if conversation_id:
+            owned = _get_owned_conversation(conversation_id, current_user)
+            if owned:
+                row = get_db().execute(
+                    "SELECT content FROM atlas_messages WHERE conversation_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",
+                    (owned["id"],)
+                ).fetchone()
+                if row:
+                    msg = str(row["content"] or "")
+    if not msg:
         return None
-    msg = str(hist[-1].get("content") or "")
     if not re.search(r"\b(?:to confirm|before i make that change|good to go|go ahead and submit)\b", msg, re.I):
         return None
     pm = re.search(r"(?:^|\n)\s*(?:\*\*)?Project(?:\*\*)?\s*:\s*([^\n]+)", msg, re.I)
@@ -9147,6 +9166,14 @@ def stream_atlas_turn(user_text, draft):
     raw_text = ""
     visible_sent = ""
     STATE_TAG = "<state>"
+    # V11.4 protocol-leak guard.  Pass 2 has no native tools, but a model can
+    # still *write* XML-looking legacy tool syntax as ordinary text.  Never
+    # stream any bytes that could be the start of a control/protocol tag.
+    # Hold back enough trailing characters to recognize all supported sentinels
+    # even when a tag is split across network chunks.
+    PROTOCOL_SENTINELS = ("<state", "<function_calls", "<invoke", "<parameter")
+    PROTOCOL_GUARD = max(len(x) for x in PROTOCOL_SENTINELS) + 2
+    protocol_blocked = False
 
     # Sentence-buffered TTS state for this turn. Each ready sentence's
     # ElevenLabs call is dispatched to this small per-turn executor as
@@ -9219,16 +9246,27 @@ def stream_atlas_turn(user_text, draft):
         maintained in parallel. Mutates the enclosing raw_text/
         visible_sent/tts_buffer exactly as the original single-call
         version did."""
-        nonlocal raw_text, visible_sent, tts_buffer
+        nonlocal raw_text, visible_sent, tts_buffer, protocol_blocked
         for delta_text in delta_source:
             if not delta_text:
                 continue
             raw_text += delta_text
-            tag_idx = raw_text.find(STATE_TAG)
-            if tag_idx != -1:
-                safe_upto = tag_idx
+
+            lower_raw = raw_text.lower()
+            control_indexes = [lower_raw.find(tag) for tag in PROTOCOL_SENTINELS]
+            control_indexes = [i for i in control_indexes if i != -1]
+            if control_indexes:
+                safe_upto = min(control_indexes)
+                protocol_blocked = True
+            elif protocol_blocked:
+                # Once any protocol/control syntax begins, nothing after it is
+                # streamed live.  The complete response is parsed/sanitized at
+                # the end of the turn, and controlled action state is handled
+                # server-side.
+                safe_upto = len(visible_sent)
             else:
-                safe_upto = max(0, len(raw_text) - len(STATE_TAG))
+                safe_upto = max(0, len(raw_text) - PROTOCOL_GUARD)
+
             if safe_upto > len(visible_sent):
                 new_chunk = raw_text[len(visible_sent):safe_upto]
                 if new_chunk:
@@ -9986,7 +10024,14 @@ Then stop."""
 
 
     spoken, state = _parse_assistant_reply(raw_text)
-    if not visible_sent and spoken:
+    _legacy_protocol_action = bool(protocol_blocked and state.get("mode") == "buildiq_action" and state.get("action") == "submit")
+    if _legacy_protocol_action:
+        # Never trust/display model-authored prose surrounding a textual legacy
+        # function call (it may say "Done" before anything executed).  The
+        # server will emit the deterministic proposal below and the next explicit
+        # confirmation is what mints the one-time write token.
+        spoken = ""
+    elif not visible_sent and spoken:
         # Fallback: state tag was never found mid-stream (model skipped
         # it, or it arrived in one big chunk) -- send the whole spoken
         # reply now rather than showing nothing.
@@ -10023,7 +10068,24 @@ Then stop."""
                 "params": dict(clean_params),
                 "issued_at": time.time(),
             }
-            if "confirm" not in spoken.lower():
+            if _legacy_protocol_action and action_tool == "update_project_status":
+                pid = clean_params.get("project_id")
+                prow = get_db().execute("SELECT id,name,status FROM tracker_projects WHERE id=?", (pid,)).fetchone() if pid else None
+                if prow:
+                    proposal = (
+                        "To confirm:\n\n"
+                        f"**Project:** {prow['name']}\n\n"
+                        f"**Status change:** {prow['status']} → {clean_params.get('status')}\n\n"
+                        "Good to go?"
+                    )
+                    yield f"data: {json.dumps({'type':'delta','text':proposal})}\n\n"
+                    spoken = proposal
+                    tts_buffer += proposal
+                    new_draft["pending_submit"]["action_context"] = {
+                        "entity_type":"project", "project_id":prow["id"], "name":prow["name"],
+                        "from_status":prow["status"], "status":clean_params.get("status"),
+                    }
+            if "confirm" not in spoken.lower() and "good to go" not in spoken.lower():
                 extra = "\n\n**Confirm this action** and I’ll do it."
                 yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
                 spoken += extra
