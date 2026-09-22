@@ -8423,16 +8423,55 @@ def _atlas_purchase_status_breakdown_reply(text, draft, user):
     if not project_name:
         return None
 
-    rows = db.execute(
-        """SELECT COALESCE(NULLIF(TRIM(status), ''), 'Unknown') AS status, COUNT(*) AS c
-           FROM inventory_purchase_requests
-           WHERE project_id = ?
-              OR LOWER(TRIM(COALESCE(job_name, ''))) = LOWER(TRIM(?))
-           GROUP BY COALESCE(NULLIF(TRIM(status), ''), 'Unknown')
-           ORDER BY status""",
-        (project_id, project_name),
+    # V10.7: Purchase Requests contain legacy linkage from before canonical
+    # project_id backfill was complete.  The SitePulse UI can therefore show
+    # rows for the same job that are represented by any of: canonical
+    # project_id, a duplicate/legacy tracker_project row with the same name,
+    # job_name text, or the project's address in location_description.
+    # Resolve that identity deterministically in Python instead of trusting a
+    # single project_id or one exact text column.  This mirrors the human UI
+    # view while still requiring a strong project-identity match.
+    def _norm(v):
+        return re.sub(r"[^a-z0-9]+", " ", str(v or "").lower()).strip()
+
+    target_norm = _norm(project_name)
+    all_projects = db.execute("SELECT id, name, address FROM tracker_projects").fetchall()
+    matched_projects = []
+    for prj in all_projects:
+        pn = _norm(prj["name"])
+        if not pn or not target_norm:
+            continue
+        # Exact names are ideal.  Containment supports canonical labels such
+        # such as a canonical project/client label vs a shorter legacy project name
+        # row without broad fuzzy matching.
+        if pn == target_norm or (min(len(pn), len(target_norm)) >= 4 and (pn in target_norm or target_norm in pn)):
+            matched_projects.append(prj)
+
+    matched_ids = {int(r["id"]) for r in matched_projects}
+    matched_ids.add(int(project_id))
+    name_aliases = {_norm(r["name"]) for r in matched_projects if _norm(r["name"])}
+    name_aliases.add(target_norm)
+    address_aliases = {_norm(r["address"]) for r in matched_projects if _norm(r["address"])}
+
+    purchase_rows = db.execute(
+        """SELECT id, project_id, job_name, location_description,
+                  COALESCE(NULLIF(TRIM(status), ''), 'Unknown') AS status
+           FROM inventory_purchase_requests"""
     ).fetchall()
-    counts = {r["status"]: int(r["c"]) for r in rows}
+
+    counts = {}
+    for row in purchase_rows:
+        row_pid = row["project_id"]
+        job_norm = _norm(row["job_name"])
+        loc_norm = _norm(row["location_description"])
+        by_id = row_pid is not None and int(row_pid) in matched_ids
+        by_name = job_norm in name_aliases if job_norm else False
+        if not by_name and job_norm and target_norm and min(len(job_norm), len(target_norm)) >= 4:
+            by_name = job_norm in target_norm or target_norm in job_norm
+        by_address = bool(loc_norm and loc_norm in address_aliases)
+        if by_id or by_name or by_address:
+            st = row["status"]
+            counts[st] = counts.get(st, 0) + 1
     total = sum(counts.values())
     if total == 0:
         return f"BuildIQ currently has no purchase requests recorded for {project_name}."
