@@ -6916,7 +6916,11 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- Never claim the move happened before confirmation. First summarize the proposed move clearly and ask for confirmation.\n"
         "- HARD ACTION GROUNDING: never propose or confirm a write containing unresolved conversational/reference language such as it, there, original location, where it was, the other one, or filler/slang. Resolve meaning first, then map every required entity/value to canonical BuildIQ state. If that cannot be done unambiguously, ask a concise clarification instead of proposing a write.\n"
         "- NEVER say a BuildIQ write is done, completed, moved, created, submitted, approved, or otherwise successful based on your own reasoning. Only the server-side action executor may authoritatively report write success after the database operation returns success. Before that receipt, describe it only as proposed/pending/confirmed.\n"
-        "- When proposing or confirming an equipment move, emit mode=buildiq_action, tool=move_equipment, action=submit, and params containing the exact known values. On the confirmation turn, repeat the exact same tool/params.\n"
+        "- When proposing or confirming an equipment move, emit mode=buildiq_action, tool=move_equipment, action=submit, and params containing the exact known values. On the confirmation turn, repeat the exact same tool/params.\n"        "- Project Hunt status changes are real controlled actions. For requests like 'move X to Awarded', resolve the canonical project and emit mode=buildiq_action, tool=update_project_status, action=submit with project_name and the exact status. Never change a project status without confirmation.\n"
+        "- Creating Equipment Center equipment is a controlled action. Collect name (required) plus any provided description/year/serial/value/rates/location/hours, then emit tool=create_equipment and require confirmation. Do not invent missing optional fields.\n"
+        "- Creating/logging an outside rental is a controlled action. Vendor and equipment description are required; project/job, rate, rental date, due date and notes are optional. Use tool=create_rental and require confirmation. If a project is named, resolve it canonically rather than inventing a project_id.\n"
+        "- These are examples of the controlled action layer, not permission bypasses: every Atlas write must use a registered tool that mirrors a real BuildIQ operation and must respect the same human permission plus Atlas permission.\n"
+        + _atlas_action_catalog_prompt() +
         "- The server independently checks the user's Equipment Center permission and Atlas access before executing. If permission is denied, say so plainly.\n"
         "- For broad project/site/operational summaries, lead with a compact answer/current-status sentence, then render EACH section in the form that best fits its data. Do not force the whole answer into one summary table and do not cram multi-record operational data into prose.\n"
         "- ADAPTIVE RENDERING: use a Markdown table for a section when it contains multiple structured records with repeated fields (for example several concrete pours, purchase requests, equipment items, rentals, or side-by-side project comparisons). Give Concrete its own table when several pours exist; give Purchases its own table when several requests exist. Keep a single simple rental/equipment fact as a sentence or bullet. Keep empty states as one short sentence. Use bullets for short heterogeneous facts. Use direct prose for focused questions.\n"
@@ -7029,7 +7033,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "Respond in exactly two parts:\n"
         "1. Your natural reply.\n"
         "2. On its own line, a state block in EXACTLY this format:\n"
-        '<state>{"mode": "concrete_request" or "buildiq_action" or "chat", "fields": {<concrete fields>}, "tool": "move_equipment" or null, "params": {<action parameters>}, "action": "none" or "submit"}</state>'
+        '<state>{"mode": "concrete_request" or "buildiq_action" or "chat", "fields": {<concrete fields>}, "tool": <a registered controlled Atlas write tool name> or null, "params": {<action parameters>}, "action": "none" or "submit"}</state>'
     )
 
 
@@ -7562,6 +7566,149 @@ register_tool(
     kind="write", confirm=True, handler=_tool_move_equipment,
 )
 
+# V11.0 ACTION EXPANSION -------------------------------------------------------
+# These handlers mirror existing human UI operations. They never expose raw SQL
+# or arbitrary route execution to the model: every write is registered, schema-
+# validated, permission checked, confirmation gated, audited, and verified after
+# execution through the same Atlas gateway used by the existing safe writes.
+
+def _atlas_resolve_project_write(project_name=None, project_id=None):
+    db = get_db()
+    if project_id:
+        row = db.execute("SELECT * FROM tracker_projects WHERE id=?", (int(project_id),)).fetchone()
+        if not row:
+            raise ToolWriteRejected("project_not_found")
+        return row
+    name = str(project_name or "").strip()
+    if not name:
+        raise ToolWriteRejected("project_required")
+    exact = db.execute("SELECT * FROM tracker_projects WHERE lower(name)=lower(?)", (name,)).fetchall()
+    if len(exact) == 1:
+        return exact[0]
+    matches = db.execute("SELECT * FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8", (f"%{name}%",)).fetchall()
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ToolWriteRejected("project_ambiguous")
+    raise ToolWriteRejected("project_not_found")
+
+def _tool_update_project_status(user, project_name=None, project_id=None, status=None):
+    if status not in TR_STATUS_OPTIONS:
+        raise ToolWriteRejected("invalid_project_status")
+    db = get_db()
+    project = _atlas_resolve_project_write(project_name, project_id)
+    old_status = project["status"]
+    now = datetime.utcnow().isoformat()
+    db.execute("UPDATE tracker_projects SET status=?, updated_at=? WHERE id=?", (status, now, project["id"]))
+    if old_status != status:
+        log_activity("tracker", "project", project["id"], "updated", asset_id=project["id"],
+                     field="status", old_value=old_status, new_value=status)
+    db.commit()
+    return {"id": project["id"], "project": project["name"], "from_status": old_status, "status": status}
+
+register_tool(
+    name="update_project_status",
+    description="Change a Project Hunt project's status, including moving a project to Awarded.",
+    parameters={
+        "project_name": {"type": "string", "required": False},
+        "project_id": {"type": "integer", "required": False},
+        "status": {"type": "string", "required": True, "enum": TR_STATUS_OPTIONS},
+    },
+    permission="action:project_hunt:manage", atlas_permission="module:atlas:view",
+    kind="write", confirm=True, handler=_tool_update_project_status,
+)
+
+def _tool_create_equipment(user, name, description=None, year=None, serial_number=None, value=None,
+                           daily_rate=None, weekly_rate=None, monthly_rate=None, location=None, hours_mileage=None):
+    db = get_db()
+    name = str(name or "").strip()
+    if not name:
+        raise ToolWriteRejected("equipment_name_required")
+    dup = db.execute("SELECT id FROM sitepulse_assets WHERE lower(name)=lower(?)", (name,)).fetchone()
+    if dup:
+        raise ToolWriteRejected("equipment_name_already_exists")
+    now = datetime.utcnow().isoformat()
+    cur = db.execute(
+        """INSERT INTO sitepulse_assets (name, description, year, serial_number, value, daily_rate,
+           weekly_rate, monthly_rate, status, location, hours_mileage, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (name, description or "", year or "", serial_number or "", value or "", daily_rate or "",
+         weekly_rate or "", monthly_rate or "", "Available", location or "", hours_mileage or "", now, now)
+    )
+    log_activity("sitepulse", "asset", cur.lastrowid, "created", new_value=name)
+    db.commit()
+    return {"id": cur.lastrowid, "equipment": name, "status": "Available", "location": location or ""}
+
+register_tool(
+    name="create_equipment",
+    description="Create a new Equipment Center asset using the same fields as Add Equipment.",
+    parameters={
+        "name": {"type": "string", "required": True},
+        "description": {"type": "string", "required": False},
+        "year": {"type": "string", "required": False},
+        "serial_number": {"type": "string", "required": False},
+        "value": {"type": "string", "required": False},
+        "daily_rate": {"type": "string", "required": False},
+        "weekly_rate": {"type": "string", "required": False},
+        "monthly_rate": {"type": "string", "required": False},
+        "location": {"type": "string", "required": False},
+        "hours_mileage": {"type": "string", "required": False},
+    },
+    permission="action:equipment_center:manage", atlas_permission="module:atlas:view",
+    kind="write", confirm=True, handler=_tool_create_equipment,
+)
+
+def _tool_create_rental(user, vendor, equipment_description, project_name=None, project_id=None,
+                        job_name=None, rate_amount=None, rate_period=None, rented_date=None, due_date=None, notes=None):
+    db = get_db()
+    vendor = str(vendor or "").strip()
+    equipment_description = str(equipment_description or "").strip()
+    if not vendor or not equipment_description:
+        raise ToolWriteRejected("rental_vendor_and_equipment_required")
+    resolved_project_id = None
+    canonical_job_name = str(job_name or "").strip()
+    if project_id or str(project_name or "").strip():
+        project = _atlas_resolve_project_write(project_name, project_id)
+        resolved_project_id = project["id"]
+        canonical_job_name = project["name"]
+    period = str(rate_period or "Daily").strip().title()
+    if period not in ("Daily", "Weekly", "Monthly"):
+        raise ToolWriteRejected("invalid_rental_rate_period")
+    rented = str(rented_date or date.today().isoformat()).strip()
+    now = datetime.utcnow().isoformat()
+    cur = db.execute(
+        """INSERT INTO sitepulse_rentals (vendor, equipment_description, job_name, project_id, rate_amount,
+           rate_period, rented_date, due_date, notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (vendor, equipment_description, canonical_job_name, resolved_project_id, rate_amount or "",
+         period, rented, due_date or "", notes or "", now, now)
+    )
+    log_activity("sitepulse", "rental", cur.lastrowid, "created", new_value=equipment_description)
+    db.commit()
+    return {"id": cur.lastrowid, "rental": equipment_description, "vendor": vendor,
+            "project": canonical_job_name, "project_id": resolved_project_id, "rented_date": rented,
+            "due_date": due_date or "", "rate_amount": rate_amount or "", "rate_period": period}
+
+register_tool(
+    name="create_rental",
+    description="Create/log a new outside rental in Equipment Center/SitePulse.",
+    parameters={
+        "vendor": {"type": "string", "required": True},
+        "equipment_description": {"type": "string", "required": True},
+        "project_name": {"type": "string", "required": False},
+        "project_id": {"type": "integer", "required": False},
+        "job_name": {"type": "string", "required": False},
+        "rate_amount": {"type": "string", "required": False},
+        "rate_period": {"type": "string", "required": False, "enum": ["Daily", "Weekly", "Monthly"]},
+        "rented_date": {"type": "string", "required": False},
+        "due_date": {"type": "string", "required": False},
+        "notes": {"type": "string", "required": False},
+    },
+    permission="action:equipment_center:manage", atlas_permission="module:atlas:view",
+    kind="write", confirm=True, handler=_tool_create_rental,
+)
+
+
 
 def _atlas_native_tool_declarations(only=None):
     """Builds the Anthropic `tools=[...]` declaration array for ONLY the
@@ -7744,7 +7891,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v10.6-purchase-project-match-fix"
+ATLAS_BUILD = "TEST-v11.1-action-catalog"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -10518,6 +10665,30 @@ def assistant_confirm_write():
             db.commit()
             return {"success":False,"submitted_id":None,"error":"the equipment move could not be verified in BuildIQ after submission"}
 
+    elif tool_name == "update_project_status":
+        pid=(result.data or {}).get("id")
+        row=get_db().execute("SELECT id,name,status FROM tracker_projects WHERE id=?", (pid,)).fetchone() if pid else None
+        if not row or row["status"] != tool_params.get("status"):
+            return {"success":False,"submitted_id":None,"error":"the Project Hunt status change could not be verified in BuildIQ after submission"}
+    elif tool_name == "create_equipment":
+        eid=(result.data or {}).get("id")
+        row=get_db().execute("SELECT id,name,status,location FROM sitepulse_assets WHERE id=?", (eid,)).fetchone() if eid else None
+        if not row or row["name"] != tool_params.get("name"):
+            return {"success":False,"submitted_id":None,"error":"the new equipment could not be verified in BuildIQ after creation"}
+    elif tool_name == "create_rental":
+        rid=(result.data or {}).get("id")
+        row=get_db().execute("SELECT id,vendor,equipment_description,project_id,job_name FROM sitepulse_rentals WHERE id=?", (rid,)).fetchone() if rid else None
+        if not row or row["vendor"] != tool_params.get("vendor") or row["equipment_description"] != tool_params.get("equipment_description"):
+            return {"success":False,"submitted_id":None,"error":"the rental could not be verified in BuildIQ after creation"}
+    elif isinstance(result.data, dict) and result.data.get("_atlas_catalog_action"):
+        # V11.1 catalog handlers verify the authoritative post-write state themselves
+        # before returning. Refuse a green receipt unless that verification flag is present.
+        if result.data.get("_atlas_verified") is not True:
+            log_activity("atlas", "write_verify", (result.data or {}).get("id") or 0,
+                         "catalog_write_verification_failed", field=tool_name, new_value=str(tool_params))
+            get_db().commit()
+            return {"success":False,"submitted_id":None,"error":"the BuildIQ action could not be verified after execution"}
+
     draft["mode"] = "chat"
     draft["fields"] = {}
     receipt=""
@@ -10557,6 +10728,31 @@ def assistant_confirm_write():
         ac=dict(draft.get("active_context") or {})
         ac.update({"last_action":"create_concrete_request","last_action_status":"completed","recent_actions":recent_actions[-20:]})
         draft["active_context"]=ac
+    elif tool_name == "update_project_status":
+        d=result.data or {}
+        receipt=f"✓ {d.get('project') or tool_params.get('project_name')} moved from {d.get('from_status') or 'its prior status'} to {d.get('status') or tool_params.get('status')} in Project Hunt"
+        recent_actions.append({"action":"update_project_status","project":d.get("project"),"from_status":d.get("from_status"),"status":d.get("status"),"completed_at":datetime.utcnow().isoformat()})
+        ac=dict(draft.get("active_context") or {}); ac.update({"entity_type":"project","name":d.get("project"),"project_id":d.get("id"),"last_action":"update_project_status","last_action_status":"completed","recent_actions":recent_actions[-20:]}); draft["active_context"]=ac
+    elif tool_name == "create_equipment":
+        d=result.data or {}
+        receipt=f"✓ Equipment created: {d.get('equipment') or tool_params.get('name')}" + (f" at {d.get('location')}" if d.get('location') else "")
+        recent_actions.append({"action":"create_equipment","equipment":d.get("equipment"),"id":d.get("id"),"completed_at":datetime.utcnow().isoformat()})
+        ac=dict(draft.get("active_context") or {}); ac.update({"entity_type":"equipment","name":d.get("equipment"),"current_location":d.get("location") or "","last_action":"create_equipment","last_action_status":"completed","recent_actions":recent_actions[-20:]}); draft["active_context"]=ac
+    elif tool_name == "create_rental":
+        d=result.data or {}
+        receipt=f"✓ Rental #{d.get('id')} created for {d.get('rental') or tool_params.get('equipment_description')} from {d.get('vendor') or tool_params.get('vendor')}" + (f" — {d.get('project')}" if d.get('project') else "")
+        recent_actions.append({"action":"create_rental","rental_id":d.get("id"),"equipment":d.get("rental"),"vendor":d.get("vendor"),"project":d.get("project"),"completed_at":datetime.utcnow().isoformat()})
+        ac=dict(draft.get("active_context") or {}); ac.update({"entity_type":"rental","rental_id":d.get("id"),"name":d.get("rental"),"last_action":"create_rental","last_action_status":"completed","recent_actions":recent_actions[-20:]}); draft["active_context"]=ac
+    elif isinstance(result.data, dict) and result.data.get("_atlas_catalog_action"):
+        d=result.data or {}
+        receipt=d.get("receipt") or f"✓ BuildIQ action completed: {tool_name.replace('_',' ')}"
+        recent_actions.append({"action":tool_name,"id":d.get("id"),"completed_at":datetime.utcnow().isoformat()})
+        ac=dict(draft.get("active_context") or {})
+        if d.get("entity_type"): ac["entity_type"]=d.get("entity_type")
+        if d.get("name"): ac["name"]=d.get("name")
+        if d.get("project_id"): ac["project_id"]=d.get("project_id")
+        ac.update({"last_action":tool_name,"last_action_status":"completed","recent_actions":recent_actions[-20:]})
+        draft["active_context"]=ac
     if receipt:
         h=list(draft.get("history", [])); h.append({"role":"assistant","content":receipt}); draft["history"]=h[-80:]
         cid=draft.get("conversation_id") or session.get("atlas_conversation_id")
@@ -10587,6 +10783,485 @@ PURCHASE_STATUS_OPTIONS = ["Submitted", "Scheduled", "Completed"]
 # user_has_permission all already exist in this module.
 import intelligence
 intelligence.register_atlas_tools(register_tool, SP_STATUS_OPTIONS, PURCHASE_STATUS_OPTIONS)
+
+
+# ---------------------------------------------------------------------------
+# ATLAS V11.1 ACTION CATALOG
+# ---------------------------------------------------------------------------
+# One catalog, not one-off action patches. Every entry below is a registered
+# Atlas write capability with its own parameter schema, the SAME BuildIQ manual
+# permission key as the corresponding UI workflow, confirmation through the
+# existing one-time token boundary, activity logging, and authoritative
+# post-write verification before a green receipt can be returned.
+#
+# The catalog deliberately excludes raw SQL, arbitrary endpoint execution,
+# account signup/login, database restore/import, cron endpoints, and file-upload
+# actions when no real file was supplied. Those are not safe conversational
+# writes. Everything here is an explicit business operation.
+
+_ATLAS_ACTION_CATALOG_SUMMARY = [
+    ("update_equipment_details", "Equipment Center: edit equipment details/rates"),
+    ("update_equipment_status", "Equipment Center: change equipment status"),
+    ("log_equipment_usage", "Equipment Center: log equipment usage/job assignment"),
+    ("log_equipment_maintenance", "Equipment Center: log maintenance"),
+    ("log_equipment_mileage", "Equipment Center: log mileage"),
+    ("update_rental", "Rentals: edit rental details"),
+    ("return_rental", "Rentals: mark rental returned"),
+    ("reopen_rental", "Rentals: reopen a returned rental with reason"),
+    ("request_rental_exchange", "Rentals: request swap/exchange"),
+    ("mark_rental_vendor_contacted", "Rentals: mark vendor contacted"),
+    ("schedule_rental_exchange", "Rentals: schedule exchange"),
+    ("complete_rental_exchange", "Rentals: complete exchange/replacement received"),
+    ("create_project_hunt_project", "Project Hunt: create project"),
+    ("create_project_quote", "Project Hunt: create quote/vendor bid"),
+    ("update_project_quote", "Project Hunt: update quote status/amount"),
+    ("create_project_document", "Project Hunt: create document/checklist record"),
+    ("update_project_document_status", "Project Hunt: update document status"),
+    ("add_unit_price", "Project Hunt: add unit price"),
+    ("start_project_deployment", "Project Deployment: start deployment"),
+    ("complete_deployment_item", "Project Deployment: complete checklist item"),
+    ("reopen_deployment_item", "Project Deployment: reopen checklist item"),
+    ("override_deployment_item", "Project Deployment: override checklist item with reason"),
+    ("update_deployment_status", "Project Deployment: change deployment status"),
+    ("reopen_project_deployment", "Project Deployment: reopen deployment"),
+    ("create_material", "Site Inventory: create material record"),
+    ("create_purchase_request", "Purchase Requests: create request with line items"),
+    ("update_purchase_request_status", "Purchase Requests: change lifecycle status"),
+    ("place_purchase_order", "Purchase Requests: place order / schedule delivery"),
+    ("update_concrete_request_status", "Concrete Requests: change lifecycle status"),
+    ("place_concrete_order", "Concrete Requests: record supplier/order and mark Scheduled"),
+    ("create_employee_request", "Requests Center: submit employee request"),
+    ("update_employee_request_status", "Product Intelligence: update request lifecycle status"),
+    ("approve_employee_request", "Product Intelligence: approve pending request"),
+    ("return_employee_request", "Product Intelligence: return pending request with reason"),
+    ("create_cashflow_invoice", "CashFlow: create owner invoice"),
+    ("add_cashflow_payment", "CashFlow: record payment"),
+    ("add_cashflow_note", "CashFlow: add invoice note"),
+    ("mark_cashflow_invoice_sent", "CashFlow: mark invoice sent/invoiced"),
+    ("void_cashflow_invoice", "CashFlow: void invoice"),
+    ("create_sub_invoice", "CashFlow: create subcontractor/vendor invoice"),
+    ("update_sub_invoice_status", "CashFlow: update subcontractor invoice status"),
+    ("create_field_report", "SitePulse: create daily field report"),
+    ("submit_field_report", "SitePulse: submit field report"),
+    ("reopen_field_report", "SitePulse: reopen submitted field report"),
+]
+
+def _atlas_action_catalog_prompt():
+    lines = ["- FULL ACTION CATALOG: when the person asks for one of these operations, use the exact registered tool name below rather than saying Atlas cannot do it. Collect only missing required fields; never invent values; always require confirmation before write execution.\\n"]
+    for name, desc in _ATLAS_ACTION_CATALOG_SUMMARY:
+        lines.append(f"  - {name}: {desc}\\n")
+    lines.append("- File uploads still require an actual file from the user; Atlas must never invent or fabricate an uploaded file. Database restore/import, account authentication, cron triggers, and unrestricted SQL are not conversational Atlas actions.\\n")
+    return "".join(lines)
+
+def _atlas_catalog_ok(receipt, **data):
+    out={"_atlas_catalog_action":True,"_atlas_verified":True,"receipt":receipt}
+    out.update(data)
+    return out
+
+def _atlas_asset_by_name(name):
+    db=get_db(); q=str(name or "").strip()
+    rows=db.execute("SELECT * FROM sitepulse_assets WHERE lower(name)=lower(?)",(q,)).fetchall()
+    if len(rows)==1: return rows[0]
+    rows=db.execute("SELECT * FROM sitepulse_assets WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 8",(f"%{q}%",)).fetchall()
+    if len(rows)==1: return rows[0]
+    raise ToolWriteRejected("equipment_ambiguous" if len(rows)>1 else "equipment_not_found")
+
+def _atlas_rental_by_id(rental_id):
+    r=get_db().execute("SELECT * FROM sitepulse_rentals WHERE id=?",(int(rental_id),)).fetchone()
+    if not r: raise ToolWriteRejected("rental_not_found")
+    return r
+
+def _atlas_invoice_by_id(invoice_id):
+    r=get_db().execute("SELECT * FROM finance_invoices WHERE id=?",(int(invoice_id),)).fetchone()
+    if not r: raise ToolWriteRejected("invoice_not_found")
+    return r
+
+def _atlas_deployment_by_project(project_name=None, project_id=None):
+    p=_atlas_resolve_project_write(project_name, project_id)
+    d=get_db().execute("SELECT * FROM project_deployments WHERE project_id=?",(p["id"],)).fetchone()
+    if not d: raise ToolWriteRejected("deployment_not_started")
+    return p,d
+
+def _reg_catalog(name, description, parameters, permission, handler):
+    register_tool(name=name, description=description, parameters=parameters,
+                  permission=permission, atlas_permission="module:atlas:view",
+                  kind="write", confirm=True, handler=handler)
+
+# Equipment Center -----------------------------------------------------------
+def _cat_update_equipment_details(user, equipment_name, name=None, description=None, year=None, serial_number=None, value=None, daily_rate=None, weekly_rate=None, monthly_rate=None):
+    db=get_db(); a=_atlas_asset_by_name(equipment_name); new_name=str(name or a["name"]).strip()
+    vals={"description":a["description"] or "","year":a["year"] or "","serial_number":a["serial_number"] or "","value":a["value"] or "","daily_rate":a["daily_rate"] or "","weekly_rate":a["weekly_rate"] or "","monthly_rate":a["monthly_rate"] or ""}
+    for k,v in {"description":description,"year":year,"serial_number":serial_number,"value":value,"daily_rate":daily_rate,"weekly_rate":weekly_rate,"monthly_rate":monthly_rate}.items():
+        if v is not None: vals[k]=str(v)
+    db.execute("""UPDATE sitepulse_assets SET name=?,description=?,year=?,serial_number=?,value=?,daily_rate=?,weekly_rate=?,monthly_rate=?,updated_at=? WHERE id=?""",(new_name,vals["description"],vals["year"],vals["serial_number"],vals["value"],vals["daily_rate"],vals["weekly_rate"],vals["monthly_rate"],datetime.utcnow().isoformat(),a["id"]))
+    log_activity("sitepulse","asset",a["id"],"updated",asset_id=a["id"],field="details",new_value=new_name); db.commit()
+    row=db.execute("SELECT name FROM sitepulse_assets WHERE id=?",(a["id"],)).fetchone()
+    if not row or row["name"]!=new_name: raise ToolWriteRejected("equipment_update_not_verified")
+    return _atlas_catalog_ok(f"✓ Equipment updated: {new_name}",id=a["id"],entity_type="equipment",name=new_name)
+_reg_catalog("update_equipment_details","Edit an existing equipment record without changing its current location.",{"equipment_name":{"type":"string","required":True},"name":{"type":"string"},"description":{"type":"string"},"year":{"type":"string"},"serial_number":{"type":"string"},"value":{"type":"string"},"daily_rate":{"type":"string"},"weekly_rate":{"type":"string"},"monthly_rate":{"type":"string"}},"action:equipment_center:manage",_cat_update_equipment_details)
+
+def _cat_update_equipment_status(user,equipment_name,status):
+    if status not in SP_STATUS_OPTIONS: raise ToolWriteRejected("invalid_equipment_status")
+    db=get_db(); a=_atlas_asset_by_name(equipment_name); old=a["status"]
+    db.execute("UPDATE sitepulse_assets SET status=?,updated_at=? WHERE id=?",(status,datetime.utcnow().isoformat(),a["id"])); log_activity("sitepulse","asset",a["id"],"updated",field="status",old_value=old,new_value=status); db.commit()
+    row=db.execute("SELECT status FROM sitepulse_assets WHERE id=?",(a["id"],)).fetchone()
+    if not row or row["status"]!=status: raise ToolWriteRejected("equipment_status_not_verified")
+    return _atlas_catalog_ok(f"✓ {a['name']} status changed to {status}",id=a["id"],entity_type="equipment",name=a["name"])
+_reg_catalog("update_equipment_status","Change an equipment asset status.",{"equipment_name":{"type":"string","required":True},"status":{"type":"string","required":True,"enum":SP_STATUS_OPTIONS}},"action:equipment_center:manage",_cat_update_equipment_status)
+
+def _cat_log_usage(user,equipment_name,usage_type=None,job_name=None,project_name=None,project_id=None,job_address=None,client=None,out_date=None,duration_unit=None,return_date=None,notes=None):
+    db=get_db(); a=_atlas_asset_by_name(equipment_name); pid=None; canonical_job=str(job_name or "").strip()
+    if project_id or project_name:
+        p=_atlas_resolve_project_write(project_name,project_id); pid=p["id"]; canonical_job=canonical_job or p["name"]
+    now=datetime.utcnow().isoformat(); cur=db.execute("""INSERT INTO sitepulse_usage_log(asset_id,usage_type,job_name,project_id,job_address,client,out_date,duration_unit,return_date,notes,photo_filename,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,NULL,?)""",(a["id"],usage_type or "Internal Job",canonical_job,pid,job_address or "",client or "",out_date or date.today().isoformat(),duration_unit or "",return_date or "",notes or "",now)); db.execute("UPDATE sitepulse_assets SET status='Out on Job',updated_at=? WHERE id=?",(now,a["id"])); log_activity("sitepulse","usage",cur.lastrowid,"created",asset_id=a["id"],new_value=canonical_job); db.commit()
+    row=db.execute("SELECT id FROM sitepulse_usage_log WHERE id=?",(cur.lastrowid,)).fetchone()
+    if not row: raise ToolWriteRejected("usage_not_verified")
+    return _atlas_catalog_ok(f"✓ Usage logged for {a['name']}"+(f" — {canonical_job}" if canonical_job else ""),id=cur.lastrowid,entity_type="equipment",name=a["name"])
+_reg_catalog("log_equipment_usage","Log equipment usage/job assignment and mark the asset Out on Job.",{"equipment_name":{"type":"string","required":True},"usage_type":{"type":"string"},"job_name":{"type":"string"},"project_name":{"type":"string"},"project_id":{"type":"integer"},"job_address":{"type":"string"},"client":{"type":"string"},"out_date":{"type":"string"},"duration_unit":{"type":"string"},"return_date":{"type":"string"},"notes":{"type":"string"}},"action:equipment_center:manage",_cat_log_usage)
+
+def _cat_log_maintenance(user,equipment_name,work_done,entry_date=None,parts=None,hours_at_service=None,resolved=None):
+    db=get_db(); a=_atlas_asset_by_name(equipment_name); now=datetime.utcnow().isoformat(); is_resolved=str(resolved or "").lower() in ("1","true","yes","resolved")
+    cur=db.execute("""INSERT INTO sitepulse_maintenance_log(asset_id,entry_date,work_done,parts,hours_at_service,reported_by,resolved,photo_filename,created_at) VALUES(?,?,?,?,?,?,?,NULL,?)""",(a["id"],entry_date or date.today().isoformat(),work_done,parts or "",hours_at_service or "",user.name or user.email,1 if is_resolved else 0,now)); log_activity("sitepulse","maintenance",cur.lastrowid,"created",asset_id=a["id"],new_value=work_done); db.commit()
+    if not db.execute("SELECT 1 FROM sitepulse_maintenance_log WHERE id=?",(cur.lastrowid,)).fetchone(): raise ToolWriteRejected("maintenance_not_verified")
+    return _atlas_catalog_ok(f"✓ Maintenance logged for {a['name']}: {work_done}",id=cur.lastrowid,entity_type="equipment",name=a["name"])
+_reg_catalog("log_equipment_maintenance","Log maintenance/service for equipment.",{"equipment_name":{"type":"string","required":True},"work_done":{"type":"string","required":True},"entry_date":{"type":"string"},"parts":{"type":"string"},"hours_at_service":{"type":"string"},"resolved":{"type":"string"}},"action:equipment_center:manage",_cat_log_maintenance)
+
+def _cat_log_mileage(user,equipment_name,mileage,reading_date=None,notes=None):
+    db=get_db(); a=_atlas_asset_by_name(equipment_name); now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO sitepulse_mileage_log(asset_id,reading_date,mileage,notes,created_at) VALUES(?,?,?,?,?)",(a["id"],reading_date or date.today().isoformat(),str(mileage),notes or "",now)); log_activity("sitepulse","mileage",a["id"],"created",asset_id=a["id"],new_value=str(mileage)); db.commit()
+    if not db.execute("SELECT 1 FROM sitepulse_mileage_log WHERE id=?",(cur.lastrowid,)).fetchone(): raise ToolWriteRejected("mileage_not_verified")
+    return _atlas_catalog_ok(f"✓ Mileage logged for {a['name']}: {mileage}",id=cur.lastrowid,entity_type="equipment",name=a["name"])
+_reg_catalog("log_equipment_mileage","Log an equipment mileage reading.",{"equipment_name":{"type":"string","required":True},"mileage":{"type":"string","required":True},"reading_date":{"type":"string"},"notes":{"type":"string"}},"action:equipment_center:manage",_cat_log_mileage)
+
+# Rentals --------------------------------------------------------------------
+def _cat_update_rental(user,rental_id,vendor=None,equipment_description=None,job_name=None,rate_amount=None,rate_period=None,rented_date=None,due_date=None,notes=None):
+    db=get_db(); r=_atlas_rental_by_id(rental_id)
+    if r["returned_date"]: raise ToolWriteRejected("rental_returned_reopen_first")
+    vals={k:(r[k] or "") for k in ("vendor","equipment_description","job_name","rate_amount","rate_period","rented_date","due_date","notes")}
+    for k,v in {"vendor":vendor,"equipment_description":equipment_description,"job_name":job_name,"rate_amount":rate_amount,"rate_period":rate_period,"rented_date":rented_date,"due_date":due_date,"notes":notes}.items():
+        if v is not None: vals[k]=str(v)
+    db.execute("""UPDATE sitepulse_rentals SET vendor=?,equipment_description=?,job_name=?,rate_amount=?,rate_period=?,rented_date=?,due_date=?,notes=?,updated_at=? WHERE id=?""",(vals["vendor"],vals["equipment_description"],vals["job_name"],vals["rate_amount"],vals["rate_period"] or "Daily",vals["rented_date"],vals["due_date"],vals["notes"],datetime.utcnow().isoformat(),r["id"])); log_activity("sitepulse","rental",r["id"],"updated",new_value=vals["equipment_description"]); db.commit()
+    return _atlas_catalog_ok(f"✓ Rental #{r['id']} updated: {vals['equipment_description']}",id=r["id"],entity_type="rental",name=vals["equipment_description"])
+_reg_catalog("update_rental","Edit an active outside rental.",{"rental_id":{"type":"integer","required":True},"vendor":{"type":"string"},"equipment_description":{"type":"string"},"job_name":{"type":"string"},"rate_amount":{"type":"string"},"rate_period":{"type":"string"},"rented_date":{"type":"string"},"due_date":{"type":"string"},"notes":{"type":"string"}},"action:equipment_center:manage",_cat_update_rental)
+
+def _cat_return_rental(user,rental_id,returned_date=None):
+    db=get_db(); r=_atlas_rental_by_id(rental_id); open_swap=db.execute("SELECT id FROM sitepulse_rental_swaps WHERE rental_id=? AND status!='Completed' ORDER BY id DESC LIMIT 1",(r["id"],)).fetchone()
+    if open_swap: raise ToolWriteRejected("rental_has_unresolved_exchange")
+    rd=returned_date or date.today().isoformat(); db.execute("UPDATE sitepulse_rentals SET returned_date=?,updated_at=? WHERE id=?",(rd,datetime.utcnow().isoformat(),r["id"])); log_activity("sitepulse","rental",r["id"],"returned",field="returned_date",new_value=rd); db.commit()
+    row=db.execute("SELECT returned_date FROM sitepulse_rentals WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["returned_date"]!=rd: raise ToolWriteRejected("rental_return_not_verified")
+    return _atlas_catalog_ok(f"✓ Rental #{r['id']} marked returned on {rd}",id=r["id"],entity_type="rental",name=r["equipment_description"])
+_reg_catalog("return_rental","Mark an outside rental returned.",{"rental_id":{"type":"integer","required":True},"returned_date":{"type":"string"}},"action:equipment_center:manage",_cat_return_rental)
+
+def _cat_reopen_rental(user,rental_id,reason):
+    db=get_db(); r=_atlas_rental_by_id(rental_id)
+    if not r["returned_date"]: raise ToolWriteRejected("rental_not_returned")
+    reason=str(reason or "").strip()
+    if not reason: raise ToolWriteRejected("reopen_reason_required")
+    old=r["returned_date"]; db.execute("UPDATE sitepulse_rentals SET returned_date=NULL,updated_at=? WHERE id=?",(datetime.utcnow().isoformat(),r["id"])); log_activity("sitepulse","rental",r["id"],"reopened",field="returned_date",old_value=old,new_value=f"reopened: {reason}"); db.commit()
+    if db.execute("SELECT returned_date FROM sitepulse_rentals WHERE id=?",(r["id"],)).fetchone()["returned_date"]: raise ToolWriteRejected("rental_reopen_not_verified")
+    return _atlas_catalog_ok(f"✓ Rental #{r['id']} reopened — {reason}",id=r["id"],entity_type="rental",name=r["equipment_description"])
+_reg_catalog("reopen_rental","Reopen a returned rental; reason is required.",{"rental_id":{"type":"integer","required":True},"reason":{"type":"string","required":True}},"action:equipment_center:manage",_cat_reopen_rental)
+
+def _cat_request_exchange(user,rental_id,reason):
+    db=get_db(); r=_atlas_rental_by_id(rental_id)
+    if r["returned_date"]: raise ToolWriteRejected("rental_returned")
+    if db.execute("SELECT id FROM sitepulse_rental_swaps WHERE rental_id=? AND status!='Completed' ORDER BY id DESC LIMIT 1",(r["id"],)).fetchone(): raise ToolWriteRejected("exchange_already_open")
+    now=datetime.utcnow().isoformat(); cur=db.execute("""INSERT INTO sitepulse_rental_swaps(rental_id,outgoing_equipment_description,reason,requested_by,requested_at,status,created_at,updated_at) VALUES(?,?,?,?,?,'Requested',?,?)""",(r["id"],r["equipment_description"],reason,user.name or user.email,now,now,now)); log_activity("sitepulse","rental_swap",cur.lastrowid,"requested",asset_id=r["id"],new_value=reason); db.commit()
+    if not db.execute("SELECT 1 FROM sitepulse_rental_swaps WHERE id=? AND status='Requested'",(cur.lastrowid,)).fetchone(): raise ToolWriteRejected("exchange_request_not_verified")
+    return _atlas_catalog_ok(f"✓ Exchange requested for rental #{r['id']}: {r['equipment_description']}",id=cur.lastrowid,entity_type="rental",name=r["equipment_description"])
+_reg_catalog("request_rental_exchange","Request a swap/exchange for an active rental.",{"rental_id":{"type":"integer","required":True},"reason":{"type":"string","required":True}},"action:equipment_center:manage",_cat_request_exchange)
+
+def _cat_vendor_contacted(user,rental_id):
+    db=get_db(); r=_atlas_rental_by_id(rental_id); sw=db.execute("SELECT * FROM sitepulse_rental_swaps WHERE rental_id=? AND status='Requested' ORDER BY id DESC LIMIT 1",(r["id"],)).fetchone()
+    if not sw: raise ToolWriteRejected("requested_exchange_not_found")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE sitepulse_rental_swaps SET status='Vendor Contacted',vendor_contacted_by=?,vendor_contacted_at=?,updated_at=? WHERE id=?",(user.name or user.email,now,now,sw["id"])); log_activity("sitepulse","rental_swap",sw["id"],"vendor_contacted",asset_id=r["id"],new_value=r["vendor"]); db.commit()
+    return _atlas_catalog_ok(f"✓ Vendor contacted for rental #{r['id']} exchange",id=sw["id"],entity_type="rental",name=r["equipment_description"])
+_reg_catalog("mark_rental_vendor_contacted","Advance a requested rental exchange to Vendor Contacted.",{"rental_id":{"type":"integer","required":True}},"action:equipment_center:manage",_cat_vendor_contacted)
+
+def _cat_schedule_exchange(user,rental_id,scheduled_date):
+    db=get_db(); r=_atlas_rental_by_id(rental_id); sw=db.execute("SELECT * FROM sitepulse_rental_swaps WHERE rental_id=? AND status IN ('Requested','Vendor Contacted') ORDER BY id DESC LIMIT 1",(r["id"],)).fetchone()
+    if not sw: raise ToolWriteRejected("open_exchange_not_found")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE sitepulse_rental_swaps SET status='Swap Scheduled',scheduled_by=?,scheduled_date=?,updated_at=? WHERE id=?",(user.name or user.email,scheduled_date,now,sw["id"])); log_activity("sitepulse","rental_swap",sw["id"],"scheduled",asset_id=r["id"],new_value=scheduled_date); db.commit()
+    return _atlas_catalog_ok(f"✓ Rental #{r['id']} exchange scheduled for {scheduled_date}",id=sw["id"],entity_type="rental",name=r["equipment_description"])
+_reg_catalog("schedule_rental_exchange","Schedule an open rental exchange.",{"rental_id":{"type":"integer","required":True},"scheduled_date":{"type":"string","required":True}},"action:equipment_center:manage",_cat_schedule_exchange)
+
+def _cat_complete_exchange(user,rental_id,incoming_equipment_description):
+    db=get_db(); r=_atlas_rental_by_id(rental_id); sw=db.execute("SELECT * FROM sitepulse_rental_swaps WHERE rental_id=? AND status!='Completed' ORDER BY id DESC LIMIT 1",(r["id"],)).fetchone()
+    if not sw: raise ToolWriteRejected("open_exchange_not_found")
+    incoming=str(incoming_equipment_description or "").strip()
+    if not incoming: raise ToolWriteRejected("incoming_equipment_required")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE sitepulse_rental_swaps SET status='Completed',incoming_equipment_description=?,completed_by=?,completed_at=?,updated_at=? WHERE id=?",(incoming,user.name or user.email,now,now,sw["id"])); db.execute("UPDATE sitepulse_rentals SET equipment_description=?,updated_at=? WHERE id=?",(incoming,now,r["id"])); log_activity("sitepulse","rental_swap",sw["id"],"completed",asset_id=r["id"],old_value=r["equipment_description"],new_value=incoming); db.commit()
+    row=db.execute("SELECT equipment_description FROM sitepulse_rentals WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["equipment_description"]!=incoming: raise ToolWriteRejected("exchange_completion_not_verified")
+    return _atlas_catalog_ok(f"✓ Rental #{r['id']} exchange completed — replacement received: {incoming}",id=sw["id"],entity_type="rental",name=incoming)
+_reg_catalog("complete_rental_exchange","Complete an open rental exchange and make the replacement the current rental equipment.",{"rental_id":{"type":"integer","required":True},"incoming_equipment_description":{"type":"string","required":True}},"action:equipment_center:manage",_cat_complete_exchange)
+
+# Project Hunt ---------------------------------------------------------------
+def _cat_create_project(user,name,client=None,address=None,bid_due_date=None,estimated_value=None,status=None,assigned_to=None,notes=None):
+    db=get_db(); n=str(name or "").strip();
+    if not n: raise ToolWriteRejected("project_name_required")
+    st=status or "In Progress";
+    if st not in TR_STATUS_OPTIONS: raise ToolWriteRejected("invalid_project_status")
+    now=datetime.utcnow().isoformat(); cur=db.execute("""INSERT INTO tracker_projects(name,client,address,bid_due_date,estimated_value,status,assigned_to,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",(n,client or "",address or "",bid_due_date or "",tr_format_currency(estimated_value or ""),st,assigned_to or "",notes or "",now,now)); log_activity("tracker","project",cur.lastrowid,"created",asset_id=cur.lastrowid,new_value=n); db.commit()
+    if not db.execute("SELECT 1 FROM tracker_projects WHERE id=? AND name=?",(cur.lastrowid,n)).fetchone(): raise ToolWriteRejected("project_create_not_verified")
+    return _atlas_catalog_ok(f"✓ Project Hunt project created: {n}",id=cur.lastrowid,project_id=cur.lastrowid,entity_type="project",name=n)
+_reg_catalog("create_project_hunt_project","Create a Project Hunt project.",{"name":{"type":"string","required":True},"client":{"type":"string"},"address":{"type":"string"},"bid_due_date":{"type":"string"},"estimated_value":{"type":"string"},"status":{"type":"string","enum":TR_STATUS_OPTIONS},"assigned_to":{"type":"string"},"notes":{"type":"string"}},"action:project_hunt:manage",_cat_create_project)
+
+def _cat_create_quote(user,project_name=None,project_id=None,trade=None,vendor_name=None,vendor_contact=None,vendor_email=None,vendor_phone=None,rfq_sent_date=None,status=None,is_submit_blocking=None,notes=None):
+    db=get_db(); p=_atlas_resolve_project_write(project_name,project_id); tr=str(trade or "").strip();
+    if not tr: raise ToolWriteRejected("trade_required")
+    now=datetime.utcnow().isoformat(); cur=db.execute("""INSERT INTO tracker_quotes(project_id,trade,vendor_name,vendor_contact,vendor_email,vendor_phone,rfq_sent_date,status,is_submit_blocking,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(p["id"],tr,vendor_name or "",vendor_contact or "",vendor_email or "",tr_format_phone(vendor_phone or ""),rfq_sent_date or "",status or "Not Sent",1 if str(is_submit_blocking or "").lower() in ("1","true","yes") else 0,notes or "",now,now)); log_activity("tracker","quote",cur.lastrowid,"created",asset_id=p["id"],new_value=f"{tr} - {vendor_name or ''}"); db.commit()
+    return _atlas_catalog_ok(f"✓ Quote added to {p['name']}: {tr}"+(f" — {vendor_name}" if vendor_name else ""),id=cur.lastrowid,project_id=p["id"],entity_type="project",name=p["name"])
+_reg_catalog("create_project_quote","Add a vendor/trade quote to a Project Hunt project.",{"project_name":{"type":"string"},"project_id":{"type":"integer"},"trade":{"type":"string","required":True},"vendor_name":{"type":"string"},"vendor_contact":{"type":"string"},"vendor_email":{"type":"string"},"vendor_phone":{"type":"string"},"rfq_sent_date":{"type":"string"},"status":{"type":"string"},"is_submit_blocking":{"type":"string"},"notes":{"type":"string"}},"action:project_hunt:manage",_cat_create_quote)
+
+def _cat_update_quote(user,quote_id,status,amount=None):
+    db=get_db(); q=db.execute("SELECT * FROM tracker_quotes WHERE id=?",(quote_id,)).fetchone();
+    if not q: raise ToolWriteRejected("quote_not_found")
+    amt=tr_format_currency(amount if amount is not None else (q["amount"] or "")); db.execute("UPDATE tracker_quotes SET status=?,amount=?,updated_at=? WHERE id=?",(status,amt,datetime.utcnow().isoformat(),q["id"])); log_activity("tracker","quote",q["id"],"updated",asset_id=q["project_id"],field="status",old_value=q["status"],new_value=status); db.commit()
+    row=db.execute("SELECT status FROM tracker_quotes WHERE id=?",(q["id"],)).fetchone();
+    if not row or row["status"]!=status: raise ToolWriteRejected("quote_update_not_verified")
+    return _atlas_catalog_ok(f"✓ Quote #{q['id']} updated to {status}",id=q["id"],project_id=q["project_id"],entity_type="project")
+_reg_catalog("update_project_quote","Update a Project Hunt quote status and optional amount.",{"quote_id":{"type":"integer","required":True},"status":{"type":"string","required":True},"amount":{"type":"string"}},"action:project_hunt:manage",_cat_update_quote)
+
+def _cat_create_doc(user,project_name=None,project_id=None,doc_name=None,doc_type=None,status=None,notes=None,link=None):
+    db=get_db(); p=_atlas_resolve_project_write(project_name,project_id); dn=str(doc_name or "").strip();
+    if not dn: raise ToolWriteRejected("document_name_required")
+    cur=db.execute("INSERT INTO tracker_docs(project_id,doc_name,doc_type,status,notes,link,created_at) VALUES(?,?,?,?,?,?,?)",(p["id"],dn,doc_type or "",status or "Needed",notes or "",link or "",datetime.utcnow().isoformat())); log_activity("tracker","doc",cur.lastrowid,"created",asset_id=p["id"],new_value=dn); db.commit()
+    return _atlas_catalog_ok(f"✓ Project document added to {p['name']}: {dn}",id=cur.lastrowid,project_id=p["id"],entity_type="project",name=p["name"])
+_reg_catalog("create_project_document","Create a Project Hunt document/checklist record (metadata/link, not a file upload).",{"project_name":{"type":"string"},"project_id":{"type":"integer"},"doc_name":{"type":"string","required":True},"doc_type":{"type":"string"},"status":{"type":"string"},"notes":{"type":"string"},"link":{"type":"string"}},"action:project_hunt:manage",_cat_create_doc)
+
+def _cat_update_doc_status(user,doc_id,status):
+    db=get_db(); d=db.execute("SELECT * FROM tracker_docs WHERE id=?",(doc_id,)).fetchone();
+    if not d: raise ToolWriteRejected("document_not_found")
+    db.execute("UPDATE tracker_docs SET status=? WHERE id=?",(status,d["id"])); log_activity("tracker","doc",d["id"],"updated",asset_id=d["project_id"],field="status",old_value=d["status"],new_value=status); db.commit()
+    return _atlas_catalog_ok(f"✓ Project document #{d['id']} status changed to {status}",id=d["id"],project_id=d["project_id"],entity_type="project")
+_reg_catalog("update_project_document_status","Update the status of a Project Hunt document record.",{"doc_id":{"type":"integer","required":True},"status":{"type":"string","required":True}},"action:project_hunt:manage",_cat_update_doc_status)
+
+def _cat_add_unit_price(user,item,category=None,unit=None,price=None,notes=None):
+    db=get_db(); cur=db.execute("INSERT INTO tracker_unit_prices(category,item,unit,price,notes,updated_at) VALUES(?,?,?,?,?,?)",(category or "",item,unit or "",tr_format_currency(price or ""),notes or "",datetime.utcnow().isoformat())); db.commit();
+    return _atlas_catalog_ok(f"✓ Unit price added: {item}"+(f" — {price}/{unit}" if price or unit else ""),id=cur.lastrowid)
+_reg_catalog("add_unit_price","Add a Project Hunt unit price reference.",{"item":{"type":"string","required":True},"category":{"type":"string"},"unit":{"type":"string"},"price":{"type":"string"},"notes":{"type":"string"}},"action:project_hunt:manage",_cat_add_unit_price)
+
+# Deployment -----------------------------------------------------------------
+def _cat_start_deployment(user,project_name=None,project_id=None):
+    db=get_db(); p=_atlas_resolve_project_write(project_name,project_id); existing=db.execute("SELECT * FROM project_deployments WHERE project_id=?",(p["id"],)).fetchone()
+    if existing: raise ToolWriteRejected("deployment_already_started")
+    now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO project_deployments(project_id,status,started_by,started_at,created_at,updated_at) VALUES(?,'Not Started',?,?,?,?,?)".replace("?,?,?,?,?,?","?,?,?,?,?"),(p["id"],user.email,now,now,now))
+    dep_id=cur.lastrowid
+    # Mirror canonical deployment checklist seed currently used by the web route.
+    for item_code, label, category, required, readiness_scored, conditional in DEPLOYMENT_ITEM_CODES:
+        db.execute("INSERT INTO project_deployment_items(deployment_id,item_code,status,applies,created_at,updated_at) VALUES(?, ?, 'Not Started', ?, ?, ?)",(dep_id,item_code,0 if conditional else 1,now,now))
+    log_activity("project_deployment","deployment",dep_id,"deployment_started",asset_id=p["id"],new_value=p["name"]); db.commit()
+    if not db.execute("SELECT 1 FROM project_deployments WHERE id=?",(dep_id,)).fetchone(): raise ToolWriteRejected("deployment_start_not_verified")
+    return _atlas_catalog_ok(f"✓ Project Deployment started for {p['name']}",id=dep_id,project_id=p["id"],entity_type="project",name=p["name"])
+_reg_catalog("start_project_deployment","Start the Project Deployment checklist for an existing Project Hunt project.",{"project_name":{"type":"string"},"project_id":{"type":"integer"}},"action:project_deployment:manage",_cat_start_deployment)
+
+def _cat_complete_dep_item(user,item_id,notes=None,owner=None,due_date=None):
+    db=get_db(); i=db.execute("SELECT * FROM project_deployment_items WHERE id=?",(item_id,)).fetchone();
+    if not i: raise ToolWriteRejected("deployment_item_not_found")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE project_deployment_items SET status='Completed',completed_at=?,completed_by=?,owner=?,due_date=?,notes=?,updated_at=? WHERE id=?",(now,user.email,owner or i["owner"],due_date or i["due_date"],notes if notes is not None else i["notes"],now,i["id"])); log_activity("project_deployment","deployment_item",i["id"],"item_completed",field="status",old_value=i["status"],new_value="Completed"); db.commit()
+    return _atlas_catalog_ok(f"✓ Deployment item #{i['id']} completed",id=i["id"])
+_reg_catalog("complete_deployment_item","Complete a Project Deployment checklist item.",{"item_id":{"type":"integer","required":True},"notes":{"type":"string"},"owner":{"type":"string"},"due_date":{"type":"string"}},"action:project_deployment:manage",_cat_complete_dep_item)
+
+def _cat_reopen_dep_item(user,item_id,notes=None):
+    db=get_db(); i=db.execute("SELECT * FROM project_deployment_items WHERE id=?",(item_id,)).fetchone();
+    if not i: raise ToolWriteRejected("deployment_item_not_found")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE project_deployment_items SET status='Not Started',reopened_at=?,reopened_by=?,override_reason=NULL,override_by=NULL,override_at=?,notes=?,updated_at=? WHERE id=?",(now,user.email,now,notes if notes is not None else i["notes"],now,i["id"])); log_activity("project_deployment","deployment_item",i["id"],"item_reopened",field="status",old_value=i["status"],new_value="Not Started"); db.commit()
+    return _atlas_catalog_ok(f"✓ Deployment item #{i['id']} reopened",id=i["id"])
+_reg_catalog("reopen_deployment_item","Reopen a completed/overridden Project Deployment item.",{"item_id":{"type":"integer","required":True},"notes":{"type":"string"}},"action:project_deployment:manage",_cat_reopen_dep_item)
+
+def _cat_override_dep_item(user,item_id,reason):
+    db=get_db(); i=db.execute("SELECT * FROM project_deployment_items WHERE id=?",(item_id,)).fetchone(); reason=str(reason or "").strip()
+    if not i: raise ToolWriteRejected("deployment_item_not_found")
+    if not reason: raise ToolWriteRejected("override_reason_required")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE project_deployment_items SET status='Completed',override_reason=?,override_by=?,override_at=?,completed_at=?,completed_by=?,updated_at=? WHERE id=?",(reason,user.email,now,now,user.email,now,i["id"])); log_activity("project_deployment","deployment_item",i["id"],"item_overridden",field="status",old_value=i["status"],new_value="Completed"); db.commit()
+    return _atlas_catalog_ok(f"✓ Deployment item #{i['id']} overridden — {reason}",id=i["id"])
+_reg_catalog("override_deployment_item","Override/complete a deployment item with an explicit reason.",{"item_id":{"type":"integer","required":True},"reason":{"type":"string","required":True}},"action:project_deployment:manage",_cat_override_dep_item)
+
+def _cat_update_dep_status(user,project_name=None,project_id=None,status=None):
+    p,d=_atlas_deployment_by_project(project_name,project_id); target=str(status or "").strip(); allowed=("Not Started","In Preparation","Ready","Active","Complete")
+    if target not in allowed: raise ToolWriteRejected("invalid_deployment_status")
+    db=get_db(); now=datetime.utcnow().isoformat(); db.execute("UPDATE project_deployments SET status=?,deployed_at=CASE WHEN ?='Active' THEN COALESCE(deployed_at,?) ELSE deployed_at END,updated_at=? WHERE id=?",(target,target,now,now,d["id"])); log_activity("project_deployment","deployment",d["id"],"status_changed",field="status",old_value=d["status"],new_value=target); db.commit()
+    return _atlas_catalog_ok(f"✓ {p['name']} deployment status changed to {target}",id=d["id"],project_id=p["id"],entity_type="project",name=p["name"])
+_reg_catalog("update_deployment_status","Change Project Deployment status.",{"project_name":{"type":"string"},"project_id":{"type":"integer"},"status":{"type":"string","required":True,"enum":["Not Started","In Preparation","Ready","Active","Complete"]}},"action:project_deployment:manage",_cat_update_dep_status)
+
+def _cat_reopen_dep(user,project_name=None,project_id=None):
+    p,d=_atlas_deployment_by_project(project_name,project_id); db=get_db(); now=datetime.utcnow().isoformat(); db.execute("UPDATE project_deployments SET status='In Preparation',updated_at=? WHERE id=?",(now,d["id"])); log_activity("project_deployment","deployment",d["id"],"deployment_reopened",field="status",old_value=d["status"],new_value="In Preparation"); db.commit(); return _atlas_catalog_ok(f"✓ {p['name']} deployment reopened",id=d["id"],project_id=p["id"],entity_type="project",name=p["name"])
+_reg_catalog("reopen_project_deployment","Reopen a Project Deployment.",{"project_name":{"type":"string"},"project_id":{"type":"integer"}},"action:project_deployment:manage",_cat_reopen_dep)
+
+# Inventory / Procurement ----------------------------------------------------
+def _cat_create_material(user,item_name,site,quantity=None,unit=None,shelf_location=None,notes=None):
+    db=get_db(); now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO inventory_materials(item_name,site,quantity,unit,shelf_location,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(item_name,site,quantity or "",unit or "",shelf_location or "",notes or "",now,now)); log_activity("inventory","material",cur.lastrowid,"created",new_value=item_name); db.commit(); return _atlas_catalog_ok(f"✓ Material added: {item_name} — {site}",id=cur.lastrowid)
+_reg_catalog("create_material","Create a Site Inventory material record.",{"item_name":{"type":"string","required":True},"site":{"type":"string","required":True},"quantity":{"type":"string"},"unit":{"type":"string"},"shelf_location":{"type":"string"},"notes":{"type":"string"}},("action:sitepulse:manage_inventory","action:sitepulse:manage"),_cat_create_material)
+
+def _cat_create_purchase(user,project_name=None,project_id=None,job_name=None,location_description=None,needed_on=None,source_of_supply=None,items_json=None):
+    db=get_db(); pid=None; job=str(job_name or "").strip()
+    if project_name or project_id:
+        p=_atlas_resolve_project_write(project_name,project_id); pid=p["id"]; job=job or p["name"]
+    try: items=json.loads(items_json) if items_json else []
+    except Exception: raise ToolWriteRejected("items_json_invalid")
+    if not isinstance(items,list) or not items: raise ToolWriteRejected("purchase_items_required")
+    now=datetime.utcnow().isoformat(); cur=db.execute("""INSERT INTO inventory_purchase_requests(pr_number,request_date,job_name,project_id,location_description,requested_by,needed_on,source_of_supply,requestor_signature,requestor_date,status,created_at,updated_at) VALUES(NULL,?,?,?,?,?,?,?,?,?,'Submitted',?,?)""",(date.today().isoformat(),job,pid,location_description or "",user.name or user.email,needed_on or "",source_of_supply or "",user.name or user.email,date.today().isoformat(),now,now)); rid=cur.lastrowid; db.execute("UPDATE inventory_purchase_requests SET pr_number=? WHERE id=?",(f"PR-{rid:04d}",rid))
+    for item in items:
+        if not isinstance(item,dict) or not str(item.get("item_description") or item.get("item") or "").strip(): continue
+        db.execute("INSERT INTO inventory_purchase_request_items(purchase_request_id,item_description,quantity,unit,notes) VALUES(?,?,?,?,?)",(rid,str(item.get("item_description") or item.get("item")),str(item.get("quantity") or ""),str(item.get("unit") or ""),str(item.get("notes") or "")))
+    log_activity("inventory","purchase_request",rid,"created",new_value=job); db.commit()
+    if not db.execute("SELECT 1 FROM inventory_purchase_requests WHERE id=?",(rid,)).fetchone(): raise ToolWriteRejected("purchase_create_not_verified")
+    return _atlas_catalog_ok(f"✓ Purchase request PR-{rid:04d} created"+(f" for {job}" if job else ""),id=rid,project_id=pid,entity_type="purchase_request")
+_reg_catalog("create_purchase_request","Create a Purchase Request. items_json must be a JSON array of item_description/quantity/unit/notes objects.",{"project_name":{"type":"string"},"project_id":{"type":"integer"},"job_name":{"type":"string"},"location_description":{"type":"string"},"needed_on":{"type":"string"},"source_of_supply":{"type":"string"},"items_json":{"type":"string","required":True}},"action:sitepulse:manage",_cat_create_purchase)
+
+def _cat_update_purchase_status(user,request_id,status):
+    if status not in PURCHASE_STATUS_OPTIONS: raise ToolWriteRejected("invalid_purchase_status")
+    if status=="Scheduled": raise ToolWriteRejected("use_place_purchase_order_for_scheduled")
+    db=get_db(); r=db.execute("SELECT * FROM inventory_purchase_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("purchase_request_not_found")
+    db.execute("UPDATE inventory_purchase_requests SET status=?,updated_at=? WHERE id=?",(status,datetime.utcnow().isoformat(),r["id"])); log_activity("inventory","purchase_request",r["id"],"updated",field="status",old_value=r["status"],new_value=status); db.commit(); return _atlas_catalog_ok(f"✓ Purchase request {r['pr_number'] or '#'+str(r['id'])} marked {status}",id=r["id"],project_id=r["project_id"],entity_type="purchase_request")
+_reg_catalog("update_purchase_request_status","Change a Purchase Request to Submitted or Completed. Scheduled must use place_purchase_order.",{"request_id":{"type":"integer","required":True},"status":{"type":"string","required":True,"enum":PURCHASE_STATUS_OPTIONS}},"action:sitepulse:manage",_cat_update_purchase_status)
+
+def _cat_place_purchase_order(user,request_id,vendor_company,expected_delivery_date=None,vendor_company_phone=None):
+    if not is_procurement(): raise ToolWriteRejected("procurement_only")
+    db=get_db(); r=db.execute("SELECT * FROM inventory_purchase_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("purchase_request_not_found")
+    now=datetime.utcnow().isoformat(); db.execute("""UPDATE inventory_purchase_requests SET vendor_company=?,vendor_company_phone=?,ordered_by=?,ordered_date=?,expected_delivery_date=?,status='Scheduled',updated_at=? WHERE id=?""",(vendor_company,vendor_company_phone or "",user.name or user.email,date.today().isoformat(),expected_delivery_date or "",now,r["id"])); log_activity("inventory","purchase_request",r["id"],"updated",field="status",old_value=r["status"],new_value="Scheduled"); db.commit(); row=db.execute("SELECT status,vendor_company FROM inventory_purchase_requests WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["status"]!="Scheduled" or row["vendor_company"]!=vendor_company: raise ToolWriteRejected("purchase_order_not_verified")
+    return _atlas_catalog_ok(f"✓ Purchase request {r['pr_number'] or '#'+str(r['id'])} placed with {vendor_company} and marked Scheduled",id=r["id"],project_id=r["project_id"],entity_type="purchase_request")
+_reg_catalog("place_purchase_order","Place a Purchase Request order and mark it Scheduled.",{"request_id":{"type":"integer","required":True},"vendor_company":{"type":"string","required":True},"expected_delivery_date":{"type":"string"},"vendor_company_phone":{"type":"string"}},"action:sitepulse:place_order",_cat_place_purchase_order)
+
+def _cat_update_concrete_status(user,request_id,status):
+    if status not in CONCRETE_STATUS_OPTIONS: raise ToolWriteRejected("invalid_concrete_status")
+    db=get_db(); r=db.execute("SELECT * FROM inventory_concrete_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("concrete_request_not_found")
+    db.execute("UPDATE inventory_concrete_requests SET status=?,updated_at=? WHERE id=?",(status,datetime.utcnow().isoformat(),r["id"])); log_activity("inventory","concrete_request",r["id"],"updated",field="status",old_value=r["status"],new_value=status); db.commit(); return _atlas_catalog_ok(f"✓ Concrete request #{r['id']} marked {status}",id=r["id"],project_id=r["project_id"],entity_type="concrete_request")
+_reg_catalog("update_concrete_request_status","Change a Concrete Request lifecycle status.",{"request_id":{"type":"integer","required":True},"status":{"type":"string","required":True,"enum":CONCRETE_STATUS_OPTIONS}},"action:sitepulse:manage",_cat_update_concrete_status)
+
+def _cat_place_concrete_order(user,request_id,concrete_company,concrete_company_phone=None,pump_company=None,pump_company_phone=None,lab_company=None,drilling_company=None,drilling_company_phone=None):
+    if not is_procurement(): raise ToolWriteRejected("procurement_only")
+    db=get_db(); r=db.execute("SELECT * FROM inventory_concrete_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("concrete_request_not_found")
+    now=datetime.utcnow().isoformat(); db.execute("""UPDATE inventory_concrete_requests SET ordered_by=?,ordered_signature=?,ordered_date=?,concrete_company=?,concrete_company_phone=?,pump_company=?,pump_company_phone=?,lab_company=?,drilling_company=?,drilling_company_phone=?,status='Scheduled',updated_at=? WHERE id=?""",(user.name or user.email,user.name or user.email,date.today().isoformat(),concrete_company,concrete_company_phone or "",pump_company or "",pump_company_phone or "",lab_company or "",drilling_company or "",drilling_company_phone or "",now,r["id"])); log_activity("inventory","concrete_request",r["id"],"updated",field="status",old_value=r["status"],new_value="Scheduled"); db.commit(); row=db.execute("SELECT status,concrete_company FROM inventory_concrete_requests WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["status"]!="Scheduled": raise ToolWriteRejected("concrete_order_not_verified")
+    return _atlas_catalog_ok(f"✓ Concrete request #{r['id']} ordered from {concrete_company} and marked Scheduled",id=r["id"],project_id=r["project_id"],entity_type="concrete_request")
+_reg_catalog("place_concrete_order","Record a concrete supplier/order and mark the request Scheduled.",{"request_id":{"type":"integer","required":True},"concrete_company":{"type":"string","required":True},"concrete_company_phone":{"type":"string"},"pump_company":{"type":"string"},"pump_company_phone":{"type":"string"},"lab_company":{"type":"string"},"drilling_company":{"type":"string"},"drilling_company_phone":{"type":"string"}},"action:sitepulse:place_order",_cat_place_concrete_order)
+
+# Requests / Product Intelligence -------------------------------------------
+def _cat_create_employee_request(user,original_request,department=None):
+    db=get_db(); text=str(original_request or "").strip();
+    if not text: raise ToolWriteRejected("request_text_required")
+    dep=str(department or "").strip()
+    if dep:
+        valid={r["name"] for r in db.execute("SELECT name FROM departments").fetchall()}
+        if dep not in valid: raise ToolWriteRejected("invalid_department")
+    else:
+        u=db.execute("SELECT department FROM users WHERE id=?",(user.id,)).fetchone(); dep=(u["department"] if u else None)
+    now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO feature_requests(requester_email,requester_name,department,original_request,status,approval_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(user.email,user.name or user.email,dep,text,"Submitted","Pending",now,now)); rid=cur.lastrowid; db.commit(); _log_request_status(db,rid,"Submitted",user.email); db.commit();
+    return _atlas_catalog_ok(f"✓ Request #{rid} submitted to Requests Center",id=rid,entity_type="request")
+_reg_catalog("create_employee_request","Submit a new employee Request Center request.",{"original_request":{"type":"string","required":True},"department":{"type":"string"}},("module:product_intelligence:view","module:sitepulse:view","module:equipment_center:view"),_cat_create_employee_request)
+
+def _cat_update_request_status(user,request_id,status,release_note=None):
+    if status not in REQUEST_STATUSES: raise ToolWriteRejected("invalid_request_status")
+    db=get_db(); r=db.execute("SELECT * FROM feature_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("request_not_found")
+    _log_request_status(db,r["id"],status,user.email,release_note); db.commit(); row=db.execute("SELECT status FROM feature_requests WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["status"]!=status: raise ToolWriteRejected("request_status_not_verified")
+    return _atlas_catalog_ok(f"✓ Request #{r['id']} moved to {status}",id=r["id"],entity_type="request")
+_reg_catalog("update_employee_request_status","Update an employee request lifecycle status in Product Intelligence.",{"request_id":{"type":"integer","required":True},"status":{"type":"string","required":True,"enum":REQUEST_STATUSES},"release_note":{"type":"string"}},"action:product_intelligence:manage",_cat_update_request_status)
+
+def _cat_approve_request(user,request_id,note=None):
+    db=get_db(); r=db.execute("SELECT * FROM feature_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("request_not_found")
+    if r["approval_status"]!="Pending": raise ToolWriteRejected("request_not_pending_approval")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE feature_requests SET approval_status='Approved',approval_decided_by=?,approval_decided_at=?,approval_reason=?,updated_at=? WHERE id=? AND approval_status='Pending'",(user.email,now,note or None,now,r["id"])); db.execute("INSERT INTO feature_request_approvals(feature_request_id,decision,decided_by,decided_at,reason) VALUES(?,?,?,?,?)",(r["id"],"Approved",user.email,now,note or None)); log_activity("product_intelligence","feature_request",r["id"],"approved",field="approval_status",old_value="Pending",new_value="Approved"); db.commit();
+    row=db.execute("SELECT approval_status FROM feature_requests WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["approval_status"]!="Approved": raise ToolWriteRejected("request_approval_not_verified")
+    return _atlas_catalog_ok(f"✓ Request #{r['id']} approved",id=r["id"],entity_type="request")
+_reg_catalog("approve_employee_request","Approve a pending employee request.",{"request_id":{"type":"integer","required":True},"note":{"type":"string"}},"action:product_intelligence:approve_requests",_cat_approve_request)
+
+def _cat_return_request(user,request_id,reason):
+    reason=str(reason or "").strip();
+    if not reason: raise ToolWriteRejected("return_reason_required")
+    db=get_db(); r=db.execute("SELECT * FROM feature_requests WHERE id=?",(request_id,)).fetchone();
+    if not r: raise ToolWriteRejected("request_not_found")
+    if r["approval_status"]!="Pending": raise ToolWriteRejected("request_not_pending_approval")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE feature_requests SET approval_status='Returned',approval_decided_by=?,approval_decided_at=?,approval_reason=?,updated_at=? WHERE id=? AND approval_status='Pending'",(user.email,now,reason,now,r["id"])); db.execute("INSERT INTO feature_request_approvals(feature_request_id,decision,decided_by,decided_at,reason) VALUES(?,?,?,?,?)",(r["id"],"Returned",user.email,now,reason)); log_activity("product_intelligence","feature_request",r["id"],"returned",field="approval_status",old_value="Pending",new_value="Returned"); db.commit();
+    return _atlas_catalog_ok(f"✓ Request #{r['id']} returned — {reason}",id=r["id"],entity_type="request")
+_reg_catalog("return_employee_request","Return a pending employee request; reason required.",{"request_id":{"type":"integer","required":True},"reason":{"type":"string","required":True}},"action:product_intelligence:approve_requests",_cat_return_request)
+
+# CashFlow -------------------------------------------------------------------
+def _cat_create_invoice(user,invoice_number,amount,project_name=None,project_id=None,client=None,invoice_date=None,due_date=None,retainage=None,retainage_percent=None,status=None,description=None):
+    db=get_db(); pid=None
+    if project_name or project_id: pid=_atlas_resolve_project_write(project_name,project_id)["id"]
+    try: amt=float(amount); ret=float(retainage or 0); rp=float(retainage_percent or 0)
+    except Exception: raise ToolWriteRejected("invalid_invoice_amount")
+    num=str(invoice_number or "").strip();
+    if not num or amt<=0: raise ToolWriteRejected("invoice_number_and_positive_amount_required")
+    if db.execute("SELECT 1 FROM finance_invoices WHERE invoice_number=?",(num,)).fetchone(): raise ToolWriteRejected("invoice_number_exists")
+    now=datetime.utcnow().isoformat(); cur=db.execute("""INSERT INTO finance_invoices(invoice_number,project_id,client,invoice_date,due_date,amount,retainage,retainage_percent,status,description,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(num,pid,client or "",invoice_date or None,due_date or None,amt,ret,rp,status or "To Invoice",description or "",user.email,now,now)); _cashflow_log(db,cur.lastrowid,"Invoice created",f"${amt:,.2f} for {client or 'client'}"); db.commit();
+    return _atlas_catalog_ok(f"✓ CashFlow invoice {num} created for ${amt:,.2f}",id=cur.lastrowid,project_id=pid,entity_type="cashflow_invoice",name=num)
+_reg_catalog("create_cashflow_invoice","Create an owner CashFlow invoice.",{"invoice_number":{"type":"string","required":True},"amount":{"type":"string","required":True},"project_name":{"type":"string"},"project_id":{"type":"integer"},"client":{"type":"string"},"invoice_date":{"type":"string"},"due_date":{"type":"string"},"retainage":{"type":"string"},"retainage_percent":{"type":"string"},"status":{"type":"string"},"description":{"type":"string"}},"action:finance:manage",_cat_create_invoice)
+
+def _cat_add_payment(user,invoice_id,amount,payment_date=None,reference=None,notes=None):
+    db=get_db(); inv=_cashflow_invoice_row(db,invoice_id)
+    if not inv: raise ToolWriteRejected("invoice_not_found")
+    try: amt=float(amount)
+    except: raise ToolWriteRejected("invalid_payment_amount")
+    _,_,_,_,balance=_cashflow_amounts(inv,inv["paid_total"])
+    if amt<=0 or amt>balance+.005: raise ToolWriteRejected("payment_exceeds_balance_or_invalid")
+    now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO finance_payments(invoice_id,amount,payment_date,reference,notes,created_by,created_at) VALUES(?,?,?,?,?,?,?)",(invoice_id,amt,payment_date or date.today().isoformat(),reference or "",notes or "",user.email,now)); _cashflow_log(db,invoice_id,"Payment recorded",f"${amt:,.2f}"); db.commit(); return _atlas_catalog_ok(f"✓ Payment of ${amt:,.2f} recorded on invoice {inv['invoice_number']}",id=cur.lastrowid,entity_type="cashflow_invoice",name=inv["invoice_number"])
+_reg_catalog("add_cashflow_payment","Record a payment against a CashFlow invoice.",{"invoice_id":{"type":"integer","required":True},"amount":{"type":"string","required":True},"payment_date":{"type":"string"},"reference":{"type":"string"},"notes":{"type":"string"}},"action:finance:manage",_cat_add_payment)
+
+def _cat_add_note(user,invoice_id,note):
+    db=get_db(); inv=_atlas_invoice_by_id(invoice_id); text=str(note or "").strip();
+    if not text: raise ToolWriteRejected("note_required")
+    cur=db.execute("INSERT INTO finance_invoice_notes(invoice_id,note,created_by,created_at) VALUES(?,?,?,?)",(invoice_id,text,user.email,datetime.utcnow().isoformat())); _cashflow_log(db,invoice_id,"Note added"); db.commit(); return _atlas_catalog_ok(f"✓ Note added to invoice {inv['invoice_number']}",id=cur.lastrowid,entity_type="cashflow_invoice",name=inv["invoice_number"])
+_reg_catalog("add_cashflow_note","Add a note to a CashFlow invoice.",{"invoice_id":{"type":"integer","required":True},"note":{"type":"string","required":True}},"action:finance:manage",_cat_add_note)
+
+def _cat_mark_sent(user,invoice_id):
+    db=get_db(); inv=_atlas_invoice_by_id(invoice_id); now=datetime.utcnow().isoformat(); db.execute("UPDATE finance_invoices SET status='Invoiced',sent_at=COALESCE(sent_at,?),updated_at=? WHERE id=? AND voided_at IS NULL",(now,now,invoice_id)); _cashflow_log(db,invoice_id,"Marked sent / invoiced"); db.commit(); row=db.execute("SELECT status FROM finance_invoices WHERE id=?",(invoice_id,)).fetchone();
+    if not row or row["status"]!="Invoiced": raise ToolWriteRejected("invoice_mark_sent_not_verified")
+    return _atlas_catalog_ok(f"✓ Invoice {inv['invoice_number']} marked sent / Invoiced",id=invoice_id,entity_type="cashflow_invoice",name=inv["invoice_number"])
+_reg_catalog("mark_cashflow_invoice_sent","Mark a CashFlow invoice sent/invoiced.",{"invoice_id":{"type":"integer","required":True}},"action:finance:manage",_cat_mark_sent)
+
+def _cat_void_invoice(user,invoice_id):
+    db=get_db(); inv=_atlas_invoice_by_id(invoice_id); now=datetime.utcnow().isoformat(); db.execute("UPDATE finance_invoices SET status='Void',voided_at=?,updated_at=? WHERE id=?",(now,now,invoice_id)); _cashflow_log(db,invoice_id,"Invoice voided"); db.commit(); return _atlas_catalog_ok(f"✓ Invoice {inv['invoice_number']} voided",id=invoice_id,entity_type="cashflow_invoice",name=inv["invoice_number"])
+_reg_catalog("void_cashflow_invoice","Void a CashFlow invoice. This is high impact and still requires Atlas confirmation.",{"invoice_id":{"type":"integer","required":True}},"action:finance:manage",_cat_void_invoice)
+
+def _cat_create_sub_invoice(user,invoice_number,project_name=None,project_id=None,vendor=None,amount=None,invoice_date=None,due_date=None,description=None):
+    db=get_db(); p=_atlas_resolve_project_write(project_name,project_id); num=str(invoice_number or "").strip(); ven=str(vendor or "").strip()
+    try: amt=float(amount or 0)
+    except: amt=0
+    if not num or not ven or amt<=0: raise ToolWriteRejected("project_vendor_invoice_number_amount_required")
+    now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO finance_sub_invoices(invoice_number,project_id,vendor,invoice_date,due_date,amount,status,description,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,'Received',?,?,?,?)",(num,p["id"],ven,invoice_date or None,due_date or None,amt,description or "",user.email,now,now)); db.commit(); return _atlas_catalog_ok(f"✓ Sub/vendor invoice {num} created for {ven} — ${amt:,.2f}",id=cur.lastrowid,project_id=p["id"],entity_type="cashflow_sub_invoice",name=num)
+_reg_catalog("create_sub_invoice","Create a subcontractor/vendor invoice in CashFlow.",{"invoice_number":{"type":"string","required":True},"project_name":{"type":"string"},"project_id":{"type":"integer"},"vendor":{"type":"string","required":True},"amount":{"type":"string","required":True},"invoice_date":{"type":"string"},"due_date":{"type":"string"},"description":{"type":"string"}},"action:finance:manage",_cat_create_sub_invoice)
+
+def _cat_update_sub_status(user,sub_id,status):
+    if status not in ("Received","Approved","Disputed","Paid"): raise ToolWriteRejected("invalid_sub_invoice_status")
+    db=get_db(); r=db.execute("SELECT * FROM finance_sub_invoices WHERE id=?",(sub_id,)).fetchone();
+    if not r: raise ToolWriteRejected("sub_invoice_not_found")
+    db.execute("UPDATE finance_sub_invoices SET status=?,updated_at=? WHERE id=?",(status,datetime.utcnow().isoformat(),sub_id)); db.commit(); return _atlas_catalog_ok(f"✓ Sub/vendor invoice {r['invoice_number']} marked {status}",id=sub_id,project_id=r["project_id"],entity_type="cashflow_sub_invoice",name=r["invoice_number"])
+_reg_catalog("update_sub_invoice_status","Update a CashFlow subcontractor/vendor invoice status.",{"sub_id":{"type":"integer","required":True},"status":{"type":"string","required":True,"enum":["Received","Approved","Disputed","Paid"]}},"action:finance:manage",_cat_update_sub_status)
+
+# Field Reports --------------------------------------------------------------
+def _cat_create_field_report(user,project_name=None,project_id=None,report_date=None):
+    db=get_db(); p=_atlas_resolve_project_write(project_name,project_id); existing=db.execute("SELECT id FROM field_reports WHERE project_id=? AND status='Draft' ORDER BY created_at DESC LIMIT 1",(p["id"],)).fetchone()
+    if existing: raise ToolWriteRejected("draft_field_report_already_exists")
+    now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO field_reports(project_id,report_date,status,created_by,last_edited_by,created_at,updated_at) VALUES(?,?,'Draft',?,?,?,?,?)".replace("?,?,?,?,?,?,?","?,?,?,?,?,?"),(p["id"],report_date or date.today().isoformat(),user.email,user.email,now,now)); db.commit(); return _atlas_catalog_ok(f"✓ Draft field report #{cur.lastrowid} created for {p['name']}",id=cur.lastrowid,project_id=p["id"],entity_type="field_report",name=p["name"])
+_reg_catalog("create_field_report","Create a new draft SitePulse field report for a project.",{"project_name":{"type":"string"},"project_id":{"type":"integer"},"report_date":{"type":"string"}},"action:sitepulse:report",_cat_create_field_report)
+
+def _cat_submit_field_report(user,report_id):
+    db=get_db(); r=db.execute("SELECT * FROM field_reports WHERE id=?",(report_id,)).fetchone();
+    if not r: raise ToolWriteRejected("field_report_not_found")
+    if r["status"]!="Draft": raise ToolWriteRejected("field_report_not_draft")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE field_reports SET status='Submitted',submitted_by=?,submitted_at=?,updated_at=? WHERE id=?",(user.email,now,now,r["id"])); log_activity("sitepulse","field_report",r["id"],"submitted",asset_id=r["project_id"],field="status",old_value="Draft",new_value="Submitted"); db.commit(); row=db.execute("SELECT status FROM field_reports WHERE id=?",(r["id"],)).fetchone();
+    if not row or row["status"]!="Submitted": raise ToolWriteRejected("field_report_submit_not_verified")
+    return _atlas_catalog_ok(f"✓ Field report #{r['id']} submitted",id=r["id"],project_id=r["project_id"],entity_type="field_report")
+_reg_catalog("submit_field_report","Submit a draft SitePulse field report.",{"report_id":{"type":"integer","required":True}},"action:sitepulse:report",_cat_submit_field_report)
+
+def _cat_reopen_field_report(user,report_id,reason=None):
+    db=get_db(); r=db.execute("SELECT * FROM field_reports WHERE id=?",(report_id,)).fetchone();
+    if not r: raise ToolWriteRejected("field_report_not_found")
+    if r["status"]!="Submitted": raise ToolWriteRejected("field_report_not_submitted")
+    now=datetime.utcnow().isoformat(); db.execute("UPDATE field_reports SET status='Draft',reopened_by=?,reopened_at=?,updated_at=? WHERE id=?",(user.email,now,now,r["id"])); log_activity("sitepulse","field_report",r["id"],"reopened",asset_id=r["project_id"],field="status",old_value="Submitted",new_value="Draft"); db.commit(); return _atlas_catalog_ok(f"✓ Field report #{r['id']} reopened as Draft",id=r["id"],project_id=r["project_id"],entity_type="field_report")
+_reg_catalog("reopen_field_report","Reopen a submitted SitePulse field report as Draft.",{"report_id":{"type":"integer","required":True},"reason":{"type":"string"}},"action:sitepulse:report",_cat_reopen_field_report)
 
 
 def _log_request_status(db, request_id, status, changed_by, release_note=None):
