@@ -7744,7 +7744,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v10.3-request-namespace-disambiguation"
+ATLAS_BUILD = "TEST-v10.5-deterministic-purchase-status-counts"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8374,6 +8374,79 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
     return {"domain":domain,"scope":scope}
 
 
+
+def _atlas_purchase_status_breakdown_reply(text, draft, user):
+    """Return a deterministic purchase-request status breakdown when asked.
+
+    Count/status questions must never rely on the language model to reconcile a
+    partial/open-only snapshot with a complete record set.  Resolve the project
+    from the current Atlas project context or an explicit current project name,
+    then count the authoritative SitePulse purchase table directly.
+
+    Returning ``None`` means this turn is not a purchase count/status question
+    (or cannot be safely resolved), so normal Atlas routing continues.
+    """
+    q = (text or "").strip()
+    ql = q.lower()
+    if not q or "purchase" not in ql or "request" not in ql:
+        return None
+    if not re.search(r"\b(?:how\s+many|count|total|break\s*(?:it\s*)?down|breakdown|by\s+status|scheduled|completed)\b", ql):
+        return None
+    if not user_has_permission(user, "module:sitepulse:view"):
+        return None
+
+    db = get_db()
+    ctx = dict((draft or {}).get("project_context") or {})
+    project_id = ctx.get("project_id")
+    project_name = ctx.get("name")
+
+    # An explicitly named project in the current message outranks stale chat
+    # context.  Exact case-insensitive name matches are preferred; then a
+    # unique literal project-name occurrence is accepted.
+    projects = db.execute("SELECT id, name FROM tracker_projects ORDER BY LENGTH(name) DESC, id").fetchall()
+    explicit = []
+    for r in projects:
+        name = (r["name"] or "").strip()
+        if name and name.lower() in ql:
+            explicit.append(r)
+    if explicit:
+        # Longest names were selected first above, which avoids binding a short
+        # name contained inside a longer canonical project name.
+        project_id = explicit[0]["id"]
+        project_name = explicit[0]["name"]
+
+    if not project_id:
+        return None
+    if not project_name:
+        r = db.execute("SELECT name FROM tracker_projects WHERE id=?", (project_id,)).fetchone()
+        project_name = r["name"] if r else None
+    if not project_name:
+        return None
+
+    rows = db.execute(
+        """SELECT COALESCE(NULLIF(TRIM(status), ''), 'Unknown') AS status, COUNT(*) AS c
+           FROM inventory_purchase_requests
+           WHERE project_id = ? OR (project_id IS NULL AND job_name = ?)
+           GROUP BY COALESCE(NULLIF(TRIM(status), ''), 'Unknown')
+           ORDER BY status""",
+        (project_id, project_name),
+    ).fetchall()
+    counts = {r["status"]: int(r["c"]) for r in rows}
+    total = sum(counts.values())
+    if total == 0:
+        return f"BuildIQ currently has no purchase requests recorded for {project_name}."
+
+    preferred = ["Submitted", "Scheduled", "Completed"]
+    parts = []
+    for st in preferred:
+        if st in counts:
+            parts.append(f"{counts.pop(st)} {st}")
+    for st in sorted(counts):
+        parts.append(f"{counts[st]} {st}")
+    breakdown = ", ".join(parts)
+    return f"{project_name} has {total} purchase requests in BuildIQ right now: {breakdown}."
+
+
 def _atlas_semantic_equipment_move(text, draft, api_key):
     """Understand a natural equipment move, then ground every action value.
 
@@ -8691,6 +8764,21 @@ def stream_atlas_turn(user_text, draft):
             _system_intelligence = _si_read.data
         else:
             _system_intelligence = {"available": False, "error": _si_read.error}
+    # Deterministic purchase status/count answers.  This intentionally runs
+    # before the LLM so Atlas cannot say "let me pull the complete data" and
+    # then stop, nor reconcile an open-only snapshot into a fabricated count.
+    _purchase_breakdown = _atlas_purchase_status_breakdown_reply(user_text, draft, current_user)
+    if _purchase_breakdown:
+        _history = list(draft.get("history", []))
+        _history.extend([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": _purchase_breakdown},
+        ])
+        draft["history"] = _history[-80:]
+        yield f"data: {json.dumps({'type':'delta','text':_purchase_breakdown})}\n\n"
+        yield f"data: {json.dumps({'type':'done','mode':'chat','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+        return
+
     _turn_entity_matches = []
     if not (draft.get("pending_submit") or {}).get("tool_name"):
         _subject = _atlas_semantic_subject(user_text, api_key)
