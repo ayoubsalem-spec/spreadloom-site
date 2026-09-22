@@ -752,29 +752,58 @@ def _pi_equipment(db, project_id):
 
 
 def _pi_rentals(db, project_id, project_name):
+    """Return the same outside-rental facts the Equipment Center UI can see.
+
+    Important: "active" here means not returned; overdue rentals are still open
+    rentals and must never disappear just because their due date passed.
+    """
     where = "(project_id = ? OR (project_id IS NULL AND job_name = ?))"
     params_base = (project_id, project_name)
     total = db.execute(f"SELECT COUNT(*) c FROM sitepulse_rentals WHERE {where}", params_base).fetchone()["c"]
-    active_total = db.execute(
+    open_total = db.execute(
         f"SELECT COUNT(*) c FROM sitepulse_rentals WHERE {where} AND (returned_date IS NULL OR returned_date = '')", params_base
     ).fetchone()["c"]
     rows = db.execute(
-        f"""SELECT id, equipment_description, due_date, returned_date, project_id FROM sitepulse_rentals WHERE {where}
-           ORDER BY (returned_date IS NULL OR returned_date = '') DESC, due_date DESC LIMIT ?""",
+        f"""SELECT id, vendor, equipment_description, job_name, rate_amount, rate_period,
+                   rented_date, due_date, returned_date, project_id, created_at, updated_at
+            FROM sitepulse_rentals WHERE {where}
+            ORDER BY (returned_date IS NULL OR returned_date = '') DESC, due_date ASC, rented_date DESC LIMIT ?""",
         params_base + (_PI_RENTAL_LIMIT,)
     ).fetchall()
-    return {
-        "active_count": active_total,
-        "total_count": total,
-        "truncated": total > len(rows),
-        "items": [
-            {"record_type": "rental", "record_id": r["id"], "equipment_description": r["equipment_description"],
-             "status": "active" if not r["returned_date"] else "returned",
-             "relevant_date": r["due_date"], "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id)}
-            for r in rows
-        ],
-    }
-
+    today = date.today()
+    items = []
+    for r in rows:
+        returned = (r["returned_date"] or "").strip()
+        due = (r["due_date"] or "").strip()
+        if returned:
+            status = "Returned"
+        elif due and due < today.isoformat():
+            status = "Overdue"
+        else:
+            status = "Active"
+        days_out = None
+        running_cost = None
+        try:
+            start = date.fromisoformat(str(r["rented_date"])[:10])
+            end = date.fromisoformat(returned[:10]) if returned else today
+            days_out = max((end - start).days + 1, 1)
+            rate = float(r["rate_amount"] or 0)
+            daily = {"Weekly": rate / 7, "Monthly": rate / 30}.get(r["rate_period"], rate)
+            running_cost = round(days_out * daily, 2)
+        except (TypeError, ValueError):
+            pass
+        items.append({
+            "record_type": "rental", "record_id": r["id"],
+            "equipment_description": r["equipment_description"], "vendor": r["vendor"],
+            "job_name": r["job_name"], "rate_amount": r["rate_amount"], "rate_period": r["rate_period"],
+            "rented_date": r["rented_date"], "due_date": r["due_date"], "returned_date": r["returned_date"],
+            "status": status, "days_out": days_out, "running_cost": running_cost,
+            "project_id": project_id, "linked_via": _pi_linked_via(r["project_id"], project_id),
+            "created_at": r["created_at"], "updated_at": r["updated_at"],
+        })
+    return {"open_count": open_total, "active_count": sum(1 for x in items if x["status"] == "Active"),
+            "overdue_count": sum(1 for x in items if x["status"] == "Overdue"),
+            "total_count": total, "truncated": total > len(rows), "items": items}
 
 def _tool_get_project_intelligence(user, scope=None, project_id=None):
     """Cross-module, permission-filtered, factual project intelligence
@@ -904,11 +933,11 @@ def _tool_get_project_intelligence(user, scope=None, project_id=None):
 # ---------------------------------------------------------------------------
 
 def _tool_get_buildiq_product_intelligence(user, scope=None):
-    """Read-only management intelligence about BuildIQ ITSELF.
+    """Read-only management intelligence about BuildIQ itself.
 
-    This is deliberately separate from SitePulse operational Concrete/Purchase
-    Requests.  It reads the same feature_requests / Product Intelligence data
-    model used by the employee Requests Center and admin Command Center.
+    The response deliberately includes the supporting audit/history records for
+    requests, not only their current state. Atlas must never interpret "not in
+    this retrieval" as "BuildIQ never stored it".
     """
     from app import get_db
     db = get_db()
@@ -918,7 +947,8 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
 
     rows = db.execute(
         """SELECT f.id, f.requester_name, f.requester_email, f.department,
-                  f.original_request, f.status, f.approval_status, f.created_at, f.updated_at,
+                  f.original_request, f.status, f.approval_status, f.approval_decided_by,
+                  f.approval_decided_at, f.approval_reason, f.created_at, f.updated_at,
                   i.buildiq_module, i.internal_notes, i.solution_built,
                   i.testing_notes, i.user_feedback, i.release_date
            FROM feature_requests f
@@ -933,7 +963,7 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
 
     result = {
         "scope": scope,
-        "source": "feature_requests + feature_request_intelligence (Product Intelligence / employee Requests)",
+        "source": "feature_requests + feature_request_intelligence + status/approval history",
         "kpis": {
             "total_requests": total,
             "pending_approval": sum(1 for r in rows if r["approval_status"] == "Pending"),
@@ -950,26 +980,35 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
     if scope in ("overview", "requests", "attention"):
         request_records = []
         for r in rows[:40]:
+            status_history = [dict(x) for x in db.execute(
+                """SELECT status, release_note, changed_by, changed_at
+                   FROM feature_request_status_history WHERE feature_request_id=? ORDER BY changed_at, id""",
+                (r["id"],)
+            ).fetchall()]
+            approval_history = [dict(x) for x in db.execute(
+                """SELECT decision, reason, decided_by, decided_at
+                   FROM feature_request_approvals WHERE feature_request_id=? ORDER BY decided_at, id""",
+                (r["id"],)
+            ).fetchall()]
             request_records.append({
-                "request_id": r["id"],
-                "request": r["original_request"],
+                "request_id": r["id"], "request": r["original_request"],
                 "requester": r["requester_name"] or r["requester_email"],
-                "department": r["department"],
-                "status": r["status"],
-                "approval_status": r["approval_status"],
-                "buildiq_module": r["buildiq_module"],
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-                "internal_notes": r["internal_notes"],
-                "solution_built": r["solution_built"],
-                "testing_notes": r["testing_notes"],
-                "user_feedback": r["user_feedback"],
+                "requester_email": r["requester_email"], "department": r["department"],
+                "status": r["status"], "approval_status": r["approval_status"],
+                "approval_decided_by": r["approval_decided_by"], "approval_decided_at": r["approval_decided_at"],
+                "approval_reason": r["approval_reason"], "buildiq_module": r["buildiq_module"],
+                "created_at": r["created_at"], "updated_at": r["updated_at"],
+                "internal_notes": r["internal_notes"], "solution_built": r["solution_built"],
+                "testing_notes": r["testing_notes"], "user_feedback": r["user_feedback"],
+                "release_date": r["release_date"], "status_history": status_history,
+                "approval_history": approval_history,
             })
         result["requests"] = request_records
 
     if scope in ("overview", "attention"):
-        # Factual queues only; no fabricated priority score.  Ordering is
-        # management-oriented but every reason comes directly from stored state.
+        # Only formal/explicit workflow state belongs here. Being Building is
+        # not itself an "attention flag". Atlas may make an inference in prose,
+        # but it must label that as inference, not a Product Intelligence flag.
         attention = []
         for r in rows:
             reason = None
@@ -977,16 +1016,13 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
                 reason = "Pending approval"
             elif r["approval_status"] == "Approved" and r["status"] in ("Submitted", "Reviewing"):
                 reason = f"Approved request still {r['status']}"
-            elif r["approval_status"] == "Approved" and r["status"] in ("Building", "Testing", "On Hold"):
-                reason = f"Development lifecycle: {r['status']}"
             if reason:
                 attention.append({
                     "request_id": r["id"], "request": r["original_request"],
                     "requester": r["requester_name"] or r["requester_email"],
                     "department": r["department"], "status": r["status"],
-                    "approval_status": r["approval_status"],
-                    "buildiq_module": r["buildiq_module"], "reason": reason,
-                    "updated_at": r["updated_at"],
+                    "approval_status": r["approval_status"], "buildiq_module": r["buildiq_module"],
+                    "reason": reason, "updated_at": r["updated_at"], "formal": True,
                 })
         result["attention"] = attention[:30]
 
@@ -1003,17 +1039,65 @@ def _tool_get_buildiq_product_intelligence(user, scope=None):
 # BuildIQ system-wide intelligence (V9.3)
 # ---------------------------------------------------------------------------
 def _tool_get_buildiq_system_intelligence(user, scope=None):
-    """Permission-aware read-only intelligence for BuildIQ surfaces that are
-    not project-operational records. Each scope checks the SAME permission
-    boundary as the corresponding UI before its protected SELECTs run.
+    """Permission-aware read-only intelligence for BuildIQ system surfaces.
+
+    This is the authoritative source for current module existence, session/user
+    identity, permissions, request histories, and non-project system data. It
+    reports what the current application exposes rather than inferring module
+    existence from an older roadmap label.
     """
-    from app import get_db, user_has_permission
+    from app import get_db, user_has_permission, current_user, current_app
     db = get_db()
     scope = (scope or "overview").strip().lower()
-    allowed = {"overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity"}
+    allowed = {"overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity",
+               "modules", "cashflow", "redline", "rentals"}
     if scope not in allowed:
         return {"available": False, "reason": "invalid_scope", "scope": scope}
-    out = {"available": True, "scope": scope, "sources": []}
+    out = {"available": True, "scope": scope, "sources": [],
+           "authenticated_user": {"id": getattr(current_user, "id", None), "name": getattr(current_user, "name", None),
+                                  "email": getattr(current_user, "email", None)}}
+
+    # Current deployed application registry, derived from the server's actual
+    # Flask route map. This prevents stale roadmap names (e.g. Finance) from
+    # overriding a module that is actually deployed (e.g. CashFlow).
+    if scope in ("overview", "modules", "cashflow", "redline"):
+        rules = {str(r.rule) for r in current_app.url_map.iter_rules()}
+        module_defs = [
+            ("Project Hunt", "/tracker/", "module:project_hunt:view"),
+            ("Project Deployment", "/deployment", "module:project_deployment:view"),
+            ("SitePulse", "/inventory", "module:sitepulse:view"),
+            ("Equipment Center", "/sitepulse/", "module:equipment_center:view"),
+            ("Atlas", "/assistant", "module:atlas:view"),
+            ("Requests Center", "/requests", None),
+            ("Product Intelligence", "/admin/product-intelligence", "module:product_intelligence:view"),
+            ("CashFlow", "/cashflow", "module:finance:view"),
+            ("Redline / Engineering", "/engineering", "module:engineering:view"),
+        ]
+        modules=[]
+        for name, prefix, permission in module_defs:
+            exists = any(rule == prefix or rule.startswith(prefix.rstrip('/') + '/') for rule in rules)
+            modules.append({"name": name, "route_prefix": prefix, "deployed": exists,
+                            "authorized_for_current_user": bool(exists and (permission is None or user_has_permission(user, permission)))})
+        out["modules"] = modules
+        out["sources"].append("Flask current_app.url_map + current permission resolver")
+        if scope == "cashflow":
+            cf = dict(next((m for m in modules if m["name"] == "CashFlow"), {"deployed": False}))
+            cf.update({
+                "canonical_name": "CashFlow",
+                "purpose": "project payment and owner-invoice / collections tracking",
+                "capabilities_present_when_deployed": ["project/job workspaces", "owner invoices", "payments", "notes/documents", "invoice review", "CSV export"],
+            })
+            out["cashflow"] = cf
+        if scope == "redline":
+            rd = dict(next((m for m in modules if m["name"] == "Redline / Engineering"), {"deployed": False}))
+            rd.update({
+                "canonical_name": "Redline",
+                "lifecycle": "planned" if not rd.get("deployed") else "deployed",
+                "purpose": "engineering plan review",
+                "review_categories": ["Critical", "Warnings", "Coordination", "Missing Info", "Permit Risks"],
+                "planned_review_controls": ["Confirm", "Dismiss", "Needs Review"],
+            })
+            out["redline"] = rd
 
     if scope in ("overview", "users_permissions"):
         if user_has_permission(user, "module:team_admin:view"):
@@ -1024,8 +1108,9 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
                     "SELECT r.name FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=? ORDER BY r.name", (u["id"],)
                 ).fetchall()]
                 perms = []
+                subject = type("AtlasSubject", (), {"id": u["id"], "is_authenticated": True})()
                 for pr in db.execute("SELECT key, category, label FROM permissions ORDER BY category, key").fetchall():
-                    if user_has_permission(type("AtlasSubject", (), {"id": u["id"], "is_authenticated": True})(), pr["key"]):
+                    if user_has_permission(subject, pr["key"]):
                         perms.append({"key": pr["key"], "category": pr["category"], "label": pr["label"]})
                 overrides = [dict(x) for x in db.execute(
                     """SELECT p.key, p.label, o.state FROM user_permission_overrides o
@@ -1036,7 +1121,7 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
             out["users_permissions"] = people
             out["sources"].append("users + roles + role_permissions + user_permission_overrides")
         elif scope == "users_permissions":
-            return {"available": False, "scope": scope, "reason": "not_permitted"}
+            return {"available": False, "scope": scope, "reason": "not_permitted", "authenticated_user": out["authenticated_user"]}
 
     if scope in ("overview", "deployment"):
         if user_has_permission(user, "module:project_deployment:view"):
@@ -1053,43 +1138,70 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
                 ).fetchall()}
                 deployments.append({**dict(d), "checklist_counts": counts})
             out["deployments"] = deployments
-            # Dashboard parity: Project Deployment also surfaces Awarded projects
-            # that have not had a deployment row started yet. They are real
-            # actionable deployment state and must not disappear from Atlas merely
-            # because project_deployments is empty.
             awarded_not_started = db.execute(
                 """SELECT tp.id project_id, tp.name project_name, tp.client, tp.address, tp.status
-                   FROM tracker_projects tp
-                   LEFT JOIN project_deployments pd ON pd.project_id=tp.id
-                   WHERE tp.status='Awarded' AND pd.id IS NULL
-                   ORDER BY tp.name"""
+                   FROM tracker_projects tp LEFT JOIN project_deployments pd ON pd.project_id=tp.id
+                   WHERE tp.status='Awarded' AND pd.id IS NULL ORDER BY tp.name"""
             ).fetchall()
             out["awarded_not_started"] = [dict(r) for r in awarded_not_started]
             out["sources"].append("project_deployments + project_deployment_items + awarded projects not yet started")
         elif scope == "deployment":
-            return {"available": False, "scope": scope, "reason": "not_permitted"}
+            return {"available": False, "scope": scope, "reason": "not_permitted", "authenticated_user": out["authenticated_user"]}
 
     if scope in ("overview", "sitepulse"):
         if user_has_permission(user, "module:sitepulse:view"):
-            # Same eligibility rule as the SitePulse Field Reports project picker:
-            # Awarded OR has a deployment row. This keeps Atlas aligned with the
-            # actual SitePulse UI rather than inferring projects from open requests.
             rows = db.execute(
                 """SELECT tp.id project_id, tp.name project_name, tp.client, tp.address, tp.status,
                           pd.id deployment_id, pd.status deployment_status,
                           (SELECT MAX(fr.report_date) FROM field_reports fr WHERE fr.project_id=tp.id) last_report_date,
                           (SELECT COUNT(*) FROM field_reports fr WHERE fr.project_id=tp.id) field_report_count,
                           (SELECT COUNT(*) FROM inventory_concrete_requests c WHERE c.project_id=tp.id AND c.status!='Completed') open_concrete_count,
-                          (SELECT COUNT(*) FROM inventory_purchase_requests pr WHERE pr.project_id=tp.id AND pr.status!='Completed') open_purchase_count
-                   FROM tracker_projects tp
-                   LEFT JOIN project_deployments pd ON pd.project_id=tp.id
-                   WHERE tp.status='Awarded' OR pd.id IS NOT NULL
-                   ORDER BY tp.name"""
+                          (SELECT COUNT(*) FROM inventory_purchase_requests pr WHERE pr.project_id=tp.id AND pr.status!='Completed') open_purchase_count,
+                          (SELECT COUNT(*) FROM inventory_purchase_requests pr WHERE pr.project_id=tp.id) total_purchase_count,
+                          (SELECT COUNT(*) FROM inventory_purchase_requests pr WHERE pr.project_id=tp.id AND pr.status='Completed') completed_purchase_count
+                   FROM tracker_projects tp LEFT JOIN project_deployments pd ON pd.project_id=tp.id
+                   WHERE tp.status='Awarded' OR pd.id IS NOT NULL ORDER BY tp.name"""
             ).fetchall()
             out["sitepulse_projects"] = [dict(r) for r in rows]
-            out["sources"].append("SitePulse eligibility + deployment + field reports + concrete/purchase current counts")
+            # Deterministic purchase status counts/rows are included so the model
+            # never has to reconcile a header count against a separately truncated list.
+            pr_rows = db.execute(
+                """SELECT id, pr_number, job_name, project_id, needed_on, status, vendor_company
+                   FROM inventory_purchase_requests ORDER BY request_date DESC, id DESC"""
+            ).fetchall()
+            out["purchase_requests"] = [dict(r) for r in pr_rows[:100]]
+            status_counts={}
+            by_project={}
+            for r in pr_rows:
+                st=r["status"] or "Unknown"
+                status_counts[st] = status_counts.get(st, 0) + 1
+                key=str(r["project_id"] or "unlinked")
+                by_project.setdefault(key, {"total":0,"by_status":{}})
+                by_project[key]["total"] += 1
+                by_project[key]["by_status"][st] = by_project[key]["by_status"].get(st,0) + 1
+            out["purchase_status_counts"] = status_counts
+            out["purchase_status_counts_by_project"] = by_project
+            out["sources"].append("SitePulse eligibility + field reports + exact purchase/concrete status counts")
         elif scope == "sitepulse":
-            return {"available": False, "scope": scope, "reason": "not_permitted"}
+            return {"available": False, "scope": scope, "reason": "not_permitted", "authenticated_user": out["authenticated_user"]}
+
+    if scope in ("overview", "rentals"):
+        if user_has_permission(user, "module:equipment_center:view"):
+            today = date.today().isoformat()
+            rows = db.execute(
+                """SELECT id, vendor, equipment_description, job_name, project_id, rate_amount, rate_period,
+                          rented_date, due_date, returned_date, created_at, updated_at
+                   FROM sitepulse_rentals ORDER BY due_date ASC, rented_date DESC"""
+            ).fetchall()
+            rentals=[]
+            for r in rows:
+                d=dict(r)
+                d["status"] = "Returned" if d["returned_date"] else ("Overdue" if d["due_date"] and d["due_date"] < today else "Active")
+                rentals.append(d)
+            out["rentals"] = rentals
+            out["sources"].append("sitepulse_rentals complete current records")
+        elif scope == "rentals":
+            return {"available": False, "scope": scope, "reason": "not_permitted", "authenticated_user": out["authenticated_user"]}
 
     if scope in ("overview", "field_reports"):
         if user_has_permission(user, "module:sitepulse:view"):
@@ -1103,20 +1215,21 @@ def _tool_get_buildiq_system_intelligence(user, scope=None):
             out["field_reports"] = [dict(r) for r in rows]
             out["sources"].append("field_reports")
         elif scope == "field_reports":
-            return {"available": False, "scope": scope, "reason": "not_permitted"}
+            return {"available": False, "scope": scope, "reason": "not_permitted", "authenticated_user": out["authenticated_user"]}
 
     if scope in ("overview", "activity"):
         if user_has_permission(user, "action:activity_log:view"):
             rows = db.execute(
                 """SELECT id, section, entity_type, entity_id, action, field, old_value, new_value,
-                          user_email, created_at FROM activity_log ORDER BY id DESC LIMIT 60"""
+                          user_email, created_at FROM activity_log ORDER BY id DESC LIMIT 100"""
             ).fetchall()
             out["activity"] = [dict(r) for r in rows]
             out["sources"].append("activity_log")
         elif scope == "activity":
-            return {"available": False, "scope": scope, "reason": "not_permitted"}
+            return {"available": False, "scope": scope, "reason": "not_permitted", "authenticated_user": out["authenticated_user"]}
 
     return out
+
 
 # ---------------------------------------------------------------------------
 # Registration -- called once from app.py after register_tool/get_db/
@@ -1205,11 +1318,11 @@ def register_atlas_tools(register_tool, sp_status_options, purchase_status_optio
     register_tool(
         name="get_buildiq_system_intelligence",
         description=(
-            "Read live, permission-aware BuildIQ system intelligence outside a single project: users/effective permissions, "
-            "Project Deployment state, SitePulse operational project state, SitePulse field reports, and audit/activity history. Use the narrowest scope."
+            "Read live, permission-aware BuildIQ system intelligence outside a single project: deployed module registry, "
+            "authenticated user/effective permissions, Project Deployment, SitePulse, rentals, CashFlow/Redline presence, field reports, and audit/activity history. Use the narrowest scope."
         ),
         parameters={"scope": {"type": "string", "required": False,
-                               "enum": ["overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity"]}},
+                               "enum": ["overview", "users_permissions", "deployment", "sitepulse", "field_reports", "activity", "modules", "cashflow", "redline", "rentals"]}},
         permission="module:atlas:view",
         atlas_permission="atlas:view_business_data",
         kind="read",

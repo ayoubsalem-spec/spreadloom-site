@@ -452,6 +452,14 @@
     // voice/VAD internals are exported.
     window.AtlasChat = { addMessage: addMessage, setStatus: setStatus, clearTranscript: clearTranscript };
 
+    // Restore the active persisted conversation after normal module navigation
+    // or a page refresh. The server ownership-checks the conversation before
+    // these rows are ever supplied to the template.
+    var initialAtlasMessages = {{ (initial_atlas_messages or [])|tojson }};
+    if (initialAtlasMessages && initialAtlasMessages.length) {
+        initialAtlasMessages.forEach(function (m) { addMessage(m.role, m.content); });
+    }
+
     function addTyping() {
         emptyEl.style.display = 'none';
         var div = document.createElement('div');

@@ -6839,7 +6839,7 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
-def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None, semantic_scope=None, product_intelligence=None, system_intelligence=None):
+def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None, semantic_scope=None, product_intelligence=None, system_intelligence=None, authenticated_user=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
     messages array now, not flattened into this text.
@@ -6871,6 +6871,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
     semantic_scope_line = "SEMANTIC BUILDIQ SCOPE: " + (json.dumps(semantic_scope, ensure_ascii=False) if semantic_scope else "general") + "\n\n"
     product_intelligence_line = "LIVE BUILDIQ PRODUCT INTELLIGENCE: " + (json.dumps(product_intelligence, ensure_ascii=False) if product_intelligence else "not requested or not authorized") + "\n\n"
     system_intelligence_line = "LIVE BUILDIQ SYSTEM INTELLIGENCE: " + (json.dumps(system_intelligence, ensure_ascii=False) if system_intelligence else "not requested or not authorized") + "\n\n"
+    authenticated_user_line = "AUTHENTICATED BUILDIQ USER (server-owned session identity): " + (json.dumps(authenticated_user, ensure_ascii=False) if authenticated_user else "unavailable") + "\n\n"
     return (
         "You are Atlas, the assistant inside BuildIQ. If asked your name, "
         "say Atlas. People talk to you like they'd talk to Claude or "
@@ -6900,6 +6901,15 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "normally -- don't force them back to the form.\n"
         "- If they say cancel/never mind/start over, clear the fields and "
         "set mode back to chat.\n\n"
+        "GROUNDING / SOURCE-TRUTH rules:\n"
+        "- Server-owned AUTHENTICATED BUILDIQ USER is authoritative for who is logged in. If it is present, never say you do not know the logged-in identity.\n"
+        "- Current authoritative tool/system/product results outrank prior assistant text, stale conversation summaries, and generic snapshots. Never explain a discrepancy by inventing a change that is not present in authoritative data.\n"
+        "- If two provided sources disagree, say they disagree and identify which authoritative source/result you are using. Do not fabricate a refresh, closure, status change, or reason.\n"
+        "- Never turn 'this retrieval did not return X' into 'BuildIQ does not store/have X'. Unless an authoritative source explicitly proves absence, say 'I cannot retrieve X from the current source/tool.'\n"
+        "- Distinguish formal BuildIQ flags/states from your own analysis. If you infer that something deserves attention, label it as your inference; do not say BuildIQ formally flagged it unless the authoritative data says so.\n"
+        "- Counts must come from deterministic count/status fields when provided; do not count a truncated display list yourself or contradict an authoritative count.\n"
+        "- Do not call something the single biggest/most important problem unless the user supplied criteria or the system has an explicit priority. Use factual wording such as 'a notable issue' for your own analysis.\n"
+        "- A roadmap entry is not proof that a deployed module does or does not exist. For module existence, use the live module/system registry when supplied.\n\n"
         "BUILDIQ ACTION rules:\n"
         "- You can safely operate BuildIQ actions that the server exposes. Never discuss rollout status, development phases, or call Atlas an early build; simply describe what you can currently do.\n"
         "- If the person asks to move or schedule a move for equipment, collect only what is missing: equipment name and destination are required; date/time/status/hours/reason are optional.\n"
@@ -7009,7 +7019,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "BuildIQ doesn't actually store.\n"
         "- If no project is established yet, this tool has nothing to "
         "act on -- establish one with set_project_context first.\n\n"
-        + context_line + active_context_line + entity_matches_line + entity_memory_line + semantic_scope_line + product_intelligence_line + system_intelligence_line +
+        + context_line + active_context_line + entity_matches_line + entity_memory_line + semantic_scope_line + product_intelligence_line + system_intelligence_line + authenticated_user_line +
         "CURRENT BUSINESS SNAPSHOT:\n" + snapshot + "\n\n"
         "CURRENT DRAFT (fields collected so far, empty if none in progress):\n"
         + json.dumps(fields) + "\n\n"
@@ -7731,7 +7741,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v9.3.1-system-brain-retrieval-fix+cashflow-v7-project-payment-schedule"
+ATLAS_BUILD = "TEST-v10.0-atlas-consolidated-regression-fix"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -7964,9 +7974,9 @@ def _atlas_classify_pending_reply(text, api_key):
 
     # Fast path for unambiguous standalone replies.  Keep this intentionally
     # small; conversational variety belongs to the semantic classifier below.
-    if normalized in {"yes", "confirm", "confirmed", "proceed", "do it", "go ahead"}:
+    if normalized in {"yes", "yep", "yup", "yeah", "yea", "sure", "absolutely", "confirm", "confirmed", "proceed", "do it", "go ahead", "go for it", "make it happen", "sounds good", "ten four", "10 4", "roger", "roger that", "aye", "aye aye", "please do"}:
         return "CONFIRM"
-    if normalized in {"no", "cancel", "cancel it", "never mind", "nevermind", "stop"}:
+    if normalized in {"no", "cancel", "cancel it", "cancel that", "never mind", "nevermind", "stop", "forget it", "do not", "don t", "dont"}:
         return "CANCEL"
 
     # A reply that appears to introduce/change action details must never be
@@ -8295,12 +8305,12 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
     recent = (draft or {}).get("history", [])[-6:]
     system = (
         "Classify the user's intended BuildIQ information domain. Return JSON only with domain and scope. "
-        "Domains: product, users_permissions, deployment, sitepulse, field_reports, activity, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
+        "Domains: product, users_permissions, deployment, sitepulse, field_reports, activity, modules, cashflow, redline, rentals, project_operations, project_hunt, equipment, concrete, purchase, general, ambiguous_requests. "
         "PRODUCT means BuildIQ ITSELF: employee-submitted feature/product requests, bugs/fixes employees reported, "
         "Product Intelligence, Requests Center, what needs to be fixed/built in BuildIQ, development lifecycle, roadmap. "
         "USERS_PERMISSIONS means people, users, roles, access, permissions, who can see/do/approve/manage something. "
         "DEPLOYMENT means Project Deployment, mobilization/readiness/checklist/preconstruction state. SITEPULSE means questions about SitePulse itself, its active/eligible operational projects, or what is happening across SitePulse. FIELD_REPORTS means SitePulse field/daily reports, report issues, report history. "
-        "ACTIVITY means audit/history/change questions such as what changed, who changed it, or what happened recently. "
+        "ACTIVITY means audit/history/change questions such as what changed, who changed it, or what happened recently. MODULES means what modules/features currently exist in the deployed BuildIQ application. CASHFLOW means the deployed CashFlow module. REDLINE means Redline/Engineering. RENTALS means outside rental records/lifecycle. "
         "PROJECT_OPERATIONS means a job/site/project operational picture. CONCRETE and PURCHASE are SitePulse operational "
         "request workflows. The bare word requests is ambiguous unless wording or conversation makes employee/product vs "
         "operational meaning clear. Phrases about fixing/improving BuildIQ itself strongly indicate product. "
@@ -8326,7 +8336,7 @@ def _atlas_semantic_buildiq_scope(text, draft, api_key):
         return {"domain":"general", "scope":"overview"}
     domain=str(obj.get("domain") or "general").strip().lower()
     scope=str(obj.get("scope") or "overview").strip().lower()
-    allowed={"product","users_permissions","deployment","sitepulse","field_reports","activity","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
+    allowed={"product","users_permissions","deployment","sitepulse","field_reports","activity","modules","cashflow","redline","rentals","project_operations","project_hunt","equipment","concrete","purchase","general","ambiguous_requests"}
     if domain not in allowed: domain="general"
     if scope not in {"overview","requests","attention","roadmap"}: scope="overview"
     return {"domain":domain,"scope":scope}
@@ -8417,6 +8427,57 @@ def _atlas_resolve_move_intent(text, draft, api_key):
             return asset, grounded
     return _atlas_semantic_equipment_move(text, draft, api_key)
 
+def _atlas_parse_move_schedule(text, today_value=None):
+    """Resolve an optional move date/time from natural user text.
+
+    This is deliberately deterministic for the common scheduling language Atlas
+    exposes in equipment moves. It never treats unparsed words as action data.
+    """
+    raw=(text or "").strip()
+    low=raw.lower()
+    base=today_value or date.today()
+    schedule_date=None
+    schedule_time=None
+    if re.search(r"\bnow\b", low):
+        return None, None
+    if re.search(r"\btomorrow\b", low):
+        schedule_date=(base + timedelta(days=1)).isoformat()
+    elif re.search(r"\btoday\b", low):
+        schedule_date=base.isoformat()
+    else:
+        # Explicit ISO / US date.
+        m=re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", raw)
+        if m:
+            try: schedule_date=date(int(m.group(1)),int(m.group(2)),int(m.group(3))).isoformat()
+            except ValueError: pass
+        if not schedule_date:
+            m=re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(20\d{2}|\d{2}))?\b", raw)
+            if m:
+                try:
+                    y=int(m.group(3)) if m.group(3) else base.year
+                    if y < 100: y += 2000
+                    schedule_date=date(y,int(m.group(1)),int(m.group(2))).isoformat()
+                except ValueError: pass
+        if not schedule_date:
+            weekdays={"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
+            for name, wd in weekdays.items():
+                if re.search(rf"\b{name}\b", low):
+                    delta=(wd-base.weekday()) % 7
+                    if delta == 0 and re.search(r"\bnext\s+"+name+r"\b", low): delta=7
+                    schedule_date=(base+timedelta(days=delta)).isoformat()
+                    break
+    tm=re.search(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", low)
+    if tm:
+        h=int(tm.group(1)); minute=int(tm.group(2) or 0); ap=tm.group(3)
+        if 1 <= h <= 12 and 0 <= minute <= 59:
+            h=(h % 12) + (12 if ap=='pm' else 0)
+            schedule_time=f"{h:02d}:{minute:02d}"
+    else:
+        tm=re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", low)
+        if tm: schedule_time=f"{int(tm.group(1)):02d}:{int(tm.group(2)):02d}"
+    return schedule_date, schedule_time
+
+
 def _atlas_store_move_proposal(draft, asset, destination, user_text):
     """Create a validated pending move and its authoritative proposal text."""
     destination = _atlas_ground_location(destination, strict=True)
@@ -8427,7 +8488,10 @@ def _atlas_store_move_proposal(draft, asset, destination, user_text):
     if not rows:
         rows=db.execute("SELECT id, name FROM tracker_projects WHERE lower(name) LIKE lower(?) ORDER BY name LIMIT 7", (f"%{destination}%",)).fetchall()
     canonical=rows[0]["name"] if len(rows)==1 else destination
+    schedule_date, schedule_time = _atlas_parse_move_schedule(user_text)
     params={"equipment_name": asset["name"], "to_location": canonical}
+    if schedule_date: params["schedule_date"] = schedule_date
+    if schedule_time: params["schedule_time"] = schedule_time
     tool=ATLAS_TOOLS.get("move_equipment")
     clean, err=_validate_tool_params(tool, params) if tool else (None, "unsupported action")
     if not tool or tool.kind != "write" or err:
@@ -8441,12 +8505,15 @@ def _atlas_store_move_proposal(draft, asset, destination, user_text):
         "action_context":{"entity_type":"equipment","name":asset["name"],"previous_location":asset["location"] or "Unassigned","proposed_location":canonical,
                           "previous_location_entity":from_entity,"proposed_location_entity":to_entity},
     }
+    when_text = "Now"
+    if schedule_date:
+        when_text = schedule_date + ((" at " + schedule_time) if schedule_time else "")
     return (
         "**Move Equipment**\n\n"
         f"- **Equipment:** {asset['name']}\n"
         f"- **From:** {asset['location'] or 'Unassigned'}\n"
         f"- **To:** {canonical}\n"
-        "- **When:** Now\n\n"
+        f"- **When:** {when_text}\n\n"
         "**Confirm this action** and I’ll do it."
     )
 
@@ -8527,32 +8594,21 @@ def stream_atlas_turn(user_text, draft):
     flight), just not necessarily blocking the read loop while waiting.
 
     WRITE-CONFIRMATION SECURITY -- IMPORTANT, READ BEFORE CHANGING:
-    BuildIQ's own code requires the SAME complete field set to be
-    proposed via action="submit" on TWO CONSECUTIVE model turns (via a
-    fields-hash held in the per-session draft) before a write is even
-    eligible to run. This hardens the boundary against a single stray
-    model output triggering a write -- but the model is still the one
-    interpreting whether the user's utterance means "yes, submit," and
-    this mechanism does not give BuildIQ independent, out-of-band proof
-    that the user explicitly confirmed. It only proves the model
-    proposed the same complete action twice in a row.
+    Every complete write proposal is validated and stored server-side as
+    pending_submit. The NEXT user turn is independently classified by BuildIQ
+    as CONFIRM/CANCEL/OTHER. Only CONFIRM mints a one-time pending_write token.
+    The model never gets to declare or execute success from a conversational
+    utterance alone. The real database write is performed exclusively by the
+    separate /assistant/confirm_write request after the SSE turn has completed,
+    and that endpoint re-checks permission, executes through the controlled tool
+    gateway, and verifies the authoritative post-write record before returning
+    success. CANCEL clears the proposal. OTHER never executes it and normal
+    unrelated turns replace/clear stale draft state rather than inheriting it.
 
-    Separately, and just as important: this generator's Python code
-    executes synchronously start-to-finish regardless of whether the
-    client is still connected. Flask/WSGI only notice a client
-    disconnect at the next attempted write to the socket -- a frontend
-    AbortController.abort() does NOT stop this function from continuing
-    to run past that point, including past an execute_tool() call, if
-    one were made inline here. That is exactly why the actual write is
-    NOT performed in this function even after the two-turn confirmation
-    passes: see the `pending_write` handling below, which defers the
-    real execute_tool() call to a separate /assistant/confirm_write
-    request that the client only ever sends after it has verifiably
-    finished receiving this entire SSE response. If the client aborts,
-    the tab closes, or a barge-in interrupts before that happens, that
-    follow-up request is simply never sent and the write never occurs
-    -- deterministic by construction, not by hoping a disconnect gets
-    detected mid-generator.
+    This generator still runs synchronously start-to-finish regardless of
+    whether the browser stays connected. That is why writes are never performed
+    inline here: if the stream is aborted, the follow-up confirm_write request
+    never arrives and no write occurs.
     """
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -8570,7 +8626,7 @@ def stream_atlas_turn(user_text, draft):
         if _spoken:
             _history = list(draft.get("history", []))
             _history.extend([{"role":"user","content":user_text},{"role":"assistant","content":_spoken}])
-            draft["history"] = _history[-40:]
+            draft["history"] = _history[-80:]
             yield f"data: {json.dumps({'type':'delta','text':_spoken})}\n\n"
             yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
             return
@@ -8591,6 +8647,7 @@ def stream_atlas_turn(user_text, draft):
     _system_scope_map = {
         "users_permissions": "users_permissions", "deployment": "deployment",
         "sitepulse": "sitepulse", "field_reports": "field_reports", "activity": "activity",
+        "modules": "modules", "cashflow": "cashflow", "redline": "redline", "rentals": "rentals",
     }
     if _semantic_scope.get("domain") in _system_scope_map:
         _si_read = execute_tool(
@@ -8608,7 +8665,7 @@ def stream_atlas_turn(user_text, draft):
         if _subject:
             _turn_entity_matches = _atlas_cross_entity_matches(_subject, draft, current_user)
             _atlas_trace("ENTITY_LOOKUP", subject=_subject[:80], matches=len(_turn_entity_matches))
-    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"), _semantic_scope, _product_intelligence, _system_intelligence)
+    system = _build_atlas_system_prompt(snapshot, draft.get("fields", {}), draft.get("project_context"), draft.get("active_context"), _turn_entity_matches, draft.get("entity_memory"), _semantic_scope, _product_intelligence, _system_intelligence, {"id": current_user.id, "name": current_user.name, "email": current_user.email})
 
     # Deterministic second-turn confirmation for non-form BuildIQ actions.
     # The prior turn stores the exact validated tool + params server-side.
@@ -8616,7 +8673,10 @@ def stream_atlas_turn(user_text, draft):
     # the model to reconstruct parameters from conversation text.
     _pending_action = draft.get("pending_submit") or {}
     if _pending_action.get("tool_name") and _pending_action.get("params"):
-        _pending_reply = _atlas_classify_pending_reply(user_text, api_key)
+        if not _pending_action.get("issued_at") or (time.time() - _pending_action.get("issued_at", 0)) > PENDING_WRITE_TTL_SECONDS:
+            draft["pending_submit"] = None
+            _pending_action = {}
+        _pending_reply = _atlas_classify_pending_reply(user_text, api_key) if _pending_action else "OTHER"
         _atlas_trace("PENDING_REPLY_CLASSIFIED", verdict=_pending_reply)
         if _pending_reply == "CANCEL":
             draft["pending_submit"] = None
@@ -8626,7 +8686,7 @@ def stream_atlas_turn(user_text, draft):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": "Canceled. Nothing was changed."},
             ])
-            draft["history"] = prior_history[-40:]
+            draft["history"] = prior_history[-80:]
             yield f"data: {json.dumps({'type': 'delta', 'text': 'Canceled. Nothing was changed.'})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': 'chat', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
             return
@@ -8639,13 +8699,14 @@ def stream_atlas_turn(user_text, draft):
                 "issued_at": time.time(),
                 "action_context": dict(_pending_action.get("action_context") or {}),
             }
+            draft["pending_submit"] = None
             _ack = _atlas_natural_confirmation_ack(user_text, api_key)
             prior_history = list(draft.get("history", []))
             prior_history.extend([
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": _ack},
             ])
-            draft["history"] = prior_history[-40:]
+            draft["history"] = prior_history[-80:]
             yield f"data: {json.dumps({'type': 'delta', 'text': _ack})}\n\n"
             yield f"data: {json.dumps({'type': 'done', 'mode': 'buildiq_action', 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': pending_write_token})}\n\n"
             return
@@ -8658,12 +8719,12 @@ def stream_atlas_turn(user_text, draft):
             if _spoken:
                 _history=list(draft.get("history", []))
                 _history.extend([{"role":"user","content":user_text},{"role":"assistant","content":_spoken}])
-                draft["history"]=_history[-40:]
+                draft["history"]=_history[-80:]
                 yield f"data: {json.dumps({'type':'delta','text':_spoken})}\n\n"
                 yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
                 return
 
-    history = draft.get("history", [])[-40:]  # recent real turns
+    history = draft.get("history", [])[-60:]  # recent real turns
     messages = [{"role": h["role"], "content": h["content"]} for h in history]
     messages.append({"role": "user", "content": user_text})
 
@@ -9526,7 +9587,7 @@ Then stop."""
         {"role": "user", "content": user_text},
         {"role": "assistant", "content": spoken},
     ]
-    new_draft = {"mode": mode, "fields": fields, "history": new_history[-40:], "pending_submit": None, "project_context": project_context,
+    new_draft = {"mode": mode, "fields": fields, "history": new_history[-80:], "pending_submit": None, "project_context": project_context,
                  "active_context": dict(draft.get("active_context") or {}), "entity_memory": list(draft.get("entity_memory") or [])}
 
     submitted_id = None
@@ -9540,26 +9601,18 @@ Then stop."""
             spoken += extra
         else:
             proposal_hash = hashlib.sha256(json.dumps({"tool": action_tool, "params": clean_params}, sort_keys=True).encode("utf-8")).hexdigest()
-            prior_pending = draft.get("pending_submit")
-            if prior_pending and prior_pending.get("fields_hash") == proposal_hash:
-                pending_write_token = secrets.token_hex(16)
-                new_draft["pending_write"] = {"token": pending_write_token, "tool_name": action_tool, "params": dict(clean_params), "issued_at": time.time()}
-            else:
-                location_note = ""
-                if action_tool == "move_equipment":
-                    current_location = _atlas_equipment_current_location(clean_params.get("equipment_name"))
-                    if current_location:
-                        location_note = f"\n\n**Current location:** {current_location}"
-                extra = location_note + "\n\n**Confirm this action** and I’ll do it."
+            new_draft["pending_submit"] = {
+                "fields_hash": proposal_hash,
+                "tool_name": action_tool,
+                "params": dict(clean_params),
+                "issued_at": time.time(),
+            }
+            if "confirm" not in spoken.lower():
+                extra = "\n\n**Confirm this action** and I’ll do it."
                 yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
                 spoken += extra
-                new_draft["pending_submit"] = {
-                    "fields_hash": proposal_hash,
-                    "tool_name": action_tool,
-                    "params": dict(clean_params),
-                    "issued_at": time.time(),
-                }
-    elif action == "submit":
+                tts_buffer += extra
+    elif mode == "concrete_request":
         needs_pump = fields.get("pump_type") in ("Ground Pump", "Overhead Pump")
         needs_lab = fields.get("lab_required") == "Yes"
         needs_drilling = fields.get("drilling_required") == "Yes"
@@ -9570,36 +9623,29 @@ Then stop."""
             and (needs_drilling or f != "drilling_time")
         ]
         missing = [f for f in required_now if not str(fields.get(f, "")).strip()]
+        # A complete read-back becomes a deterministic pending proposal regardless
+        # of whether the model happened to label this same turn action=submit.
+        # The NEXT user turn is classified server-side as CONFIRM/CANCEL/OTHER.
         if not missing:
-            fields_hash = hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
-            prior_pending = draft.get("pending_submit")
-            if prior_pending and prior_pending.get("fields_hash") == fields_hash:
-                # Same complete field set proposed on two consecutive
-                # model turns -- eligible to write. The actual write is
-                # deliberately NOT performed here (see the big docstring
-                # at the top of this function for exactly why): it's
-                # deferred to a separate /assistant/confirm_write request
-                # the client only sends after fully receiving this SSE
-                # response. draft["pending_write"] is what that route
-                # looks up.
-                fields["requested_date"] = date.today().isoformat()
-                pending_write_token = secrets.token_hex(16)
-                new_draft["pending_write"] = {"token": pending_write_token, "fields": dict(fields), "issued_at": time.time()}
-            else:
-                # First time this exact, complete field set has been
-                # proposed for submission -- hold it. Do not write
-                # anything yet. A second matching confirmation on the
-                # very next turn is required.
-                extra = " Just to be safe, say that one more time (like 'yes, submit it') and I'll send it."
-                yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
-                spoken += extra
-                tts_buffer += extra
-                new_draft["pending_submit"] = {"fields_hash": fields_hash}
+            concrete_params=dict(fields)
+            concrete_params["requested_date"] = date.today().isoformat()
+            tool=ATLAS_TOOLS.get("create_concrete_request")
+            clean_params, param_error = _validate_tool_params(tool, concrete_params) if tool else (None, "unsupported action")
+            if tool and tool.kind == "write" and not param_error:
+                proposal_hash=hashlib.sha256(json.dumps({"tool":"create_concrete_request","params":clean_params}, sort_keys=True).encode("utf-8")).hexdigest()
+                new_draft["pending_submit"]={
+                    "fields_hash": proposal_hash,
+                    "tool_name": "create_concrete_request",
+                    "params": dict(clean_params),
+                    "issued_at": time.time(),
+                    "action_context": {"entity_type":"concrete_request","project":clean_params.get("project"),"area":clean_params.get("area_description"),"pour_date":clean_params.get("pour_date")},
+                }
+                if "confirm" not in spoken.lower() and "good to go" not in spoken.lower():
+                    extra="\n\n**Confirm this request** and I’ll submit it."
+                    yield f"data: {json.dumps({'type':'delta','text':extra})}\n\n"
+                    spoken += extra
+                    tts_buffer += extra
         else:
-            extra = " Actually, I'm still missing something required -- let's finish that first."
-            yield f"data: {json.dumps({'type': 'delta', 'text': extra})}\n\n"
-            spoken += extra
-            tts_buffer += extra
             new_draft["pending_submit"] = None
 
     _submit_ready_sentences()
@@ -9760,7 +9806,30 @@ def assistant_page():
     if not is_atlas_allowed():
         flash("Ask Ayoub for access to the office assistant.", "error")
         return redirect(url_for("home"))
-    return render_template("assistant.html")
+    initial_messages=[]
+    conversation_id=session.get("atlas_conversation_id")
+    if conversation_id:
+        conversation=_get_owned_conversation(conversation_id, current_user)
+        if conversation:
+            rows=get_db().execute(
+                "SELECT role, content, interaction_mode, created_at FROM atlas_messages WHERE conversation_id=? ORDER BY id",
+                (conversation_id,)
+            ).fetchall()
+            initial_messages=[{"role":r["role"],"content":r["content"],"created_at":r["created_at"]} for r in rows]
+            token=session.get("atlas_token") or secrets.token_hex(16)
+            session["atlas_token"]=token
+            existing=ATLAS_SESSIONS.get(token) or {}
+            ATLAS_SESSIONS[token]={
+                "mode":existing.get("mode","chat"), "fields":existing.get("fields",{}),
+                "pending_submit":existing.get("pending_submit"), "pending_write":existing.get("pending_write"),
+                "interaction_mode":"text", "conversation_id":conversation_id,
+                "project_context":existing.get("project_context") or _restore_project_context_safely(conversation),
+                "active_context":existing.get("active_context",{}), "entity_memory":existing.get("entity_memory",[]),
+                "history":[{"role":r["role"],"content":r["content"]} for r in rows][-80:],
+            }
+        else:
+            session.pop("atlas_conversation_id", None)
+    return render_template("assistant.html", initial_atlas_messages=initial_messages)
 
 
 def transcribe_via_whisper(audio_bytes, mime_type):
@@ -9892,7 +9961,18 @@ def assistant_ask():
     if not token:
         token = secrets.token_hex(16)
         session["atlas_token"] = token
-    draft = ATLAS_SESSIONS.setdefault(token, {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "entity_memory": [], "interaction_mode": "text"})
+    draft = ATLAS_SESSIONS.get(token)
+    if draft is None:
+        restored_id=session.get("atlas_conversation_id")
+        conversation=_get_owned_conversation(restored_id, current_user) if restored_id else None
+        if conversation:
+            rows=get_db().execute("SELECT role, content FROM atlas_messages WHERE conversation_id=? ORDER BY id", (restored_id,)).fetchall()
+            draft={"mode":"chat","fields":{},"history":[{"role":r["role"],"content":r["content"]} for r in rows][-80:],
+                   "pending_submit":None,"pending_write":None,"project_context":_restore_project_context_safely(conversation),
+                   "active_context":{},"entity_memory":[],"interaction_mode":"text","conversation_id":restored_id}
+        else:
+            draft={"mode":"chat","fields":{},"history":[],"pending_submit":None,"pending_write":None,"project_context":{},"active_context":{},"entity_memory":[],"interaction_mode":"text","conversation_id":None}
+        ATLAS_SESSIONS[token]=draft
 
     # PERSISTENT HISTORY: a conversation_id may already be attached to
     # this in-memory session (set by /assistant/conversations/new or by
@@ -9929,11 +10009,13 @@ def assistant_ask():
         if not _get_owned_conversation(conversation_id, current_user):
             conversation_ownership_invalid = True
             draft["conversation_id"] = None
+            session.pop("atlas_conversation_id", None)
             conversation_id = None
     is_first_message_in_conversation = False
     if not conversation_ownership_invalid and conversation_id is None and question:
         conversation_id = _create_atlas_conversation(current_user.id, _default_conversation_title(first_message=question))
         draft["conversation_id"] = conversation_id
+        session["atlas_conversation_id"] = conversation_id
         is_first_message_in_conversation = True
 
     # INTERACTION MODE (Atlas text/voice separation phase): server-
@@ -10102,6 +10184,7 @@ def assistant_conversations_new():
     # conversation -- matching the explicit requirement that New Chat
     # never silently carries context forward.
     ATLAS_SESSIONS[token] = {"mode": "chat", "fields": {}, "history": [], "pending_submit": None, "pending_write": None, "project_context": {}, "active_context": {}, "entity_memory": [], "interaction_mode": "text", "conversation_id": None}
+    session.pop("atlas_conversation_id", None)
     return {"ok": True}
 
 
@@ -10137,6 +10220,7 @@ def assistant_conversation_open(conversation_id):
     if not token:
         token = secrets.token_hex(16)
         session["atlas_token"] = token
+    session["atlas_conversation_id"] = conversation["id"]
     ATLAS_SESSIONS[token] = {
         "mode": "chat", "fields": {}, "pending_submit": None, "pending_write": None,
         "interaction_mode": "text",
@@ -10144,7 +10228,7 @@ def assistant_conversation_open(conversation_id):
         "project_context": restored_context,
         "active_context": {},
         "entity_memory": [],
-        "history": [{"role": m["role"], "content": m["content"]} for m in messages][-20:],
+        "history": [{"role": m["role"], "content": m["content"]} for m in messages][-80:],
     }
 
     return {
@@ -10162,6 +10246,7 @@ def assistant_reset():
     token = session.get("atlas_token")
     if token:
         ATLAS_SESSIONS.pop(token, None)
+    session.pop("atlas_conversation_id", None)
     return {"ok": True}
 
 
@@ -10240,31 +10325,83 @@ def assistant_confirm_write():
 
     result = execute_tool(tool_name, tool_params, current_user, confirmed=True,
                           session_context=draft.get("project_context", {}))
-    if result.success:
-        draft["mode"] = "chat"
-        draft["fields"] = {}
-        # Preserve conversational continuity after a write. Clearing history here
-        # made pronouns like "it" impossible immediately after a successful action.
-        if tool_name == "move_equipment" and action_context.get("name"):
-            actual_from=(result.data or {}).get("from") or action_context.get("previous_location")
-            actual_to=(result.data or {}).get("to") or tool_params.get("to_location")
-            from_entity=_atlas_remember_location(draft, actual_from, aliases=[(action_context.get("previous_location_entity") or {}).get("label") or ""]) if actual_from else None
-            to_entity=_atlas_remember_location(draft, actual_to, aliases=[(action_context.get("proposed_location_entity") or {}).get("label") or ""]) if actual_to else None
+    if not result.success:
+        return {"success": False, "submitted_id": None, "error": result.error}
+
+    # A tool handler returning success is necessary but Atlas still verifies the
+    # authoritative post-write record before the UI is allowed to show green.
+    if tool_name == "create_concrete_request":
+        submitted_id=(result.data or {}).get("submitted_id") or (result.data or {}).get("id")
+        row=get_db().execute("SELECT id, project, area_description, pour_date, pour_time, status FROM inventory_concrete_requests WHERE id=?", (submitted_id,)).fetchone() if submitted_id else None
+        if not row or (tool_params.get("project") and row["project"] != tool_params.get("project")) or (tool_params.get("pour_date") and row["pour_date"] != tool_params.get("pour_date")):
+            log_activity("atlas","write_verify",submitted_id or 0,"concrete_write_verification_failed",new_value=str(tool_params))
+            get_db().commit()
+            return {"success":False,"submitted_id":None,"error":"the request could not be verified in BuildIQ after submission"}
+        result.data.update({"id":row["id"],"submitted_id":row["id"],"status":row["status"]})
+    elif tool_name == "move_equipment":
+        eq=(result.data or {}).get("equipment") or tool_params.get("equipment_name")
+        expected=(result.data or {}).get("to") or tool_params.get("to_location")
+        db=get_db()
+        asset=db.execute("SELECT id, location FROM sitepulse_assets WHERE lower(name)=lower(?)", (eq,)).fetchone()
+        verified=False
+        if (result.data or {}).get("scheduled"):
+            if asset:
+                sched=db.execute(
+                    """SELECT id FROM sitepulse_usage_log WHERE asset_id=? AND entry_kind='move' AND move_status='Scheduled' AND to_location=? AND scheduled_date=? ORDER BY id DESC LIMIT 1""",
+                    (asset["id"], expected, (result.data or {}).get("schedule_date") or tool_params.get("schedule_date"))
+                ).fetchone()
+                verified=bool(sched)
+        else:
+            verified=bool(asset) and str(asset["location"] or "").strip() == str(expected or "").strip()
+        if not verified:
+            log_activity("atlas","write_verify",0,"equipment_write_verification_failed",new_value=str(tool_params))
+            db.commit()
+            return {"success":False,"submitted_id":None,"error":"the equipment move could not be verified in BuildIQ after submission"}
+
+    draft["mode"] = "chat"
+    draft["fields"] = {}
+    receipt=""
+    recent_actions=list((draft.get("active_context") or {}).get("recent_actions") or [])
+    if tool_name == "move_equipment" and action_context.get("name"):
+        actual_from=(result.data or {}).get("from") or action_context.get("previous_location")
+        actual_to=(result.data or {}).get("to") or tool_params.get("to_location")
+        from_entity=_atlas_remember_location(draft, actual_from, aliases=[(action_context.get("previous_location_entity") or {}).get("label") or ""]) if actual_from else None
+        to_entity=_atlas_remember_location(draft, actual_to, aliases=[(action_context.get("proposed_location_entity") or {}).get("label") or ""]) if actual_to else None
+        is_scheduled=bool((result.data or {}).get("scheduled"))
+        if is_scheduled:
+            sched_date=(result.data or {}).get("schedule_date") or tool_params.get("schedule_date")
+            sched_time=(result.data or {}).get("schedule_time") or tool_params.get("schedule_time")
+            receipt=f"✓ {action_context['name']} scheduled to move to {actual_to} on {sched_date}" + (f" at {sched_time}" if sched_time else "")
+            recent_actions.append({"action":"move_equipment","status":"scheduled","equipment":action_context["name"],"from":actual_from,"to":actual_to,"schedule_date":sched_date,"schedule_time":sched_time,"recorded_at":datetime.utcnow().isoformat()})
             draft["active_context"] = {
-                "entity_type": "equipment",
-                "name": action_context["name"],
-                "previous_location": actual_from,
-                "previous_location_entity": from_entity,
-                "current_location": actual_to,
-                "current_location_entity": to_entity,
-                "last_action": "move_equipment",
-                "last_action_status": "completed",
+                "entity_type":"equipment", "name":action_context["name"],
+                "current_location":actual_from, "current_location_entity":from_entity,
+                "scheduled_destination":actual_to, "scheduled_destination_entity":to_entity,
+                "last_action":"move_equipment", "last_action_status":"scheduled",
+                "recent_actions":recent_actions[-20:],
             }
-            h = list(draft.get("history", []))
-            h.append({"role": "assistant", "content": f"{action_context['name']} was moved to {tool_params.get('to_location')}."})
-            draft["history"] = h[-40:]
-        return {"success": True, "submitted_id": result.data.get("submitted_id") or result.data.get("id"), "error": None, "result": result.data}
-    return {"success": False, "submitted_id": None, "error": result.error}
+        else:
+            receipt=f"✓ {action_context['name']} moved to {actual_to}"
+            recent_actions.append({"action":"move_equipment","status":"completed","equipment":action_context["name"],"from":actual_from,"to":actual_to,"completed_at":datetime.utcnow().isoformat()})
+            draft["active_context"] = {
+                "entity_type": "equipment", "name": action_context["name"],
+                "previous_location": actual_from, "previous_location_entity": from_entity,
+                "current_location": actual_to, "current_location_entity": to_entity,
+                "last_action": "move_equipment", "last_action_status": "completed",
+                "recent_actions": recent_actions[-20:],
+            }
+    elif tool_name == "create_concrete_request":
+        sid=(result.data or {}).get("submitted_id") or (result.data or {}).get("id")
+        receipt=f"✓ Concrete request #{sid} submitted for {tool_params.get('project')} — {tool_params.get('area_description') or 'pour'} on {tool_params.get('pour_date')}"
+        recent_actions.append({"action":"create_concrete_request","submitted_id":sid,"project":tool_params.get("project"),"area":tool_params.get("area_description"),"pour_date":tool_params.get("pour_date"),"completed_at":datetime.utcnow().isoformat()})
+        ac=dict(draft.get("active_context") or {})
+        ac.update({"last_action":"create_concrete_request","last_action_status":"completed","recent_actions":recent_actions[-20:]})
+        draft["active_context"]=ac
+    if receipt:
+        h=list(draft.get("history", [])); h.append({"role":"assistant","content":receipt}); draft["history"]=h[-80:]
+        cid=draft.get("conversation_id") or session.get("atlas_conversation_id")
+        if cid: _append_atlas_message_owned(cid, current_user, "assistant", receipt, "text")
+    return {"success": True, "submitted_id": (result.data or {}).get("submitted_id") or (result.data or {}).get("id"), "error": None, "result": result.data}
 
 
 
