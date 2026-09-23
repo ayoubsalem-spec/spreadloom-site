@@ -2347,6 +2347,10 @@ def init_db():
             ("reviewer_user_id", "INTEGER"),
             ("review_requested_at", "TEXT"),
             ("review_requested_by", "TEXT"),
+            ("review_due_date", "TEXT"),
+            ("review_reminder_at", "TEXT"),
+            ("review_reminder_by", "TEXT"),
+            ("review_reminder_count", "INTEGER NOT NULL DEFAULT 0"),
             ("reviewed_at", "TEXT"),
             ("reviewed_by", "TEXT"),
             ("review_comment", "TEXT")
@@ -3847,7 +3851,23 @@ def cashflow_dashboard():
         project_summaries.append(ps)
     project_summaries.sort(key=lambda x:(-x["attention"],x["name"].lower()))
     subs=db.execute("""SELECT si.*,COALESCE(tp.name,fj.name) project_name FROM finance_sub_invoices si LEFT JOIN tracker_projects tp ON tp.id=si.project_id LEFT JOIN finance_jobs fj ON fj.id=si.cashflow_job_id ORDER BY si.id DESC""").fetchall()
-    return render_template("cashflow/dashboard.html",invoices=invoices,totals=totals,projects=projects,workspaces=workspaces,project_summaries=project_summaries,cashflow_milestones=cashflow_milestones,clients=clients,subs=subs,filters={"q":q,"status":status,"project_id":project_id,"client":client,"due":due,"quick":quick})
+    review_rows=db.execute("""SELECT fi.id,fi.invoice_number,fi.amount,fi.review_status,fi.reviewer_user_id,fi.review_requested_at,fi.review_due_date,fi.review_reminder_at,fi.review_reminder_count,
+        COALESCE(tp.name,fj.name) project_name,u.name reviewer_name,u.email reviewer_email
+        FROM finance_invoices fi
+        LEFT JOIN tracker_projects tp ON tp.id=fi.project_id
+        LEFT JOIN finance_jobs fj ON fj.id=fi.cashflow_job_id
+        LEFT JOIN users u ON u.id=fi.reviewer_user_id
+        WHERE fi.review_status='Waiting for Review' AND fi.voided_at IS NULL
+        ORDER BY CASE WHEN fi.review_due_date IS NULL OR fi.review_due_date='' THEN 1 ELSE 0 END,fi.review_due_date,fi.review_requested_at""").fetchall()
+    my_reviews=[]; review_queue=[]
+    for rr in review_rows:
+        d=dict(rr); d["review_overdue"]=False
+        if d.get("review_due_date"):
+            try: d["review_overdue"]=date.fromisoformat(d["review_due_date"]) < date.today()
+            except ValueError: pass
+        review_queue.append(d)
+        if d.get("reviewer_user_id")==current_user.id: my_reviews.append(d)
+    return render_template("cashflow/dashboard.html",invoices=invoices,totals=totals,projects=projects,workspaces=workspaces,project_summaries=project_summaries,cashflow_milestones=cashflow_milestones,clients=clients,subs=subs,my_reviews=my_reviews,review_queue=review_queue,filters={"q":q,"status":status,"project_id":project_id,"client":client,"due":due,"quick":quick})
 
 
 @app.route("/cashflow/projects/<int:job_id>")
@@ -3869,6 +3889,10 @@ def cashflow_project_detail(job_id):
     milestones=[]; to_invoice=0.0
     for m in raw_milestones:
         d=dict(m); linked=by_milestone.get(m["id"],[])
+        # Hide legacy placeholder rows (old fixed 4th/5th/6th $0 milestones) unless
+        # they have an invoice, a real amount/percent, or meaningful notes/status.
+        if not linked and float(d.get("amount") or 0)<=0.005 and float(d.get("percent") or 0)<=0.005 and not (d.get("description") or "").strip() and (d.get("status") or "Not Ready")=="Not Ready":
+            continue
         if linked:
             statuses=[i["display_status"] for i in linked]
             d["display_status"]=next((x for x in ("Overdue","Partially Paid","Invoiced","Paid") if x in statuses),statuses[-1])
@@ -3958,7 +3982,57 @@ def cashflow_job_new():
             db.execute("INSERT INTO finance_payment_milestones(finance_job_id,sequence_no,label,percent,amount,description,status,due_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(job_id,idx,label,pct,amt,desc,st,due_date_val,now,now))
         db.commit(); flash("CashFlow project created.")
         return redirect(url_for("cashflow_project_detail",job_id=job_id))
-    return render_template("cashflow/job_form.html")
+    return render_template("cashflow/job_form.html",job=None,milestones=[])
+
+
+@app.route("/cashflow/jobs/<int:job_id>/edit",methods=["GET","POST"])
+@login_required
+def cashflow_job_edit(job_id):
+    if not _authorized("action:finance:manage"): return redirect(url_for("cashflow_dashboard"))
+    db=get_db(); job=db.execute("SELECT * FROM finance_jobs WHERE id=?",(job_id,)).fetchone()
+    if not job: flash("CashFlow project not found.","error"); return redirect(url_for("cashflow_dashboard"))
+    existing=db.execute("SELECT * FROM finance_payment_milestones WHERE finance_job_id=? ORDER BY sequence_no,id",(job_id,)).fetchall()
+    if request.method=="POST":
+        name=request.form.get("name","").strip(); client=request.form.get("client","").strip(); address=request.form.get("address","").strip()
+        try: budget=max(0,float(request.form.get("budget") or 0))
+        except ValueError: budget=0
+        if not name or not client:
+            flash("Project name and client are required.","error")
+            return render_template("cashflow/job_form.html",job=job,milestones=existing)
+        now=datetime.utcnow().isoformat()
+        db.execute("""UPDATE finance_jobs SET name=?,client=?,job_number=?,budget=?,notes=?,address=?,client_contact=?,client_email=?,client_phone=?,updated_at=? WHERE id=?""",
+            (name,client,request.form.get("job_number","").strip(),budget,request.form.get("notes","").strip(),address,request.form.get("client_contact","").strip(),request.form.get("client_email","").strip(),request.form.get("client_phone","").strip(),now,job_id))
+        ids=request.form.getlist("milestone_id[]"); labels=request.form.getlist("milestone_label[]"); pcts=request.form.getlist("milestone_percent[]"); descs=request.form.getlist("milestone_description[]"); statuses=request.form.getlist("milestone_status[]"); dues=request.form.getlist("milestone_due_date[]")
+        submitted_existing=set(); seq=0
+        for idx,label in enumerate(labels):
+            label=(label or "").strip(); pct_raw=(pcts[idx] if idx<len(pcts) else "").strip(); desc=(descs[idx] if idx<len(descs) else "").strip(); mid_raw=(ids[idx] if idx<len(ids) else "").strip()
+            if not label and not pct_raw and not desc: continue
+            seq += 1; label=label or f"Payment {seq}"
+            try: pct=max(0,float(pct_raw or 0))
+            except ValueError: pct=0
+            amt=round(budget*pct/100,2) if budget else 0; st=(statuses[idx] if idx<len(statuses) else "Not Ready") or "Not Ready"; due_val=(dues[idx] if idx<len(dues) else "") or None
+            if st not in ("Not Ready","To Invoice"): st="Not Ready"
+            mid=int(mid_raw) if mid_raw.isdigit() else None
+            if mid:
+                owned=db.execute("SELECT id FROM finance_payment_milestones WHERE id=? AND finance_job_id=?",(mid,job_id)).fetchone()
+                if owned:
+                    db.execute("UPDATE finance_payment_milestones SET sequence_no=?,label=?,percent=?,amount=?,description=?,status=?,due_date=?,updated_at=? WHERE id=?",(seq,label,pct,amt,desc,st,due_val,now,mid)); submitted_existing.add(mid); continue
+            db.execute("INSERT INTO finance_payment_milestones(finance_job_id,sequence_no,label,percent,amount,description,status,due_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(job_id,seq,label,pct,amt,desc,st,due_val,now,now))
+        # Rows removed from the edit form are deleted only when no invoice references them.
+        for oldm in existing:
+            if oldm["id"] in submitted_existing: continue
+            linked=db.execute("SELECT 1 FROM finance_invoices WHERE milestone_id=? AND status<>'Void' AND voided_at IS NULL LIMIT 1",(oldm["id"],)).fetchone()
+            if not linked: db.execute("DELETE FROM finance_payment_milestones WHERE id=?",(oldm["id"],))
+        db.commit(); flash("CashFlow project updated.")
+        return redirect(url_for("cashflow_project_detail",job_id=job_id))
+    visible=[]
+    for m in existing:
+        linked=db.execute("SELECT 1 FROM finance_invoices WHERE milestone_id=? AND status<>'Void' AND voided_at IS NULL LIMIT 1",(m["id"],)).fetchone()
+        d=dict(m); d["locked"]=bool(linked)
+        if not linked and float(d.get("amount") or 0)<=0.005 and float(d.get("percent") or 0)<=0.005 and not (d.get("description") or "").strip() and (d.get("status") or "Not Ready")=="Not Ready":
+            continue
+        visible.append(d)
+    return render_template("cashflow/job_form.html",job=job,milestones=visible)
 
 
 @app.route("/cashflow/invoices/<int:invoice_id>")
@@ -4049,10 +4123,28 @@ def cashflow_send_review(invoice_id):
     eligible={r['id'] for r in _cashflow_reviewers(db)}
     if not inv or reviewer_id not in eligible:
         flash("Choose a CashFlow user to review this invoice.","error"); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
-    now=datetime.utcnow().isoformat(); reviewer=db.execute("SELECT name,email FROM users WHERE id=?",(reviewer_id,)).fetchone()
-    db.execute("""UPDATE finance_invoices SET review_status='Waiting for Review',reviewer_user_id=?,review_requested_at=?,review_requested_by=?,reviewed_at=NULL,reviewed_by=NULL,review_comment=NULL,updated_at=? WHERE id=?""",(reviewer_id,now,current_user.email,now,invoice_id))
-    _cashflow_log(db,invoice_id,"Sent for review",f"Reviewer: {reviewer['name'] or reviewer['email']}"); db.commit(); flash("Invoice sent to the review queue.")
+    now=datetime.utcnow().isoformat(); reviewer=db.execute("SELECT name,email FROM users WHERE id=?",(reviewer_id,)).fetchone(); review_due=request.form.get("review_due_date") or None
+    db.execute("""UPDATE finance_invoices SET review_status='Waiting for Review',reviewer_user_id=?,review_requested_at=?,review_requested_by=?,review_due_date=?,review_reminder_at=NULL,review_reminder_by=NULL,review_reminder_count=0,reviewed_at=NULL,reviewed_by=NULL,review_comment=NULL,updated_at=? WHERE id=?""",(reviewer_id,now,current_user.email,review_due,now,invoice_id))
+    detail=f"Reviewer: {reviewer['name'] or reviewer['email']}" + (f" · due {review_due}" if review_due else "")
+    _cashflow_log(db,invoice_id,"Sent for review",detail); db.commit(); flash("Invoice assigned for internal review.")
     return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+
+@app.route("/cashflow/invoices/<int:invoice_id>/review-reminder",methods=["POST"])
+@login_required
+def cashflow_review_reminder(invoice_id):
+    """In-app office reminder for an invoice already assigned to a reviewer.
+    This intentionally does not email the customer. The assigned reviewer sees
+    the invoice in their CashFlow review queue, with the latest reminder time.
+    """
+    if not _authorized("action:finance:manage"): return redirect(url_for("cashflow_dashboard"))
+    db=get_db(); inv=db.execute("SELECT * FROM finance_invoices WHERE id=?",(invoice_id,)).fetchone()
+    if not inv or inv["review_status"]!="Waiting for Review" or not inv["reviewer_user_id"]:
+        flash("This invoice is not waiting on an internal reviewer.","error"); return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+    now=datetime.utcnow().isoformat(); count=int(inv["review_reminder_count"] or 0)+1
+    db.execute("UPDATE finance_invoices SET review_reminder_at=?,review_reminder_by=?,review_reminder_count=?,updated_at=? WHERE id=?",(now,current_user.email,count,now,invoice_id))
+    _cashflow_log(db,invoice_id,"Review reminder sent",f"Internal reminder #{count}"); db.commit(); flash("Internal review reminder added to the reviewer’s CashFlow queue.")
+    return redirect(url_for("cashflow_invoice_detail",invoice_id=invoice_id))
+
 
 @app.route("/cashflow/invoices/<int:invoice_id>/review",methods=["POST"])
 @login_required
