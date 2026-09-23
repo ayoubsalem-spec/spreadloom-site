@@ -1,6 +1,6 @@
 {% extends 'base.html' %}{% block title %}CashFlow · BuildIQ{% endblock %}{% block content %}
 <style>
-:root{--cf-money:#54d68a;--cf-warn:#f3b647;--cf-bad:#ff6b6b;--cf-cyan:#49c6e5}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--cf-warn)!important}.cf-bad{color:var(--cf-bad)!important}.cf-rowlink{cursor:pointer}.cf-rowlink:hover{background:rgba(255,255,255,.025)}.cf-attn{display:inline-flex;align-items:center;gap:7px}.cf-attn-count{display:inline-flex;width:26px;height:26px;align-items:center;justify-content:center;border:1px solid rgba(243,182,71,.55);border-radius:999px;color:var(--cf-warn);font-weight:800}.cf-clear{color:var(--cf-money);font-weight:700}.cf-review-table td,.cf-review-table th{vertical-align:middle}.cf-review-overdue{color:var(--cf-bad);font-weight:700}
+:root{--cf-accent:#c8a24c;--cf-success:#8fb8a3;--cf-danger:#d16f6f}.cf-money{color:var(--text)!important}.cf-warn{color:var(--text)!important}.cf-bad{color:var(--cf-danger)!important}.cf-rowlink{cursor:pointer}.cf-rowlink:hover{background:rgba(255,255,255,.025)}.cf-attn{display:inline-flex;align-items:center;gap:7px}.cf-attn-count{display:inline-flex;width:26px;height:26px;align-items:center;justify-content:center;border:1px solid rgba(200,162,76,.48);border-radius:999px;color:var(--cf-accent);font-weight:800}.cf-clear{color:var(--cf-success);font-weight:700}.cf-review-table td,.cf-review-table th{vertical-align:middle}.cf-review-overdue{color:var(--cf-bad);font-weight:700}
 @media(max-width:900px){.kpi-grid{grid-template-columns:1fr 1fr}.section-row{align-items:flex-start;flex-direction:column}}
 </style>
 <div class="section-row" style="margin-top:0;">
@@ -16,10 +16,10 @@
 </div>
 
 <div class="kpi-grid">
-  <div class="kpi-card kpi-active"><div class="kpi-value cf-warn">${{ '{:,.2f}'.format(totals.to_invoice) }}</div><div class="kpi-label">To Invoice</div></div>
-  <div class="kpi-card"><div class="kpi-value" style="color:var(--cf-cyan)">${{ '{:,.2f}'.format(totals.waiting) }}</div><div class="kpi-label">Invoiced / Waiting</div></div>
-  <div class="kpi-card"><div class="kpi-value cf-bad">${{ '{:,.2f}'.format(totals.overdue) }}</div><div class="kpi-label">Overdue</div></div>
-  <div class="kpi-card"><div class="kpi-value cf-money">${{ '{:,.2f}'.format(totals.paid_month) }}</div><div class="kpi-label">Paid This Month</div></div>
+  <div class="kpi-card kpi-active"><div class="kpi-value">${{ '{:,.2f}'.format(totals.to_invoice) }}</div><div class="kpi-label">To Invoice</div></div>
+  <div class="kpi-card"><div class="kpi-value">${{ '{:,.2f}'.format(totals.waiting) }}</div><div class="kpi-label">Outstanding A/R</div></div>
+  <div class="kpi-card"><div class="kpi-value {% if totals.overdue %}cf-bad{% endif %}">${{ '{:,.2f}'.format(totals.overdue) }}</div><div class="kpi-label">Overdue</div></div>
+  <div class="kpi-card"><div class="kpi-value">${{ '{:,.2f}'.format(totals.paid_month) }}</div><div class="kpi-label">Paid This Month</div></div>
 </div>
 
 {% if my_reviews %}
@@ -46,7 +46,7 @@
     <tr><th>Project</th><th>Client</th><th>Contract</th><th>Remaining to Bill</th><th>To Invoice</th><th>Open A/R</th><th>Attention</th><th></th></tr>
     {% for p in project_summaries %}
     <tr class="cf-rowlink" onclick="window.location='{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}'">
-      <td><b>{{ p.name }}</b></td><td>{{ p.client or '—' }}</td><td>${{ '{:,.2f}'.format(p.budget) }}</td><td>${{ '{:,.2f}'.format(p.remaining) }}</td><td class="cf-warn"><b>${{ '{:,.2f}'.format(p.to_invoice) }}</b></td><td><b>${{ '{:,.2f}'.format(p.open) }}</b></td><td>{% if p.attention %}<span class="cf-attn"><span class="cf-attn-count">{{ p.attention }}</span><span>{{ p.attention }} item{{ '' if p.attention==1 else 's' }}</span></span>{% else %}<span class="cf-clear">✓ Clear</span>{% endif %}</td><td><a href="{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}" onclick="event.stopPropagation()">Open →</a></td>
+      <td><b>{{ p.name }}</b></td><td>{{ p.client or '—' }}</td><td>${{ '{:,.2f}'.format(p.budget) }}</td><td>${{ '{:,.2f}'.format(p.remaining) }}</td><td><b>${{ '{:,.2f}'.format(p.to_invoice) }}</b></td><td><b>${{ '{:,.2f}'.format(p.open) }}</b></td><td>{% if p.attention %}<span class="cf-attn"><span class="cf-attn-count">{{ p.attention }}</span><span>{{ p.attention }} item{{ '' if p.attention==1 else 's' }}</span></span>{% else %}<span class="cf-clear">✓ Clear</span>{% endif %}</td><td><a href="{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}" onclick="event.stopPropagation()">Open →</a></td>
     </tr>
     {% else %}<tr><td colspan="8"><p class="sub">No CashFlow projects yet.</p></td></tr>{% endfor %}
   </table>

@@ -1,6 +1,6 @@
 {% extends 'base.html' %}{% block title %}Invoice {{ invoice.invoice_number }} · CashFlow{% endblock %}{% block content %}
 <style>
-:root{--cf-money:#54d68a;--cf-warn:#f3b647;--cf-bad:#ff6b6b}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--cf-warn)!important}.cf-bad{color:var(--cf-bad)!important}.cf-status{display:inline-block;padding:5px 10px;border:1px solid rgba(243,182,71,.7);border-radius:999px;color:var(--cf-warn);font-size:12px;font-weight:700}.cf-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px}.cf-summary .kpi-card{min-height:92px}.cf-review-ok{color:var(--cf-money);font-weight:800}.cf-secondary details{margin-top:10px}.cf-secondary summary{cursor:pointer}.cf-payments td{vertical-align:middle}@media(max-width:800px){.cf-summary{grid-template-columns:1fr}.section-row{align-items:flex-start;flex-direction:column}}
+:root{--cf-accent:#c8a24c;--cf-success:#8fb8a3;--cf-danger:#d16f6f}.cf-money{color:var(--text)!important}.cf-warn{color:var(--text)!important}.cf-bad{color:var(--cf-danger)!important}.cf-status{display:inline-block;padding:5px 10px;border:1px solid rgba(200,162,76,.5);border-radius:999px;color:var(--cf-accent);font-size:12px;font-weight:700}.cf-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:16px}.cf-summary .kpi-card{min-height:92px}.cf-review-ok{color:var(--cf-success);font-weight:800}.cf-secondary details{margin-top:10px}.cf-secondary summary{cursor:pointer}.cf-payments td{vertical-align:middle}@media(max-width:800px){.cf-summary{grid-template-columns:1fr}.section-row{align-items:flex-start;flex-direction:column}}
 </style>
 <div class="section-row" style="margin-top:0;">
   <div><span class="rc-eyebrow">CashFlow · Invoice</span><h1>Invoice {{ invoice.invoice_number }}</h1><p class="sub">{{ invoice.project_name or 'No project linked' }} · {{ invoice.client or 'No client' }}</p></div>
@@ -10,9 +10,9 @@
 <div class="card">
   <div class="section-row" style="margin-top:0;"><div><span class="cf-status">{{ invoice.display_status }}</span><p class="sub" style="margin-top:8px">Invoice date {{ invoice.invoice_date or '—' }} · Due {{ invoice.due_date or '—' }}{% if invoice.description %} · {{ invoice.description }}{% endif %}{% if invoice.days_overdue %} · <span class="cf-bad">{{ invoice.days_overdue }} days overdue</span>{% endif %}</p></div></div>
   <div class="cf-summary">
-    <div class="kpi-card kpi-active"><div class="kpi-label">Invoice Amount</div><div class="kpi-value cf-warn">${{ '{:,.2f}'.format(invoice.amount) }}</div></div>
-    <div class="kpi-card"><div class="kpi-label">Paid</div><div class="kpi-value cf-money">${{ '{:,.2f}'.format(invoice.paid_total) }}</div></div>
-    <div class="kpi-card"><div class="kpi-label">Balance</div><div class="kpi-value {% if invoice.balance %}cf-bad{% endif %}">${{ '{:,.2f}'.format(invoice.balance) }}</div></div>
+    <div class="kpi-card kpi-active"><div class="kpi-label">Invoice Amount</div><div class="kpi-value">${{ '{:,.2f}'.format(invoice.amount) }}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Paid</div><div class="kpi-value">${{ '{:,.2f}'.format(invoice.paid_total) }}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Balance</div><div class="kpi-value {% if invoice.days_overdue and invoice.balance %}cf-bad{% endif %}">${{ '{:,.2f}'.format(invoice.balance) }}</div></div>
   </div>
   {% if invoice.retainage %}<p class="sub">Retainage held: ${{ '{:,.2f}'.format(invoice.retainage) }}</p>{% endif %}
 </div>
@@ -27,7 +27,7 @@
 
 <div class="card">
   <div class="section-row" style="margin-top:0;"><div><h2 style="margin-bottom:0">Payments</h2><p class="sub">Record each payment as it comes in. BuildIQ updates the balance automatically.</p></div></div>
-  <table class="cf-payments"><tr><th>Payment</th><th>Amount</th><th>Date</th><th>Check / ACH / Note</th></tr>{% for p in payments %}<tr><td>{{ loop.index }}{{ 'st' if loop.index==1 else 'nd' if loop.index==2 else 'rd' if loop.index==3 else 'th' }} Payment</td><td class="cf-money"><b>${{ '{:,.2f}'.format(p.amount) }}</b></td><td>{{ p.payment_date }}</td><td>{{ p.reference or p.notes or '—' }}</td></tr>{% else %}<tr><td colspan="4"><p class="sub">No payments recorded yet.</p></td></tr>{% endfor %}</table>
+  <table class="cf-payments"><tr><th>Payment</th><th>Amount</th><th>Date</th><th>Check / ACH / Note</th></tr>{% for p in payments %}<tr><td>{{ loop.index }}{{ 'st' if loop.index==1 else 'nd' if loop.index==2 else 'rd' if loop.index==3 else 'th' }} Payment</td><td><b>${{ '{:,.2f}'.format(p.amount) }}</b></td><td>{{ p.payment_date }}</td><td>{{ p.reference or p.notes or '—' }}</td></tr>{% else %}<tr><td colspan="4"><p class="sub">No payments recorded yet.</p></td></tr>{% endfor %}</table>
   {% if has_cashflow_manage_access and invoice.display_status not in ['Paid','Void'] %}<form method="post" action="{{ url_for('cashflow_payment_add',invoice_id=invoice.id) }}" style="margin-top:16px"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><div class="form-row"><div><label>Payment Amount</label><input name="amount" type="number" min="0.01" max="{{ invoice.balance }}" step="0.01" required placeholder="0.00"></div><div><label>Payment Date</label><input name="payment_date" type="date" required></div><div style="flex:1"><label>Check / ACH / Note</label><input name="reference" placeholder="Optional"></div><button class="btn btn-gold" style="align-self:end">Record Payment</button></div></form>{% endif %}
 </div>
 
