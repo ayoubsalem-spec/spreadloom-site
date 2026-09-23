@@ -9,12 +9,12 @@
 </div>
 
 <div class="kpi-grid">
-  <div class="kpi-card"><div class="cf-kpi-label">Contract</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(summary.budget) }}</div></div>
-  <div class="kpi-card"><div class="cf-kpi-label">Remaining to Bill</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(summary.remaining) }}</div></div>
-  <div class="kpi-card kpi-active"><div class="cf-kpi-label">To Invoice</div><div class="cf-kpi-money cf-warn">${{ '{:,.2f}'.format(summary.to_invoice) }}</div></div>
-  <div class="kpi-card"><div class="cf-kpi-label">Invoiced</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(summary.invoiced) }}</div></div>
-  <div class="kpi-card"><div class="cf-kpi-label">Paid</div><div class="cf-kpi-money cf-money">${{ '{:,.2f}'.format(summary.paid) }}</div></div>
-  <div class="kpi-card"><div class="cf-kpi-label">Outstanding A/R</div><div class="cf-kpi-money {% if summary.open %}cf-bad{% endif %}">${{ '{:,.2f}'.format(summary.open) }}</div></div>
+  <div class="kpi-card"><div class="cf-kpi-label">Contract</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.contract) }}</div></div>
+  <div class="kpi-card"><div class="cf-kpi-label">Remaining to Bill</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.remaining) }}</div></div>
+  <div class="kpi-card kpi-active"><div class="cf-kpi-label">To Invoice</div><div class="cf-kpi-money cf-warn">${{ '{:,.2f}'.format(totals.to_invoice) }}</div></div>
+  <div class="kpi-card"><div class="cf-kpi-label">Invoiced</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.invoiced) }}</div></div>
+  <div class="kpi-card"><div class="cf-kpi-label">Paid</div><div class="cf-kpi-money cf-money">${{ '{:,.2f}'.format(totals.paid) }}</div></div>
+  <div class="kpi-card"><div class="cf-kpi-label">Outstanding A/R</div><div class="cf-kpi-money {% if totals.balance %}cf-bad{% endif %}">${{ '{:,.2f}'.format(totals.balance) }}</div></div>
 </div>
 
 <div class="card">
