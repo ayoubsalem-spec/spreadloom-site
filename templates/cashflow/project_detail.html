@@ -1,6 +1,6 @@
 {% extends 'base.html' %}{% block title %}{{ job.name }} · CashFlow{% endblock %}{% block content %}
 <style>
-:root{--cf-accent:#c8a24c;--cf-money:#42d392;--cf-money-soft:#8de6bd;--cf-success:#42d392;--cf-danger:#d16f6f}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--text)!important}.cf-bad{color:var(--cf-danger)!important}.cf-kpi-label{color:var(--text-dim);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.cf-kpi-money{font-size:18px;font-weight:750;margin-top:5px;letter-spacing:-.01em;color:var(--cf-money)}.cf-status{display:inline-block;padding:5px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px}.cf-status.warn{border-color:rgba(200,162,76,.5);color:var(--cf-accent)}.cf-status.money{border-color:rgba(143,184,163,.45);color:var(--cf-success)}.cf-actions{white-space:nowrap}.cf-actions form{display:inline}.cf-actions .btn{margin-left:5px}.cf-pastdue{color:var(--cf-bad);font-weight:700}.cf-table-money{color:var(--cf-money);font-weight:700}.kpi-card{min-height:78px!important;padding:16px 18px!important}.kpi-grid{gap:12px!important}
+:root{--cf-accent:#c8a24c;--cf-money:#f4f7fb;--cf-success:#38d98a;--cf-danger:#ef6b6b;--cf-muted:#8ea3ba}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--text)!important}.cf-bad{color:var(--cf-danger)!important}.cf-kpi-label{color:var(--text-dim);font-size:11px;text-transform:uppercase;letter-spacing:.08em}.cf-kpi-money{font-size:17px;font-weight:720;margin-top:5px;letter-spacing:-.01em;color:var(--text)}.cf-kpi-money.gold{color:var(--cf-accent)}.cf-kpi-money.green{color:var(--cf-success)}.cf-status{display:inline-block;padding:5px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px}.cf-status.warn{border-color:rgba(200,162,76,.5);color:var(--cf-accent)}.cf-status.money{border-color:rgba(143,184,163,.45);color:var(--cf-success)}.cf-actions{white-space:nowrap}.cf-actions form{display:inline}.cf-actions .btn{margin-left:5px}.cf-pastdue{color:var(--cf-bad);font-weight:700}.cf-table-money{color:var(--text);font-weight:700}.cf-table-paid{color:var(--cf-success);font-weight:700}.kpi-card{min-height:78px!important;padding:16px 18px!important}.kpi-grid{gap:12px!important}
 @media(max-width:900px){.kpi-grid{grid-template-columns:1fr 1fr}.section-row{align-items:flex-start;flex-direction:column}}
 </style>
 <div class="section-row" style="margin-top:0;">
@@ -11,9 +11,9 @@
 <div class="kpi-grid">
   <div class="kpi-card"><div class="cf-kpi-label">Contract</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.contract) }}</div></div>
   <div class="kpi-card"><div class="cf-kpi-label">Remaining to Bill</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.remaining) }}</div></div>
-  <div class="kpi-card kpi-active"><div class="cf-kpi-label">To Invoice</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.to_invoice) }}</div></div>
+  <div class="kpi-card kpi-active"><div class="cf-kpi-label">To Invoice</div><div class="cf-kpi-money gold">${{ '{:,.2f}'.format(totals.to_invoice) }}</div></div>
   <div class="kpi-card"><div class="cf-kpi-label">Invoiced</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.invoiced) }}</div></div>
-  <div class="kpi-card"><div class="cf-kpi-label">Paid</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.paid) }}</div></div>
+  <div class="kpi-card"><div class="cf-kpi-label">Paid</div><div class="cf-kpi-money green">${{ '{:,.2f}'.format(totals.paid) }}</div></div>
   <div class="kpi-card"><div class="cf-kpi-label">Outstanding A/R</div><div class="cf-kpi-money">${{ '{:,.2f}'.format(totals.balance) }}</div></div>
 </div>
 
@@ -33,7 +33,7 @@
 <div class="card">
   <div class="section-row" style="margin-top:0;"><div><h2 style="margin-bottom:0">Invoices</h2><p class="sub">Billing and payment status for this project.</p></div></div>
   <table><tr><th>Invoice</th><th>Date</th><th>Amount</th><th>Paid</th><th>Balance</th><th>Status</th><th>Internal Review</th><th></th></tr>
-    {% for i in invoices %}<tr><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=i.id) }}">{{ i.invoice_number }}</a></td><td>{{ i.invoice_date or '—' }}</td><td><span class="cf-table-money">${{ '{:,.2f}'.format(i.amount) }}</span></td><td><span class="cf-table-money">${{ '{:,.2f}'.format(i.paid_total) }}</span></td><td>${{ '{:,.2f}'.format(i.balance) }}</td><td><span class="badge">{{ i.display_status }}</span></td><td>{{ i.review_status or '—' }}</td><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=i.id) }}">Open →</a></td></tr>{% else %}<tr><td colspan="8"><p class="sub">No invoices yet.</p></td></tr>{% endfor %}
+    {% for i in invoices %}<tr><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=i.id) }}">{{ i.invoice_number }}</a></td><td>{{ i.invoice_date or '—' }}</td><td><span class="cf-table-money">${{ '{:,.2f}'.format(i.amount) }}</span></td><td><span class="cf-table-paid">${{ '{:,.2f}'.format(i.paid_total) }}</span></td><td>${{ '{:,.2f}'.format(i.balance) }}</td><td><span class="badge">{{ i.display_status }}</span></td><td>{{ i.review_status or '—' }}</td><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=i.id) }}">Open →</a></td></tr>{% else %}<tr><td colspan="8"><p class="sub">No invoices yet.</p></td></tr>{% endfor %}
   </table>
 </div>
 {% endblock %}
