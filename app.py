@@ -2367,6 +2367,10 @@ def init_db():
             label TEXT NOT NULL, percent REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0,
             description TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
             FOREIGN KEY (finance_job_id) REFERENCES finance_jobs(id))""")
+        milestone_cols = {r[1] for r in db.execute("PRAGMA table_info(finance_payment_milestones)").fetchall()}
+        for col, ddl in [("status", "TEXT NOT NULL DEFAULT 'Not Ready'"), ("due_date", "TEXT")]:
+            if col not in milestone_cols:
+                db.execute(f"ALTER TABLE finance_payment_milestones ADD COLUMN {col} {ddl}")
         sub_cols = {r[1] for r in db.execute("PRAGMA table_info(finance_sub_invoices)").fetchall()}
         if "cashflow_job_id" not in sub_cols:
             db.execute("ALTER TABLE finance_sub_invoices ADD COLUMN cashflow_job_id INTEGER")
@@ -3790,45 +3794,59 @@ def cashflow_dashboard():
         if due=="overdue" and d["display_status"]!="Overdue": continue
         if due=="30" and not (d["display_status"]=="Overdue" and d["days_overdue"]>=30): continue
         invoices.append(d)
-    all_rows=db.execute("""SELECT fi.*,COALESCE((SELECT SUM(fp.amount) FROM finance_payments fp WHERE fp.invoice_id=fi.id),0) paid_total FROM finance_invoices fi""").fetchall(); totals={"invoiced":0,"paid":0,"outstanding":0,"overdue":0,"retainage":0,"attention":0}
+
+    all_rows=db.execute("""SELECT fi.*,COALESCE((SELECT SUM(fp.amount) FROM finance_payments fp WHERE fp.invoice_id=fi.id),0) paid_total FROM finance_invoices fi""").fetchall()
+    milestones_all=db.execute("SELECT * FROM finance_payment_milestones ORDER BY finance_job_id,sequence_no,id").fetchall()
+    linked_by_milestone={}
+    for r in all_rows:
+        if r["milestone_id"] and not r["voided_at"] and r["status"]!="Void": linked_by_milestone.setdefault(r["milestone_id"],[]).append(r)
+
+    def milestone_display(m):
+        linked=linked_by_milestone.get(m["id"],[])
+        if linked:
+            # One milestone may have more than one invoice; the most urgent state wins.
+            sts=[_cashflow_status(i,float(i["paid_total"] or 0)) for i in linked]
+            for candidate in ("Overdue","Partially Paid","Invoiced","Paid"):
+                if candidate in sts: return candidate
+            return sts[-1] if sts else "Invoiced"
+        return (m["status"] or "Not Ready") if "status" in m.keys() else "Not Ready"
+
+    today=date.today(); month_prefix=today.strftime('%Y-%m')
+    paid_this_month=db.execute("SELECT COALESCE(SUM(amount),0) v FROM finance_payments WHERE payment_date LIKE ?",(month_prefix+'%',)).fetchone()["v"] or 0
+    totals={"to_invoice":0.0,"waiting":0.0,"overdue":0.0,"paid_month":float(paid_this_month),"invoiced":0.0,"paid":0.0,"outstanding":0.0,"attention":0}
+    for m in milestones_all:
+        if milestone_display(m)=="To Invoice": totals["to_invoice"] += float(m["amount"] or 0)
     for r in all_rows:
         if r["status"]=="Void" or r["voided_at"]: continue
         gross,ret,due_now,paid,bal=_cashflow_amounts(r,r["paid_total"]); st=_cashflow_status(r,paid)
-        # Dashboard money is intentionally simple: only sent/invoiced work enters
-        # Invoiced and Balance. Retainage stays behind the scenes unless an invoice uses it.
         if r["status"] != "To Invoice" or paid > 0:
             totals["invoiced"]+=gross; totals["outstanding"]+=bal
-        totals["paid"]+=paid; totals["retainage"]+=ret
-        needs_review=(r["review_status"] in ("Waiting for Review","Sent Back"))
+            if bal>.005 and st!="Overdue": totals["waiting"]+=bal
+        totals["paid"]+=paid
         if st=="Overdue": totals["overdue"]+=bal
-        if st in ("To Invoice","Partially Paid","Overdue") or needs_review: totals["attention"]+=1
+        if st in ("Partially Paid","Overdue") or r["review_status"] in ("Waiting for Review","Sent Back"): totals["attention"]+=1
+    totals["attention"] += sum(1 for m in milestones_all if milestone_display(m)=="To Invoice")
+
     projects=_cashflow_projects(db); workspaces=_cashflow_workspaces(db); clients=[r["client"] for r in db.execute("SELECT DISTINCT client FROM finance_invoices WHERE client IS NOT NULL AND trim(client)<>'' ORDER BY client").fetchall()]
+    cashflow_milestones={}
+    for m in milestones_all:
+        d=dict(m); d["display_status"]=milestone_display(m); cashflow_milestones.setdefault(m["finance_job_id"],[]).append(d)
     project_summaries=[]
     for w in workspaces:
-        ps={"key":w["key"],"name":w["name"],"client":w["client"],"kind":w["kind"],"budget":w["budget"],"cashflow_job_id":w["cashflow_job_id"],"project_id":w["project_id"],"invoiced":0.0,"received":0.0,"open":0.0,"retainage":0.0,"to_invoice":0,"attention":0,"invoice_count":0}
+        if w["cashflow_job_id"] is None: continue
+        ps={"key":w["key"],"name":w["name"],"client":w["client"],"kind":w["kind"],"budget":float(w["budget"] or 0),"cashflow_job_id":w["cashflow_job_id"],"project_id":w["project_id"],"invoiced":0.0,"received":0.0,"open":0.0,"to_invoice":0.0,"attention":0,"invoice_count":0}
+        for m in cashflow_milestones.get(w["cashflow_job_id"],[]):
+            if m["display_status"]=="To Invoice": ps["to_invoice"] += float(m["amount"] or 0); ps["attention"] += 1
         for r in all_rows:
-            matches=(w["cashflow_job_id"] is not None and r["cashflow_job_id"]==w["cashflow_job_id"]) or (w["cashflow_job_id"] is None and r["cashflow_job_id"] is None and r["project_id"]==w["project_id"])
-            if not matches or r["status"]=="Void" or r["voided_at"]: continue
+            if r["cashflow_job_id"]!=w["cashflow_job_id"] or r["status"]=="Void" or r["voided_at"]: continue
             gross,ret,due_now,paid,bal=_cashflow_amounts(r,r["paid_total"]); st=_cashflow_status(r,paid)
-            ps["invoice_count"]+=1; ps["received"]+=paid; ps["retainage"]+=ret
+            ps["invoice_count"]+=1; ps["received"]+=paid
             if r["status"] != "To Invoice" or paid > 0: ps["invoiced"]+=gross; ps["open"]+=bal
-            if st=="To Invoice": ps["to_invoice"]+=1
-            if st in ("To Invoice","Partially Paid","Overdue") or r["review_status"] in ("Waiting for Review","Sent Back"): ps["attention"]+=1
-        if w["cashflow_job_id"] is not None or ps["invoice_count"]: project_summaries.append(ps)
+            if st in ("Partially Paid","Overdue") or r["review_status"] in ("Waiting for Review","Sent Back"): ps["attention"]+=1
+        ps["remaining"] = max(0.0, ps["budget"]-ps["invoiced"])
+        project_summaries.append(ps)
     project_summaries.sort(key=lambda x:(-x["attention"],x["name"].lower()))
-    if quick:
-        def _quick_match(i):
-            if quick=="invoiced": return i["status"] != "To Invoice" and i["display_status"] != "Void"
-            if quick=="paid": return float(i["paid_total"] or 0) > 0 and i["display_status"] != "Void"
-            if quick=="balance": return i["balance"] > .005 and i["status"] != "To Invoice" and i["display_status"] != "Void"
-            if quick=="overdue": return i["display_status"] == "Overdue"
-            if quick=="attention": return i["display_status"] in ("To Invoice","Partially Paid","Overdue") or i.get("review_status") in ("Waiting for Review","Sent Back")
-            return True
-        invoices=[i for i in invoices if _quick_match(i)]
     subs=db.execute("""SELECT si.*,COALESCE(tp.name,fj.name) project_name FROM finance_sub_invoices si LEFT JOIN tracker_projects tp ON tp.id=si.project_id LEFT JOIN finance_jobs fj ON fj.id=si.cashflow_job_id ORDER BY si.id DESC""").fetchall()
-    cashflow_milestones={}
-    for m in db.execute("SELECT * FROM finance_payment_milestones ORDER BY finance_job_id,sequence_no,id").fetchall():
-        cashflow_milestones.setdefault(m["finance_job_id"],[]).append(m)
     return render_template("cashflow/dashboard.html",invoices=invoices,totals=totals,projects=projects,workspaces=workspaces,project_summaries=project_summaries,cashflow_milestones=cashflow_milestones,clients=clients,subs=subs,filters={"q":q,"status":status,"project_id":project_id,"client":client,"due":due,"quick":quick})
 
 
@@ -3838,50 +3856,77 @@ def cashflow_project_detail(job_id):
     if not _authorized("module:finance:view"): return redirect(url_for("home"))
     db=get_db(); job=db.execute("SELECT * FROM finance_jobs WHERE id=?",(job_id,)).fetchone()
     if not job: flash("CashFlow project not found.","error"); return redirect(url_for("cashflow_dashboard"))
-    milestones=db.execute("SELECT * FROM finance_payment_milestones WHERE finance_job_id=? ORDER BY sequence_no,id",(job_id,)).fetchall()
+    raw_milestones=db.execute("SELECT * FROM finance_payment_milestones WHERE finance_job_id=? ORDER BY sequence_no,id",(job_id,)).fetchall()
     invoices=db.execute("""SELECT fi.*,COALESCE((SELECT SUM(fp.amount) FROM finance_payments fp WHERE fp.invoice_id=fi.id),0) paid_total
         FROM finance_invoices fi WHERE fi.cashflow_job_id=? ORDER BY COALESCE(fi.invoice_date,fi.created_at),fi.id""",(job_id,)).fetchall()
     rows=[]; invoiced=paid=open_bal=0.0
+    by_milestone={}
     for r in invoices:
         d=dict(r); d["display_status"]=_cashflow_status(r,float(r["paid_total"] or 0)); g,ret,due,pd,bal=_cashflow_amounts(r,r["paid_total"]); d["balance"]=bal; rows.append(d)
-        if r["status"] not in ("To Invoice","Void"): invoiced+=g; paid+=pd; open_bal+=bal
-    return render_template("cashflow/project_detail.html",job=job,milestones=milestones,invoices=rows,totals={"invoiced":invoiced,"paid":paid,"balance":open_bal})
+        if r["milestone_id"] and r["status"]!="Void" and not r["voided_at"]: by_milestone.setdefault(r["milestone_id"],[]).append(d)
+        if r["status"] not in ("To Invoice","Void"):
+            invoiced+=g; paid+=pd; open_bal+=bal
+    milestones=[]; to_invoice=0.0
+    for m in raw_milestones:
+        d=dict(m); linked=by_milestone.get(m["id"],[])
+        if linked:
+            statuses=[i["display_status"] for i in linked]
+            d["display_status"]=next((x for x in ("Overdue","Partially Paid","Invoiced","Paid") if x in statuses),statuses[-1])
+            d["invoice_id"]=linked[-1]["id"]
+        else:
+            d["display_status"]=(d.get("status") or "Not Ready"); d["invoice_id"]=None
+        if d["display_status"]=="To Invoice": to_invoice += float(d.get("amount") or 0)
+        milestones.append(d)
+    remaining=max(0.0,float(job["budget"] or 0)-invoiced)
+    return render_template("cashflow/project_detail.html",job=job,milestones=milestones,invoices=rows,totals={"contract":float(job["budget"] or 0),"to_invoice":to_invoice,"invoiced":invoiced,"paid":paid,"balance":open_bal,"remaining":remaining})
+
+
+@app.route("/cashflow/milestones/<int:milestone_id>/status", methods=["POST"])
+@login_required
+def cashflow_milestone_status(milestone_id):
+    if not _authorized("action:finance:manage"): return redirect(url_for("cashflow_dashboard"))
+    db=get_db(); m=db.execute("SELECT * FROM finance_payment_milestones WHERE id=?",(milestone_id,)).fetchone()
+    if not m: flash("Payment milestone not found.","error"); return redirect(url_for("cashflow_dashboard"))
+    # Once an invoice is linked, invoice/payment state is authoritative.
+    linked=db.execute("SELECT id FROM finance_invoices WHERE milestone_id=? AND status<>'Void' AND voided_at IS NULL LIMIT 1",(milestone_id,)).fetchone()
+    if linked:
+        flash("This milestone already has an invoice. Update the invoice/payment instead.","error")
+        return redirect(url_for("cashflow_project_detail",job_id=m["finance_job_id"]))
+    new_status=request.form.get("status","").strip()
+    if new_status not in ("Not Ready","To Invoice"):
+        flash("Choose Not Ready or To Invoice.","error"); return redirect(url_for("cashflow_project_detail",job_id=m["finance_job_id"]))
+    db.execute("UPDATE finance_payment_milestones SET status=?,due_date=?,updated_at=? WHERE id=?",(new_status,request.form.get("due_date") or None,datetime.utcnow().isoformat(),milestone_id)); db.commit()
+    flash(f"{m['label']} marked {new_status}.")
+    return redirect(url_for("cashflow_project_detail",job_id=m["finance_job_id"]))
+
 
 @app.route("/cashflow/invoices/new",methods=["GET","POST"])
 @login_required
 def cashflow_invoice_new():
     if not _authorized("action:finance:manage"): flash("You don't have permission to manage CashFlow.","error"); return redirect(url_for("cashflow_dashboard"))
     db=get_db(); projects=_cashflow_projects(db); workspaces=_cashflow_workspaces(db)
+    selected_job_id=request.args.get("job_id",type=int); selected_milestone_id=request.args.get("milestone_id",type=int)
+    selected_milestone=None
+    if selected_milestone_id:
+        selected_milestone=db.execute("SELECT * FROM finance_payment_milestones WHERE id=?",(selected_milestone_id,)).fetchone()
+        if selected_milestone: selected_job_id=selected_milestone["finance_job_id"]
     if request.method=="POST":
-        number=request.form.get("invoice_number","").strip(); workspace_key=request.form.get("workspace","").strip(); workspace=None; milestone_id=request.form.get("milestone_id") or None
-        if workspace_key=="new":
-            job_name=request.form.get("new_job_name","").strip(); job_client=request.form.get("new_job_client","").strip()
-            try: job_budget=max(0,float(request.form.get("new_job_budget") or 0))
-            except ValueError: job_budget=0
-            if not job_name or not job_client:
-                flash("Enter the new project/job name and client.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
-            now_job=datetime.utcnow().isoformat(); cur_job=db.execute("INSERT INTO finance_jobs(name,client,job_number,budget,notes,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(job_name,job_client,request.form.get("new_job_number","").strip(),job_budget,"",current_user.email,now_job,now_job))
-            workspace={"project_id":None,"cashflow_job_id":cur_job.lastrowid,"client":job_client}
-        else:
-            workspace=_cashflow_resolve_workspace(db,workspace_key)
+        number=request.form.get("invoice_number","").strip(); workspace_key=request.form.get("workspace","").strip(); workspace=_cashflow_resolve_workspace(db,workspace_key); milestone_id=request.form.get("milestone_id") or None
         project_id=workspace["project_id"] if workspace else None; cashflow_job_id=workspace["cashflow_job_id"] if workspace else None
         try: amount=float(request.form.get("amount") or 0); rp=float(request.form.get("retainage_percent") or 0); retainage=float(request.form.get("retainage") or 0)
-        except ValueError: flash("Enter valid dollar amounts and retainage.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
-        if not number or not workspace: flash("Invoice number and project/job are required.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
-        if amount<=0 or rp<0 or rp>100: flash("Invoice amount must be greater than $0 and retainage must be 0–100%.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
-        if not request.form.get("retainage_enabled"):
-            rp=0; retainage=0
+        except ValueError: flash("Enter valid dollar amounts and retainage.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None,milestones=[],selected_milestone=None)
+        if not number or not workspace: flash("Invoice number and project are required.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None,milestones=[],selected_milestone=None)
+        if not request.form.get("retainage_enabled"): rp=0; retainage=0
         elif request.form.get("retainage_mode")=="percent": retainage=round(amount*rp/100,2)
-        if retainage>amount: flash("Retainage cannot be more than the invoice amount.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
+        if amount<=0 or rp<0 or rp>100 or retainage>amount: flash("Check invoice amount and retainage.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None,milestones=[],selected_milestone=None)
         client=request.form.get("client","").strip() or workspace["client"]
         now=datetime.utcnow().isoformat()
         try:
-            cur=db.execute("""INSERT INTO finance_invoices(invoice_number,project_id,cashflow_job_id,client,invoice_date,due_date,amount,retainage,retainage_percent,status,description,created_by,created_at,updated_at,milestone_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,project_id,cashflow_job_id,client,request.form.get("invoice_date") or None,request.form.get("due_date") or None,amount,retainage,rp,request.form.get("status") or "To Invoice",request.form.get("description","").strip(),current_user.email,now,now,milestone_id)); _cashflow_log(db,cur.lastrowid,"Invoice created",f"${amount:,.2f} for {client or 'client'}"); db.commit()
-        except sqlite3.IntegrityError: flash("That invoice number already exists.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None)
+            cur=db.execute("""INSERT INTO finance_invoices(invoice_number,project_id,cashflow_job_id,client,invoice_date,due_date,amount,retainage,retainage_percent,status,description,created_by,created_at,updated_at,milestone_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,project_id,cashflow_job_id,client,request.form.get("invoice_date") or None,request.form.get("due_date") or None,amount,retainage,rp,request.form.get("status") or "Invoiced",request.form.get("description","").strip(),current_user.email,now,now,milestone_id)); _cashflow_log(db,cur.lastrowid,"Invoice created",f"${amount:,.2f} for {client or 'client'}"); db.commit()
+        except sqlite3.IntegrityError: flash("That invoice number already exists.","error"); return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None,milestones=[],selected_milestone=None)
         return redirect(url_for("cashflow_invoice_detail",invoice_id=cur.lastrowid))
-    selected_job_id=request.args.get("job_id",type=int)
     milestones=db.execute("SELECT * FROM finance_payment_milestones WHERE finance_job_id=? ORDER BY sequence_no,id",(selected_job_id,)).fetchall() if selected_job_id else []
-    return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None,milestones=milestones)
+    return render_template("cashflow/form.html",projects=projects,workspaces=workspaces,invoice=None,milestones=milestones,selected_milestone=selected_milestone)
 
 
 @app.route("/cashflow/jobs/new",methods=["GET","POST"])
@@ -3898,15 +3943,19 @@ def cashflow_job_new():
         cur=db.execute("""INSERT INTO finance_jobs(name,client,job_number,budget,notes,tracker_project_id,created_by,created_at,updated_at,address,client_contact,client_email,client_phone)
             VALUES(?,?,?,?,?,NULL,?,?,?,?,?,?,?)""",(name,client,request.form.get("job_number","").strip(),budget,request.form.get("notes","").strip(),current_user.email,now,now,address,request.form.get("client_contact","").strip(),request.form.get("client_email","").strip(),request.form.get("client_phone","").strip()))
         job_id=cur.lastrowid
-        for seq in range(1,7):
-            label=request.form.get(f"milestone_label_{seq}","").strip()
-            pct_raw=request.form.get(f"milestone_percent_{seq}","").strip(); desc=request.form.get(f"milestone_description_{seq}","").strip()
+        labels=request.form.getlist("milestone_label[]"); pcts=request.form.getlist("milestone_percent[]"); descs=request.form.getlist("milestone_description[]"); statuses=request.form.getlist("milestone_status[]"); dues=request.form.getlist("milestone_due_date[]")
+        if not labels:
+            # Backward compatibility with the previous fixed six-row form.
+            labels=[request.form.get(f"milestone_label_{n}","") for n in range(1,7)]; pcts=[request.form.get(f"milestone_percent_{n}","") for n in range(1,7)]; descs=[request.form.get(f"milestone_description_{n}","") for n in range(1,7)]; statuses=["Not Ready"]*6; dues=[""]*6
+        for idx,label in enumerate(labels,1):
+            label=(label or "").strip(); pct_raw=(pcts[idx-1] if idx-1<len(pcts) else "").strip(); desc=(descs[idx-1] if idx-1<len(descs) else "").strip()
             if not label and not pct_raw and not desc: continue
-            label=label or f"{seq}{'st' if seq==1 else 'nd' if seq==2 else 'rd' if seq==3 else 'th'} Payment"
+            label=label or f"Payment {idx}"
             try: pct=max(0,float(pct_raw or 0))
             except ValueError: pct=0
-            amt=round(budget*pct/100,2) if budget else 0
-            db.execute("INSERT INTO finance_payment_milestones(finance_job_id,sequence_no,label,percent,amount,description,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(job_id,seq,label,pct,amt,desc,now,now))
+            amt=round(budget*pct/100,2) if budget else 0; st=(statuses[idx-1] if idx-1<len(statuses) else "Not Ready") or "Not Ready"; due_date_val=(dues[idx-1] if idx-1<len(dues) else "") or None
+            if st not in ("Not Ready","To Invoice"): st="Not Ready"
+            db.execute("INSERT INTO finance_payment_milestones(finance_job_id,sequence_no,label,percent,amount,description,status,due_date,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(job_id,idx,label,pct,amt,desc,st,due_date_val,now,now))
         db.commit(); flash("CashFlow project created.")
         return redirect(url_for("cashflow_project_detail",job_id=job_id))
     return render_template("cashflow/job_form.html")
@@ -7945,7 +7994,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v11.4-confirmation-protocol-fix"
+ATLAS_BUILD = "TEST-v11.5-cashflow-simple-admin"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
