@@ -3838,7 +3838,7 @@ def cashflow_dashboard():
     project_summaries=[]
     for w in workspaces:
         if w["cashflow_job_id"] is None: continue
-        ps={"key":w["key"],"name":w["name"],"client":w["client"],"kind":w["kind"],"budget":float(w["budget"] or 0),"cashflow_job_id":w["cashflow_job_id"],"project_id":w["project_id"],"invoiced":0.0,"received":0.0,"open":0.0,"to_invoice":0.0,"attention":0,"invoice_count":0}
+        ps={"key":w["key"],"name":w["name"],"client":w["client"],"kind":w["kind"],"budget":float(w["budget"] or 0),"cashflow_job_id":w["cashflow_job_id"],"project_id":w["project_id"],"invoiced":0.0,"received":0.0,"open":0.0,"to_invoice":0.0,"overdue":0.0,"paid_month":0.0,"attention":0,"invoice_count":0}
         for m in cashflow_milestones.get(w["cashflow_job_id"],[]):
             if m["display_status"]=="To Invoice": ps["to_invoice"] += float(m["amount"] or 0); ps["attention"] += 1
         for r in all_rows:
@@ -3846,9 +3846,19 @@ def cashflow_dashboard():
             gross,ret,due_now,paid,bal=_cashflow_amounts(r,r["paid_total"]); st=_cashflow_status(r,paid)
             ps["invoice_count"]+=1; ps["received"]+=paid
             if r["status"] != "To Invoice" or paid > 0: ps["invoiced"]+=gross; ps["open"]+=bal
+            if st=="Overdue": ps["overdue"] += bal
             if st in ("Partially Paid","Overdue") or r["review_status"] in ("Waiting for Review","Sent Back"): ps["attention"]+=1
         ps["remaining"] = max(0.0, ps["budget"]-ps["invoiced"])
         project_summaries.append(ps)
+    # Per-project payments received this calendar month power the clickable Paid This Month KPI.
+    paid_month_by_job={}
+    for pr in db.execute("""SELECT fi.cashflow_job_id,COALESCE(SUM(fp.amount),0) v
+        FROM finance_payments fp JOIN finance_invoices fi ON fi.id=fp.invoice_id
+        WHERE fi.cashflow_job_id IS NOT NULL AND fp.payment_date LIKE ?
+        GROUP BY fi.cashflow_job_id""",(month_prefix+'%',)).fetchall():
+        paid_month_by_job[pr["cashflow_job_id"]]=float(pr["v"] or 0)
+    for ps in project_summaries:
+        ps["paid_month"]=paid_month_by_job.get(ps["cashflow_job_id"],0.0)
     project_summaries.sort(key=lambda x:(-x["attention"],x["name"].lower()))
     subs=db.execute("""SELECT si.*,COALESCE(tp.name,fj.name) project_name FROM finance_sub_invoices si LEFT JOIN tracker_projects tp ON tp.id=si.project_id LEFT JOIN finance_jobs fj ON fj.id=si.cashflow_job_id ORDER BY si.id DESC""").fetchall()
     review_rows=db.execute("""SELECT fi.id,fi.invoice_number,fi.amount,fi.review_status,fi.reviewer_user_id,fi.review_requested_at,fi.review_due_date,fi.review_reminder_at,fi.review_reminder_count,

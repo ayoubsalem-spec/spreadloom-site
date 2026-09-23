@@ -1,6 +1,6 @@
 {% extends 'base.html' %}{% block title %}CashFlow · BuildIQ{% endblock %}{% block content %}
 <style>
-:root{--cf-accent:#c8a24c;--cf-money:#f4f7fb;--cf-success:#38d98a;--cf-danger:#ef6b6b;--cf-muted:#8ea3ba}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--text)!important}.cf-bad{color:var(--cf-danger)!important}.cf-rowlink{cursor:pointer}.cf-rowlink:hover{background:rgba(255,255,255,.025)}.cf-attn{display:inline-flex;align-items:center;gap:7px}.cf-attn-count{display:inline-flex;width:26px;height:26px;align-items:center;justify-content:center;border:1px solid rgba(200,162,76,.48);border-radius:999px;color:var(--cf-accent);font-weight:800}.cf-clear{color:var(--cf-success);font-weight:700}.cf-review-table td,.cf-review-table th{vertical-align:middle}.cf-review-overdue{color:var(--cf-bad);font-weight:700}.kpi-card .kpi-value{font-size:23px!important;line-height:1.05;letter-spacing:-.015em;color:var(--text)}.kpi-card.kpi-active .kpi-value{color:var(--cf-accent)}.cf-project-money{color:var(--text);font-weight:700}.cf-open-money{color:var(--text);font-weight:700}.cf-paid{color:var(--cf-success)!important}.cf-toinvoice{color:var(--cf-accent)!important}
+:root{--cf-accent:#c8a24c;--cf-money:#f4f7fb;--cf-success:#38d98a;--cf-danger:#ef6b6b;--cf-muted:#8ea3ba}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--text)!important}.cf-bad{color:var(--cf-danger)!important}.cf-rowlink{cursor:pointer}.cf-rowlink:hover{background:rgba(255,255,255,.025)}.cf-attn{display:inline-flex;align-items:center;gap:7px}.cf-attn-count{display:inline-flex;width:26px;height:26px;align-items:center;justify-content:center;border:1px solid rgba(200,162,76,.48);border-radius:999px;color:var(--cf-accent);font-weight:800}.cf-clear{color:var(--cf-success);font-weight:700}.cf-review-table td,.cf-review-table th{vertical-align:middle}.cf-review-overdue{color:var(--cf-bad);font-weight:700}.kpi-card .kpi-value{font-size:21px!important;line-height:1.05;letter-spacing:-.015em;color:var(--text)}.kpi-card.kpi-active .kpi-value{color:var(--cf-accent)}.cf-kpi-button{appearance:none;width:100%;text-align:left;font:inherit;cursor:pointer;transition:border-color .15s ease,background .15s ease,transform .15s ease}.cf-kpi-button:hover{border-color:rgba(200,162,76,.46);background:rgba(255,255,255,.025);transform:translateY(-1px)}.cf-kpi-button.is-filtered{border-color:var(--cf-accent);box-shadow:0 0 0 1px rgba(200,162,76,.14) inset}.cf-filter-note{display:flex;align-items:center;gap:10px;margin:4px 0 12px;color:var(--text-dim);font-size:13px}.cf-filter-note button{border:0;background:none;color:var(--cf-accent);cursor:pointer;padding:0;font:inherit}.cf-no-match{display:none;text-align:center;color:var(--text-dim);padding:18px}.cf-project-money{color:var(--text);font-weight:700}.cf-open-money{color:var(--text);font-weight:700}.cf-paid{color:var(--cf-success)!important}.cf-toinvoice{color:var(--cf-accent)!important}
 @media(max-width:900px){.kpi-grid{grid-template-columns:1fr 1fr}.section-row{align-items:flex-start;flex-direction:column}}
 </style>
 <div class="section-row" style="margin-top:0;">
@@ -15,11 +15,11 @@
   </div>
 </div>
 
-<div class="kpi-grid">
-  <div class="kpi-card kpi-active"><div class="kpi-value cf-toinvoice">${{ '{:,.2f}'.format(totals.to_invoice) }}</div><div class="kpi-label">To Invoice</div></div>
-  <div class="kpi-card"><div class="kpi-value">${{ '{:,.2f}'.format(totals.waiting) }}</div><div class="kpi-label">Outstanding A/R</div></div>
-  <div class="kpi-card"><div class="kpi-value {% if totals.overdue %}cf-bad{% endif %}">${{ '{:,.2f}'.format(totals.overdue) }}</div><div class="kpi-label">Overdue</div></div>
-  <div class="kpi-card"><div class="kpi-value cf-paid">${{ '{:,.2f}'.format(totals.paid_month) }}</div><div class="kpi-label">Paid This Month</div></div>
+<div class="kpi-grid" aria-label="CashFlow filters">
+  <button type="button" class="kpi-card kpi-active cf-kpi-button" data-filter="to_invoice"><div class="kpi-value cf-toinvoice">${{ '{:,.2f}'.format(totals.to_invoice) }}</div><div class="kpi-label">To Invoice</div></button>
+  <button type="button" class="kpi-card cf-kpi-button" data-filter="open"><div class="kpi-value">${{ '{:,.2f}'.format(totals.waiting) }}</div><div class="kpi-label">Outstanding A/R</div></button>
+  <button type="button" class="kpi-card cf-kpi-button" data-filter="overdue"><div class="kpi-value {% if totals.overdue %}cf-bad{% endif %}">${{ '{:,.2f}'.format(totals.overdue) }}</div><div class="kpi-label">Overdue</div></button>
+  <button type="button" class="kpi-card cf-kpi-button" data-filter="paid_month"><div class="kpi-value cf-paid">${{ '{:,.2f}'.format(totals.paid_month) }}</div><div class="kpi-label">Paid This Month</div></button>
 </div>
 
 {% if my_reviews %}
@@ -40,15 +40,20 @@
 </div>
 {% endif %}
 
-<div class="card">
-  <div class="section-row" style="margin-top:0;"><div><h2 style="margin-bottom:0">All Projects</h2><p class="sub">One review for every project.</p></div></div>
-  <table>
+<div class="card" id="cashflow-projects">
+  <div class="section-row" style="margin-top:0;"><div><h2 style="margin-bottom:0">All Projects</h2><p class="sub">One review for every project. Click a KPI above to focus the list.</p></div></div>
+  <div class="cf-filter-note" id="cfFilterNote" style="display:none"><span id="cfFilterText"></span><button type="button" id="cfClearFilter">Show all projects</button></div>
+  <table id="cfProjectsTable">
     <tr><th>Project</th><th>Client</th><th>Contract</th><th>Remaining to Bill</th><th>To Invoice</th><th>Open A/R</th><th>Attention</th><th></th></tr>
     {% for p in project_summaries %}
-    <tr class="cf-rowlink" onclick="window.location='{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}'">
+    <tr class="cf-rowlink cf-project-row" data-to-invoice="{{ p.to_invoice or 0 }}" data-open="{{ p.open or 0 }}" data-overdue="{{ p.overdue or 0 }}" data-paid-month="{{ p.paid_month or 0 }}" onclick="window.location='{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}'">
       <td><b>{{ p.name }}</b></td><td>{{ p.client or '—' }}</td><td><span class="cf-project-money">${{ '{:,.2f}'.format(p.budget) }}</span></td><td><span class="cf-project-money">${{ '{:,.2f}'.format(p.remaining) }}</span></td><td><span class="cf-toinvoice" style="font-weight:700">${{ '{:,.2f}'.format(p.to_invoice) }}</span></td><td><span class="cf-open-money">${{ '{:,.2f}'.format(p.open) }}</span></td><td>{% if p.attention %}<span class="cf-attn"><span class="cf-attn-count">{{ p.attention }}</span><span>{{ p.attention }} item{{ '' if p.attention==1 else 's' }}</span></span>{% else %}<span class="cf-clear">✓ Clear</span>{% endif %}</td><td><a href="{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}" onclick="event.stopPropagation()">Open →</a></td>
     </tr>
     {% else %}<tr><td colspan="8"><p class="sub">No CashFlow projects yet.</p></td></tr>{% endfor %}
   </table>
+  <div class="cf-no-match" id="cfNoMatch">No projects match this KPI.</div>
 </div>
+<script>
+(()=>{const cards=[...document.querySelectorAll('.cf-kpi-button')],rows=[...document.querySelectorAll('.cf-project-row')],note=document.getElementById('cfFilterNote'),text=document.getElementById('cfFilterText'),empty=document.getElementById('cfNoMatch'),labels={to_invoice:'Showing projects ready to invoice',open:'Showing projects with outstanding A/R',overdue:'Showing projects with overdue invoices',paid_month:'Showing projects with payments received this month'};function apply(key){let shown=0;rows.forEach(r=>{const attr=key==='paid_month'?'paidMonth':key==='to_invoice'?'toInvoice':key;const v=Number(r.dataset[attr]||0);const on=!key||v>0;r.style.display=on?'':'none';if(on)shown++});cards.forEach(c=>c.classList.toggle('is-filtered',c.dataset.filter===key));note.style.display=key?'flex':'none';text.textContent=key?labels[key]:'';empty.style.display=key&&shown===0?'block':'none';if(key)document.getElementById('cashflow-projects').scrollIntoView({behavior:'smooth',block:'start'})}cards.forEach(c=>c.addEventListener('click',()=>apply(c.dataset.filter)));document.getElementById('cfClearFilter').addEventListener('click',()=>apply(null));})();
+</script>
 {% endblock %}
