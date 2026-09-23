@@ -1,25 +1,54 @@
 {% extends 'base.html' %}{% block title %}CashFlow · BuildIQ{% endblock %}{% block content %}
 <style>
-:root{--money:#54d68a;--warn:#f3b647;--bad:#ff6b6b;--cf-line:#27435f;--cf-panel:#0c2034;--cf-muted:#86a8c9}.cf-shell{max-width:1180px;margin:0 auto;padding:20px 18px 38px}.cf-head{display:flex;justify-content:space-between;gap:18px;align-items:center;margin-bottom:14px}.cf-head h1{margin:2px 0 3px}.cf-head .sub{margin:0}.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0 24px}.kpi{border:1px solid var(--cf-line);background:linear-gradient(180deg,#102238,#0b1b2d);padding:15px 17px;border-radius:11px;min-height:76px;box-sizing:border-box}.kpi span{display:block;color:var(--cf-muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em}.kpi b{display:block;font-size:23px;line-height:1.1;margin-top:7px}.money{color:var(--money)!important}.warn{color:var(--warn)!important}.bad{color:var(--bad)!important}.overview{border:1px solid var(--cf-line);background:linear-gradient(180deg,rgba(14,31,49,.96),rgba(9,24,39,.96));overflow:hidden;border-radius:13px}.project-table{width:100%;table-layout:fixed;border-collapse:collapse}.project-table th{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--cf-muted);text-align:left;padding:11px 14px;border-bottom:1px solid var(--cf-line)}.project-table td{padding:15px 14px;border-bottom:1px solid rgba(39,67,95,.74);vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.project-table tbody tr:last-child td{border-bottom:0}.project-table tbody tr{cursor:pointer;transition:background .15s ease}.project-table tbody tr:hover{background:rgba(255,255,255,.035)}.pname{font-size:15px;font-weight:800;white-space:normal}.attention{display:inline-flex;align-items:center;gap:7px;white-space:normal}.attn-dot{display:inline-flex;min-width:25px;height:25px;align-items:center;justify-content:center;border:1px solid #8d6c2e;color:var(--warn);background:rgba(243,182,71,.07);border-radius:999px;font-weight:700}.clear{color:var(--money)}.empty{padding:36px;text-align:center}.subtle{font-size:12px;color:var(--text-dim)}.section-title{display:flex;align-items:end;justify-content:space-between;margin:3px 0 12px}.section-title h2{margin:0;font-size:24px}.review-box{border:1px solid var(--cf-line);background:linear-gradient(180deg,#102238,#0c1d30);padding:16px 18px;margin:0 0 18px;border-radius:12px}.review-row{display:grid;grid-template-columns:1.3fr 1fr .8fr .8fr auto;gap:12px;padding:11px 0;border-top:1px solid var(--cf-line);align-items:center}.review-row:first-of-type{border-top:0}.review-overdue{color:var(--bad)}.advanced{margin-top:16px}.advanced summary{cursor:pointer;color:var(--text-dim);font-size:13px}@media(max-width:850px){.kpis{grid-template-columns:1fr 1fr}.cf-head{align-items:start;flex-direction:column}.review-row{grid-template-columns:1fr}.project-table{min-width:800px}.overview{overflow-x:auto}}
+:root{--cf-money:#54d68a;--cf-warn:#f3b647;--cf-bad:#ff6b6b;--cf-cyan:#49c6e5}.cf-money{color:var(--cf-money)!important}.cf-warn{color:var(--cf-warn)!important}.cf-bad{color:var(--cf-bad)!important}.cf-rowlink{cursor:pointer}.cf-rowlink:hover{background:rgba(255,255,255,.025)}.cf-attn{display:inline-flex;align-items:center;gap:7px}.cf-attn-count{display:inline-flex;width:26px;height:26px;align-items:center;justify-content:center;border:1px solid rgba(243,182,71,.55);border-radius:999px;color:var(--cf-warn);font-weight:800}.cf-clear{color:var(--cf-money);font-weight:700}.cf-review-table td,.cf-review-table th{vertical-align:middle}.cf-review-overdue{color:var(--cf-bad);font-weight:700}
+@media(max-width:900px){.kpi-grid{grid-template-columns:1fr 1fr}.section-row{align-items:flex-start;flex-direction:column}}
 </style>
-<div class="cf-shell"><div class="cf-head"><div><div class="eyebrow">CASHFLOW · GET PAID</div><h1>CashFlow</h1><p class="sub">What needs to be invoiced, what is waiting on payment, and what has been paid.</p></div>{% if has_cashflow_manage_access %}<a class="btn btn-gold" href="{{ url_for('cashflow_job_new') }}">+ New Project</a>{% endif %}</div>
-{% if my_reviews %}<div class="review-box"><div class="eyebrow">YOUR INTERNAL REVIEWS</div><h2 style="margin:4px 0 2px">Invoices waiting on you</h2><p class="sub" style="margin-top:0">These were assigned to you by the office for review.</p>{% for r in my_reviews %}<div class="review-row"><div><a href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}"><b>Invoice {{ r.invoice_number }}</b></a><div class="subtle">{{ r.project_name or 'Project' }}</div></div><div>${{ '{:,.2f}'.format(r.amount) }}</div><div class="{% if r.review_overdue %}review-overdue{% endif %}">{{ r.review_due_date or 'No due date' }}</div><div>{% if r.review_reminder_at %}<span class="warn">Reminder {{ r.review_reminder_count }}</span>{% else %}<span class="subtle">Assigned</span>{% endif %}</div><div><a class="btn btn-gold" href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}">Review</a></div></div>{% endfor %}</div>{% endif %}
-<div class="kpis">
-  <div class="kpi"><span>To Invoice</span><b class="warn">${{ '{:,.2f}'.format(totals.to_invoice) }}</b><div class="subtle">Ready to bill now</div></div>
-  <div class="kpi"><span>Invoiced / Waiting</span><b>${{ '{:,.2f}'.format(totals.waiting) }}</b><div class="subtle">Sent, not overdue</div></div>
-  <div class="kpi"><span>Overdue</span><b class="bad">${{ '{:,.2f}'.format(totals.overdue) }}</b><div class="subtle">Needs collection attention</div></div>
-  <div class="kpi"><span>Paid This Month</span><b class="money">${{ '{:,.2f}'.format(totals.paid_month) }}</b><div class="subtle">Cash received this month</div></div>
+<div class="section-row" style="margin-top:0;">
+  <div>
+    <span class="rc-eyebrow">CashFlow</span>
+    <h1>CashFlow</h1>
+    <p class="sub">What needs to be invoiced, what is waiting on payment, and what has been paid.</p>
+  </div>
+  <div>
+    <a href="{{ url_for('cashflow_export') }}" class="btn">Export CSV</a>
+    {% if has_cashflow_manage_access %}<a href="{{ url_for('cashflow_job_new') }}" class="btn btn-gold">+ New Project</a>{% endif %}
+  </div>
 </div>
-{% if has_cashflow_manage_access and review_queue %}<div class="review-box"><div class="eyebrow">OFFICE REVIEW QUEUE</div><h2 style="margin:4px 0 2px">Waiting for engineer review</h2><p class="sub" style="margin-top:0">Internal review only — this does not send anything to the client.</p>{% for r in review_queue %}<div class="review-row"><div><a href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}"><b>Invoice {{ r.invoice_number }}</b></a><div class="subtle">{{ r.project_name or 'Project' }}</div></div><div>{{ r.reviewer_name or r.reviewer_email or 'Unassigned' }}</div><div class="{% if r.review_overdue %}review-overdue{% endif %}">{{ r.review_due_date or 'No due date' }}</div><div>{% if r.review_reminder_at %}Reminded {{ r.review_reminder_count }}×{% else %}<span class="subtle">No reminder</span>{% endif %}</div><div><a class="btn" href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}">Open</a></div></div>{% endfor %}</div>{% endif %}
-<div class="section-title"><div><h2>All Projects</h2><p class="sub" style="margin:4px 0 0">One review for every project. Click a row to open it.</p></div></div>
-<div class="overview"><table class="project-table"><thead><tr><th style="width:23%">Project</th><th style="width:15%">Contract</th><th style="width:18%">Remaining to Bill</th><th style="width:16%">To Invoice</th><th style="width:15%">Open A/R</th><th style="width:13%">Attention</th></tr></thead><tbody>
-{% for p in project_summaries %}
-<tr onclick="window.location='{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}'">
-<td><div class="pname">{{ p.name }}</div><div class="subtle">{{ p.client or 'No client' }}</div></td><td><b>${{ '{:,.2f}'.format(p.budget) }}</b></td><td>${{ '{:,.2f}'.format(p.remaining) }}</td>
-<td class="warn"><b>${{ '{:,.2f}'.format(p.to_invoice) }}</b></td><td><b>${{ '{:,.2f}'.format(p.open) }}</b></td>
-<td>{% if p.attention %}<span class="attention"><span class="attn-dot">{{ p.attention }}</span><span>{{ p.attention }} item{{ '' if p.attention==1 else 's' }}</span></span>{% else %}<span class="clear">✓ Clear</span>{% endif %}</td>
-</tr>
-{% else %}<tr><td colspan="6" class="empty"><b>No CashFlow projects yet.</b><div class="sub" style="margin-top:6px">Create a project, enter the contract amount and its actual payment milestones.</div></td></tr>{% endfor %}
-</tbody></table></div>
-<details class="advanced"><summary>Advanced</summary><div class="card" style="margin-top:10px"><a class="btn" href="{{ url_for('cashflow_export') }}">Export CSV</a></div></details></div>
+
+<div class="kpi-grid">
+  <div class="kpi-card kpi-active"><div class="kpi-value cf-warn">${{ '{:,.2f}'.format(totals.to_invoice) }}</div><div class="kpi-label">To Invoice</div></div>
+  <div class="kpi-card"><div class="kpi-value" style="color:var(--cf-cyan)">${{ '{:,.2f}'.format(totals.waiting) }}</div><div class="kpi-label">Invoiced / Waiting</div></div>
+  <div class="kpi-card"><div class="kpi-value cf-bad">${{ '{:,.2f}'.format(totals.overdue) }}</div><div class="kpi-label">Overdue</div></div>
+  <div class="kpi-card"><div class="kpi-value cf-money">${{ '{:,.2f}'.format(totals.paid_month) }}</div><div class="kpi-label">Paid This Month</div></div>
+</div>
+
+{% if my_reviews %}
+<div class="card">
+  <div class="section-row" style="margin-top:0;"><div><span class="rc-eyebrow">Your Internal Reviews</span><h2 style="margin-bottom:0">Invoices Waiting on You</h2><p class="sub">Assigned by the office for your review.</p></div></div>
+  <table class="cf-review-table"><tr><th>Invoice</th><th>Project</th><th>Amount</th><th>Review By</th><th>Status</th><th></th></tr>
+    {% for r in my_reviews %}<tr><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}">{{ r.invoice_number }}</a></td><td>{{ r.project_name or 'Project' }}</td><td>${{ '{:,.2f}'.format(r.amount) }}</td><td class="{% if r.review_overdue %}cf-review-overdue{% endif %}">{{ r.review_due_date or '—' }}</td><td>{% if r.review_reminder_at %}<span class="badge">Reminder {{ r.review_reminder_count }}</span>{% else %}<span class="badge">Assigned</span>{% endif %}</td><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}">Review →</a></td></tr>{% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if has_cashflow_manage_access and review_queue %}
+<div class="card">
+  <div class="section-row" style="margin-top:0;"><div><span class="rc-eyebrow">Office Review Queue</span><h2 style="margin-bottom:0">Waiting for Engineer Review</h2><p class="sub">Internal review only — nothing is sent to the client.</p></div></div>
+  <table class="cf-review-table"><tr><th>Invoice</th><th>Project</th><th>Reviewer</th><th>Review By</th><th>Reminder</th><th></th></tr>
+    {% for r in review_queue %}<tr><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}">{{ r.invoice_number }}</a></td><td>{{ r.project_name or 'Project' }}</td><td>{{ r.reviewer_name or r.reviewer_email or 'Unassigned' }}</td><td class="{% if r.review_overdue %}cf-review-overdue{% endif %}">{{ r.review_due_date or '—' }}</td><td>{% if r.review_reminder_at %}{{ r.review_reminder_count }}×{% else %}—{% endif %}</td><td><a href="{{ url_for('cashflow_invoice_detail',invoice_id=r.id) }}">Open →</a></td></tr>{% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="section-row" style="margin-top:0;"><div><h2 style="margin-bottom:0">All Projects</h2><p class="sub">One review for every project.</p></div></div>
+  <table>
+    <tr><th>Project</th><th>Client</th><th>Contract</th><th>Remaining to Bill</th><th>To Invoice</th><th>Open A/R</th><th>Attention</th><th></th></tr>
+    {% for p in project_summaries %}
+    <tr class="cf-rowlink" onclick="window.location='{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}'">
+      <td><b>{{ p.name }}</b></td><td>{{ p.client or '—' }}</td><td>${{ '{:,.2f}'.format(p.budget) }}</td><td>${{ '{:,.2f}'.format(p.remaining) }}</td><td class="cf-warn"><b>${{ '{:,.2f}'.format(p.to_invoice) }}</b></td><td><b>${{ '{:,.2f}'.format(p.open) }}</b></td><td>{% if p.attention %}<span class="cf-attn"><span class="cf-attn-count">{{ p.attention }}</span><span>{{ p.attention }} item{{ '' if p.attention==1 else 's' }}</span></span>{% else %}<span class="cf-clear">✓ Clear</span>{% endif %}</td><td><a href="{{ url_for('cashflow_project_detail',job_id=p.cashflow_job_id) }}" onclick="event.stopPropagation()">Open →</a></td>
+    </tr>
+    {% else %}<tr><td colspan="8"><p class="sub">No CashFlow projects yet.</p></td></tr>{% endfor %}
+  </table>
+</div>
 {% endblock %}
