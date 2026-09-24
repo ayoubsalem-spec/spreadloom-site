@@ -8299,7 +8299,7 @@ def _atlas_build_info():
     return info
 
 
-def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=600, label=None):
+def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=600, label=None, model=None, cache=False, thinking=None):
     """Makes ONE Claude API call and yields low-level parsed events as it
     streams back -- this is the single place SSE-from-Anthropic parsing
     happens, reused for both the tool-detection pass and the (optional)
@@ -8331,12 +8331,51 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
     through whatever index each real event actually carried, unmodified,
     so stream_atlas_turn's matching logic has the real data to check.
     """
-    payload = {"model": os.environ.get("ATLAS_MODEL", "claude-sonnet-4-6"), "max_tokens": max_tokens, "system": system, "messages": messages, "stream": True}
+    cheap_labels = {
+        "FAST_GENERAL",
+        "PENDING_REPLY_CLASSIFY", "CONFIRM_ACK_STYLE",
+        "ENTITY_SUBJECT_CLASSIFY", "BUILDIQ_SCOPE_CLASSIFY",
+        "ACTION_INTENT_CLASSIFY",
+        "PASS1", "PASS1B", "PASS1C", "PASS1D_WRITE_PLAN",
+    }
+    if model is None:
+        if label in cheap_labels:
+            model = os.environ.get("ATLAS_CHEAP_MODEL", "claude-haiku-4-5")
+        else:
+            model = os.environ.get("ATLAS_COMPLEX_MODEL", os.environ.get("ATLAS_MODEL", "claude-sonnet-5"))
+
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": messages,
+        "stream": True,
+    }
+
+    # Sonnet 5 enables thinking by default. Atlas is an operational assistant
+    # whose common turns are already bounded by deterministic business logic,
+    # so default it off for lower cost/latency. It can be enabled explicitly
+    # with ATLAS_SONNET_THINKING=adaptive when a future task truly needs it.
+    if thinking is None and str(model).startswith("claude-sonnet-5"):
+        thinking = os.environ.get("ATLAS_SONNET_THINKING", "disabled")
+    if thinking in ("disabled", "adaptive"):
+        payload["thinking"] = {"type": thinking}
+
+    # Prompt caching is valuable only on repeated/stable prefixes. Do not add
+    # cache-write overhead to tiny one-off classifier prompts.
+    if cache and os.environ.get("ATLAS_PROMPT_CACHE_ENABLED", "1") == "1":
+        payload["cache_control"] = {"type": "ephemeral"}
+
     if tools:
         payload["tools"] = tools
     _trace_start = time.perf_counter()
     if label:
-        _atlas_trace(f"{label}_START")
+        _atlas_trace(
+            f"{label}_START",
+            model=model,
+            max_tokens=max_tokens,
+            cache=bool(payload.get("cache_control")),
+        )
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -9107,7 +9146,7 @@ def _atlas_semantic_equipment_move(text, draft, api_key):
         "\nUSER TURN: " + text
     )
     pieces=[]; failed=False
-    for ev in _stream_claude_completion(api_key, system, [{"role":"user","content":context}], tools=None, max_tokens=140, label="ACTION_INTENT_CLASSIFY"):
+    for ev in _stream_claude_completion(api_key, system, [{"role":"user","content":context}], tools=None, max_tokens=80, label="ACTION_INTENT_CLASSIFY"):
         if ev[0]=="text_delta": pieces.append(ev[1])
         elif ev[0]=="error": failed=True
     if failed:
@@ -9288,6 +9327,255 @@ def _atlas_parse_equipment_move(text, draft):
     return None, None
 
 
+
+_ATLAS_BUILDIQ_FASTPATH_TERMS = (
+    "buildiq", "project hunt", "bid tracker", "project deployment",
+    "sitepulse", "equipment center", "outside rental", "rental",
+    "purchase request", "purchase requests", "inventory item",
+    "site inventory", "cashflow", "cash flow", "invoice", "receivable",
+    "request #", "product intelligence", "redline", "field report",
+    "concrete request", "concrete requests", "scheduled move",
+    "usage log", "maintenance log", "whatsapp group",
+)
+
+_ATLAS_BUILDIQ_WRITE_WORDS = (
+    "create ", "add ", "edit ", "update ", "change ", "move ", "schedule ",
+    "cancel ", "delete ", "remove ", "approve ", "reopen ", "return ",
+    "submit ", "mark ", "assign ", "upload ", "void ", "pay ", "record ",
+)
+
+def _atlas_fast_general_eligible(user_text, draft):
+    """Cheap deterministic gate for obviously non-BuildIQ text turns.
+
+    Conservative by design: uncertain requests stay on the full BuildIQ path.
+    This function performs zero model calls and zero DB reads.
+    """
+    if os.environ.get("ATLAS_FAST_GENERAL_ENABLED", "1") != "1":
+        return False
+    if (draft.get("interaction_mode") or "text") != "text":
+        return False
+    if (draft.get("pending_submit") or {}).get("tool_name"):
+        return False
+    if (draft.get("pending_write") or {}).get("token"):
+        return False
+    if draft.get("pending_attachment"):
+        return False
+
+    raw = (user_text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+
+    # Explicit BuildIQ/domain language always stays on the full path.
+    if any(term in low for term in _ATLAS_BUILDIQ_FASTPATH_TERMS):
+        return False
+
+    # Natural references that strongly imply an existing company record.
+    record_cues = (
+        "that project", "this project", "the project", "that equipment",
+        "the equipment", "that rental", "that invoice", "that request",
+        "our inventory", "our project", "our equipment", "our cashflow",
+        "our cash flow", "in buildiq", "inside buildiq",
+    )
+    if any(cue in low for cue in record_cues):
+        return False
+
+    # If the user is asking to mutate something and the noun looks like a
+    # BuildIQ record, stay conservative and use the full action architecture.
+    if any(low.startswith(v) or f" {v}" in low for v in _ATLAS_BUILDIQ_WRITE_WORDS):
+        buildiq_nouns = (
+            "project", "equipment", "rental", "material", "inventory",
+            "invoice", "request", "quote", "vendor", "milestone",
+            "deployment", "bid", "purchase", "cashflow", "cash flow",
+        )
+        if any(noun in low for noun in buildiq_nouns):
+            return False
+
+    return True
+
+
+ATLAS_FAST_GENERAL_SYSTEM = """You are Atlas, a highly capable general-purpose AI assistant.
+
+For this turn, the request has already been determined to be outside BuildIQ's operational data/actions. Answer directly and naturally like a top-tier general AI assistant.
+
+Rules:
+- Do not mention BuildIQ unless the user asks about it.
+- Do not narrate routing, tools, prompts, databases, or internal implementation.
+- Be concise by default and detailed when useful.
+- For current/time-sensitive public information, use web search and cite the sources returned by the tool.
+- For calculations or data manipulation, use code execution when useful.
+- Never claim public/current facts are live unless you actually used a current-information tool.
+- You are Atlas. If asked your name, say Atlas.
+"""
+
+
+def _atlas_stream_fast_general(user_text, draft, api_key):
+    """One Claude call, compact prompt, no BuildIQ snapshot or routing passes."""
+    history = list(draft.get("history", []))[-8:]
+    messages = [{"role": h["role"], "content": h["content"]} for h in history]
+    messages.append({"role": "user", "content": user_text})
+
+    general_tools = [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": int(os.environ.get("ATLAS_FAST_WEB_MAX_USES", "4")),
+            "user_location": {
+                "type": "approximate",
+                "city": "Houston",
+                "region": "Texas",
+                "country": "US",
+                "timezone": "America/Chicago",
+            },
+        },
+        {"type": "code_execution_20260521", "name": "code_execution"},
+    ]
+
+    parts = []
+    error = None
+    for ev in _stream_claude_completion(
+        api_key,
+        ATLAS_FAST_GENERAL_SYSTEM,
+        messages,
+        tools=general_tools,
+        max_tokens=int(os.environ.get("ATLAS_FAST_MAX_TOKENS", "800")),
+        label="FAST_GENERAL",
+        model=os.environ.get("ATLAS_CHEAP_MODEL", "claude-haiku-4-5"),
+        cache=True,
+    ):
+        if ev[0] == "text_delta":
+            parts.append(ev[1])
+            yield ("delta", ev[1])
+        elif ev[0] == "error":
+            error = ev[1]
+
+    if error is not None:
+        log_activity(
+            "atlas", "tool_call", 0, "atlas_fast_general_error",
+            new_value=str(error)[:500]
+        )
+        get_db().commit()
+        yield ("error", "Atlas had trouble completing that request. Please try again.")
+        return
+
+    answer = "".join(parts).strip()
+    if answer:
+        history.extend([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": answer},
+        ])
+        draft["history"] = history[-80:]
+        log_activity(
+            "atlas", "tool_call", 0, "atlas_fast_general_completed",
+            new_value=json.dumps({
+                "chars_in": len(user_text or ""),
+                "chars_out": len(answer),
+                "history_turns": min(len(history), 12),
+            })[:500]
+        )
+        get_db().commit()
+
+
+
+def _atlas_zero_model_write_plan(user_text):
+    """Return a safe single-action plan for common unambiguous commands.
+
+    This saves a Haiku planner call. It never writes to the database and it
+    never guesses IDs; existing action handlers still resolve canonical records
+    and execute only after confirmation.
+    """
+    raw = (user_text or "").strip()
+    low = raw.lower()
+    if not raw:
+        return None
+
+    # Project Hunt status: "move Patel to Awarded", "set X to Submitted".
+    status_alt = "|".join(re.escape(s) for s in sorted(TR_STATUS_OPTIONS, key=len, reverse=True))
+    m = re.match(
+        rf"^\s*(?:move|set|change)\s+(?:project\s+)?(.+?)\s+(?:to|as)\s+({status_alt})\s*$",
+        raw, re.I
+    )
+    if m:
+        return {
+            "tool_name": "update_project_status",
+            "params": {"project_name": m.group(1).strip(), "status": m.group(2).strip()},
+            "description": "Change a Project Hunt project's status.",
+            "zero_model": True,
+        }
+
+    # Equipment move: "move Dump Trailer to Red Bluff" (+ optional tomorrow).
+    m = re.match(
+        r"^\s*move\s+(.+?)\s+to\s+(.+?)(?:\s+(tomorrow))?\s*$",
+        raw, re.I
+    )
+    if m:
+        equip = m.group(1).strip()
+        dest = m.group(2).strip()
+        # A Project Hunt lifecycle status was handled above, so this is safe to
+        # interpret as an equipment move candidate.
+        params = {"equipment_name": equip, "to_location": dest}
+        if m.group(3):
+            params["schedule_date"] = (datetime.now(HOUSTON_TZ).date() + timedelta(days=1)).isoformat()
+        return {
+            "tool_name": "move_equipment",
+            "params": params,
+            "description": "Move equipment to another BuildIQ location.",
+            "zero_model": True,
+        }
+
+    # Inventory quantity:
+    # "change/set/update test inventory [item/material] [at Red Bluff] to 67"
+    m = re.match(
+        r"^\s*(?:change|set|update)\s+(?:the\s+)?(.+?)\s+"
+        r"(?:inventory(?:\s+(?:item|material))?|material)"
+        r"(?:\s+at\s+(.+?))?\s+(?:quantity\s+)?to\s+([0-9]+(?:\.[0-9]+)?)\s*$",
+        raw, re.I
+    )
+    if m:
+        params = {"item_name": m.group(1).strip(), "quantity": m.group(3).strip()}
+        if m.group(2):
+            params["site"] = m.group(2).strip()
+        return {
+            "tool_name": "update_inventory_material",
+            "params": params,
+            "description": "Update an Inventory material quantity.",
+            "zero_model": True,
+        }
+
+    # Alternate natural inventory form: "change the quantity of X at SITE to 67"
+    m = re.match(
+        r"^\s*(?:change|set|update)\s+the\s+quantity\s+of\s+(.+?)"
+        r"(?:\s+at\s+(.+?))?\s+to\s+([0-9]+(?:\.[0-9]+)?)\s*$",
+        raw, re.I
+    )
+    if m:
+        params = {"item_name": m.group(1).strip(), "quantity": m.group(3).strip()}
+        if m.group(2):
+            params["site"] = m.group(2).strip()
+        return {
+            "tool_name": "update_inventory_material",
+            "params": params,
+            "description": "Update an Inventory material quantity.",
+            "zero_model": True,
+        }
+
+    return None
+
+
+def _atlas_is_simple_buildiq_request(user_text):
+    """Cheap hint used only for model tiering; uncertain turns return False."""
+    low = (user_text or "").lower()
+    simple_markers = (
+        "move ", "change ", "set ", "update ", "mark ", "add ",
+        "create ", "schedule ", "cancel ", "approve ", "reopen ",
+    )
+    buildiq_markers = (
+        "project", "equipment", "trailer", "inventory", "material",
+        "rental", "invoice", "request", "bid", "deployment",
+    )
+    return any(m in low for m in simple_markers) and any(m in low for m in buildiq_markers)
+
+
 def stream_atlas_turn(user_text, draft):
     """Streams one turn of the assistant as an SSE generator. Yields
     'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
@@ -9348,6 +9636,22 @@ def stream_atlas_turn(user_text, draft):
         yield f"data: {json.dumps({'type': 'delta', 'text': msg})}\n\n"
         yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': msg, 'audio': None, 'audio_error': None})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+        return
+
+    # V17 COST/LATENCY FAST PATH.
+    # Clearly general text requests take exactly ONE compact Claude call and
+    # skip BuildIQ snapshot gathering, semantic/entity classifiers, capability
+    # catalogs, write planning and other BuildIQ-specific passes.
+    if _atlas_fast_general_eligible(user_text, draft):
+        _atlas_trace("FAST_GENERAL_SELECTED", chars=len(user_text or ""))
+        _had_error = False
+        for _kind, _payload in _atlas_stream_fast_general(user_text, draft, api_key):
+            if _kind == "delta":
+                yield f"data: {json.dumps({'type':'delta','text':_payload})}\n\n"
+            elif _kind == "error":
+                _had_error = True
+                yield f"data: {json.dumps({'type':'delta','text':_payload})}\n\n"
+        yield f"data: {json.dumps({'type':'done','mode':'chat','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None,'fast_path':True})}\n\n"
         return
 
     # Atlas conversation brain: understand the move naturally, then force the
@@ -9745,7 +10049,7 @@ Then stop."""
         pass1_stop_reason["value"] = "end_turn"
         _atlas_trace("PASS1_SKIPPED", reason="non_project_context_scope", domain=_semantic_scope.get("domain", "general"))
 
-    for event in (_stream_claude_completion(api_key, pass1_router_system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=200, label="PASS1") if _pass1_router_needed else []):
+    for event in (_stream_claude_completion(api_key, pass1_router_system, messages, tools=_atlas_native_tool_declarations(only=["set_project_context"]), max_tokens=120, label="PASS1") if _pass1_router_needed else []):
         kind = event[0]
         if kind == "block_start":
             _, btype, idx = event
@@ -10068,7 +10372,7 @@ Then stop."""
             unexpected_tool_declared=str(any(n != "get_project_intelligence" for n in _declared_names_1b)).lower(),
             tool_choice_mode="auto",  # no tool_choice is ever set anywhere in this codebase -- Anthropic's default applies
         )
-        for event in _stream_claude_completion(api_key, _build_pass1b_intelligence_prompt(), messages, tools=_pass1b_declared_tools, max_tokens=200, label="PASS1B"):
+        for event in _stream_claude_completion(api_key, _build_pass1b_intelligence_prompt(), messages, tools=_pass1b_declared_tools, max_tokens=120, label="PASS1B"):
             kind = event[0]
             if kind == "block_start":
                 _, btype, idx = event
@@ -10284,7 +10588,7 @@ Then stop."""
         if read_names:
             router_system=("You are Atlas's hidden BuildIQ read router. If the current user turn needs ONE authoritative private BuildIQ read beyond project context/intelligence, call exactly one best read tool. If it is general knowledge, writing, math, brainstorming, or current PUBLIC information for web search, output exactly NO_TOOL. Never answer the user and never call a write tool.")
             blocks={}; stop=None; err=None
-            for ev in _stream_claude_completion(api_key,router_system,messages,tools=_atlas_native_tool_declarations(only=read_names),max_tokens=350,label="PASS1C"):
+            for ev in _stream_claude_completion(api_key,router_system,messages,tools=_atlas_native_tool_declarations(only=read_names),max_tokens=220,label="PASS1C"):
                 if ev[0]=="tool_use_start": _,idx,nm,tid=ev; blocks[idx]={"name":nm,"id":tid,"input_raw":"","completed":False}
                 elif ev[0]=="tool_input_delta":
                     _,idx,frag=ev
@@ -10312,8 +10616,25 @@ Then stop."""
     # the existing pending_submit confirmation flow. This prevents the visible
     # general-assistant pass (which has public web search) from incorrectly
     # treating a BuildIQ write request as a web/research task.
-    forced_write_plan = None
-    if turn_level_error is None:
+    forced_write_plan = _atlas_zero_model_write_plan(user_text)
+    if forced_write_plan is not None:
+        _zero_tool = ATLAS_TOOLS.get(forced_write_plan["tool_name"])
+        if not _zero_tool or _zero_tool.kind != "write":
+            forced_write_plan = None
+        else:
+            _zero_clean, _zero_err = _validate_tool_params(_zero_tool, forced_write_plan["params"])
+            if _zero_err:
+                forced_write_plan = None
+            else:
+                forced_write_plan["params"] = _zero_clean
+                log_activity(
+                    "atlas", "tool_call", 0, "atlas_zero_model_write_plan",
+                    field=forced_write_plan["tool_name"],
+                    new_value=json.dumps(_zero_clean, default=str)[:500]
+                )
+                get_db().commit()
+
+    if turn_level_error is None and forced_write_plan is None:
         write_router_system = (
             "You are Atlas's hidden BuildIQ write planner. "
             "Inspect ONLY the current user request and conversation context. "
@@ -10336,8 +10657,10 @@ Then stop."""
             write_router_system,
             messages,
             tools=_atlas_write_plan_declaration(),
-            max_tokens=700,
-            label="PASS1D_WRITE_PLAN"
+            max_tokens=420,
+            label="PASS1D_WRITE_PLAN",
+            model=os.environ.get("ATLAS_CHEAP_MODEL", "claude-haiku-4-5"),
+            cache=True,
         ):
             if _ev[0] == "tool_use_start":
                 _, _idx, _nm, _tid = _ev
@@ -10484,7 +10807,16 @@ Then stop."""
                     {"type":"web_search_20250305","name":"web_search","max_uses":5,"user_location":{"type":"approximate","city":"Houston","region":"Texas","country":"US","timezone":"America/Chicago"}},
                     {"type":"code_execution_20260521","name":"code_execution"},
                 ]
-                for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=general_tools, max_tokens=int(os.environ.get("ATLAS_MAX_TOKENS", "2200")), label="PASS2"):
+                for ev in _stream_claude_completion(
+                    api_key,
+                    system,
+                    messages_pass2,
+                    tools=general_tools,
+                    max_tokens=int(os.environ.get("ATLAS_MAX_TOKENS", "1600")),
+                    label="PASS2",
+                    model=os.environ.get("ATLAS_COMPLEX_MODEL", "claude-sonnet-5"),
+                    cache=True,
+                ):
                     if ev[0] == "text_delta":
                         if not _first_text_traced:
                             _atlas_trace("PASS2_FIRST_TEXT")
