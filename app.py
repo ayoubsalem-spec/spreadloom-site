@@ -7095,7 +7095,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "CURRENT / OUTSIDE INFORMATION: You have live web search available in the visible answer pass. Use it when the answer depends on current prices, suppliers, news, laws, product availability, public websites, recent technical documentation, or anything else that may have changed. When you use web search, identify the sources and include useful source URLs. Never pretend stale model knowledge is current.\n"
         "GENERAL COMPUTATION: You also have a sandboxed code-execution tool in the visible answer pass for calculations, data transformations, and computational reasoning when useful. Never pretend a calculation ran if the tool did not run successfully.\n"
         "ATTACHMENTS: A user may attach a PDF, image, or text file to a message. If attachment content is supplied in the message, analyze it directly. If the user asks to attach/upload that file to a BuildIQ record, the controlled UI action bridge may consume the real pending attachment for an allowlisted file-upload route after confirmation.\n"
-        "BUILDIQ FULL-PARITY BRIDGE: Dedicated Atlas tools are preferred. If a legitimate BuildIQ UI operation has no dedicated Atlas tool, use the controlled invoke_buildiq_ui_action fallback described below. It is a fixed allowlist of real BuildIQ UI routes, runs as the authenticated user through the same route/business logic and permission checks, and always requires confirmation. It is not arbitrary HTTP and not unrestricted database access.\n"        "RUNTIME TRUTH: You are running INSIDE the authenticated BuildIQ backend session. Never say that you lack a live backend connection, that the action bridge is not connected, or that the user must go click the UI when a registered Atlas write capability exists. For a BuildIQ write request, use the registered controlled action path. Public web search is NEVER a substitute for a BuildIQ write.\n"
+        "BUILDIQ FULL-PARITY BRIDGE: Dedicated Atlas tools are preferred. If a legitimate BuildIQ UI operation has no dedicated Atlas tool, use the controlled invoke_buildiq_ui_action fallback described below. It is a fixed allowlist of real BuildIQ UI routes, runs as the authenticated user through the same route/business logic and permission checks, and always requires confirmation. It is not arbitrary HTTP and not unrestricted database access.\n"        "RUNTIME TRUTH: You are running INSIDE the authenticated BuildIQ backend session. Never say that you lack a live backend connection, that the action bridge is not connected, or that the user must go click the UI when a registered Atlas write capability exists. For a BuildIQ write request, use the registered controlled action path. Public web search is NEVER a substitute for a BuildIQ write. A green/success receipt is valid only after the server executes AND verifies the authoritative post-write state; conversation text, prior assistant messages, redirects, and success-sounding prose are never proof.\n"
         "You can also help someone submit a new concrete request by asking for whatever's still missing, one or two things at a time -- never "
         "more than that in one turn. A concrete request has these fields:\n"
         f"{CONCRETE_REQUEST_FIELDS}\n\n"
@@ -7923,6 +7923,97 @@ register_tool(
 )
 
 
+
+
+def _atlas_human_action_label(tool_name, params):
+    """Employee-facing action label. Never expose internal route/bridge wording."""
+    params = dict(params or {})
+    if tool_name != "invoke_buildiq_ui_action":
+        tool = ATLAS_TOOLS.get(tool_name)
+        return (tool.description if tool else tool_name.replace("_", " ")).strip().rstrip(".")
+    endpoint = str(params.get("endpoint") or "").strip()
+    labels = {
+        "tracker_edit_project": "Edit a Project Hunt project",
+        "tracker_update_project": "Update a Project Hunt project",
+        "tracker_new_project": "Create a Project Hunt project",
+        "tracker_new_quote": "Add a vendor/trade quote to a Project Hunt project",
+        "tracker_edit_quote": "Edit a Project Hunt quote",
+        "inventory_new_material": "Add an Inventory material",
+        "inventory_delete_material": "Delete an Inventory material",
+        "sitepulse_edit_asset_details": "Edit Equipment Center equipment",
+        "sitepulse_update_asset": "Update Equipment Center equipment",
+        "sitepulse_quick_status": "Change equipment status",
+        "cashflow_job_edit": "Edit a CashFlow project",
+        "cashflow_invoice_edit": "Edit a CashFlow invoice",
+        "project_deployment_edit": "Edit a Project Deployment checklist",
+    }
+    return labels.get(endpoint, "Perform the requested BuildIQ update")
+
+
+def _atlas_proposal_details(tool_name, params):
+    """Return sanitized employee-facing proposal details.
+
+    Generic bridge JSON is unpacked here so endpoint/path/form implementation
+    fields never leak into Atlas chat.
+    """
+    params = dict(params or {})
+    if tool_name == "invoke_buildiq_ui_action":
+        out=[]
+        try:
+            path=json.loads(params.get("path_values_json") or "{}")
+            if not isinstance(path,dict): path={}
+        except Exception: path={}
+        try:
+            form=json.loads(params.get("form_data_json") or "{}")
+            if not isinstance(form,dict): form={}
+        except Exception: form={}
+        for k,v in form.items():
+            if v not in (None, ""):
+                out.append((str(k).replace("_"," ").title(), v))
+        # Do not expose numeric canonical IDs unless no human detail exists.
+        if not out:
+            for k,v in path.items():
+                if v not in (None, "") and not str(k).endswith("_id"):
+                    out.append((str(k).replace("_"," ").title(), v))
+        return out
+    out=[]
+    for k,v in params.items():
+        if v not in (None, "") and k not in {"project_id","asset_id","request_id","invoice_id","job_id","material_id"}:
+            out.append((str(k).replace("_"," ").title(), v))
+    return out
+
+
+def _atlas_prepare_ui_bridge_params(params, draft):
+    """Fill canonical path values from server-owned context when safe.
+
+    Never guesses. If the endpoint needs project_id and current canonical
+    project context is established, reuse that exact id. Other ids must be
+    explicitly supplied by the planner/action context and therefore fail
+    closed if absent.
+    """
+    params=dict(params or {})
+    if params.get("endpoint") is None:
+        return params
+    endpoint=str(params.get("endpoint"))
+    cap=ATLAS_UI_CAPABILITIES.get(endpoint) or {}
+    try:
+        path=json.loads(params.get("path_values_json") or "{}")
+        if not isinstance(path,dict): path={}
+    except Exception:
+        path={}
+    needed=list(cap.get("path_vars") or [])
+    ctx=dict((draft or {}).get("project_context") or {})
+    ac=dict((draft or {}).get("active_context") or {})
+    if "project_id" in needed and not path.get("project_id"):
+        pid=ctx.get("project_id") or (ac.get("project_id") if ac.get("entity_type") == "project" else None)
+        if pid:
+            exists=get_db().execute("SELECT 1 FROM tracker_projects WHERE id=?",(pid,)).fetchone()
+            if exists:
+                path["project_id"]=pid
+    params["path_values_json"]=json.dumps(path,separators=(",",":"))
+    if "form_data_json" not in params or not str(params.get("form_data_json") or "").strip():
+        params["form_data_json"]="{}"
+    return params
 
 
 def _atlas_write_plan_declaration():
@@ -10277,6 +10368,8 @@ Then stop."""
 
             _plan_tool = ATLAS_TOOLS.get(_plan_tool_name)
             if _plan_tool and _plan_tool.kind == "write" and isinstance(_plan_params, dict):
+                if _plan_tool_name == "invoke_buildiq_ui_action":
+                    _plan_params = _atlas_prepare_ui_bridge_params(_plan_params, draft)
                 _clean_plan_params, _plan_param_error = _validate_tool_params(_plan_tool, _plan_params)
                 if not _plan_param_error:
                     forced_write_plan = {
@@ -10323,29 +10416,36 @@ Then stop."""
         # authoritative for the actual write.
         if forced_write_plan is not None:
             _fp_tool = forced_write_plan["tool_name"]
-            _fp_params = forced_write_plan["params"]
-            _fp_desc = forced_write_plan["description"]
-            _lines = ["I can do that in BuildIQ.", "", f"**Proposed action:** {_fp_desc}"]
-            if _fp_params:
+            _fp_params = dict(forced_write_plan["params"])
+            _fp_label = _atlas_human_action_label(_fp_tool, _fp_params)
+            _lines = [f"**Proposed action:** {_fp_label}"]
+            _details = _atlas_proposal_details(_fp_tool, _fp_params)
+            if _details:
                 _lines += ["", "**Details:**"]
-                for _k, _v in _fp_params.items():
-                    if _v not in (None, ""):
-                        _label = str(_k).replace("_", " ").title()
-                        _lines.append(f"- **{_label}:** {_v}")
+                for _label, _value in _details:
+                    _lines.append(f"- **{_label}:** {_value}")
             _lines += ["", "Good to go?"]
             _proposal = "\n".join(_lines)
-            _state_payload = {
-                "mode": "buildiq_action",
-                "fields": {},
-                "tool": _fp_tool,
-                "params": _fp_params,
-                "action": "submit",
+            _proposal_hash = hashlib.sha256(json.dumps({"tool":_fp_tool,"params":_fp_params},sort_keys=True,default=str).encode("utf-8")).hexdigest()
+            # Store the exact proposal NOW, server-side, then return. This makes
+            # the next natural "yes" the one and only confirmation. We do not
+            # send the proposal through the legacy hidden-state parser, which was
+            # the source of the double-confirmation loop.
+            draft["pending_submit"]={
+                "fields_hash":_proposal_hash,
+                "tool_name":_fp_tool,
+                "params":_fp_params,
+                "issued_at":time.time(),
+                "action_context":dict((draft.get("active_context") or {})),
             }
-            raw_text = _proposal + "\n<state>" + json.dumps(_state_payload, default=str) + "</state>"
-            visible_sent = _proposal
-            tts_buffer += _proposal
+            _hist=list(draft.get("history",[]))
+            _hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":_proposal}])
+            draft["history"]=_hist[-80:]
             yield f"data: {json.dumps({'type':'delta','text':_proposal})}\n\n"
-            _submit_ready_sentences()
+            yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+            tts_executor.shutdown(wait=False,cancel_futures=True)
+            draft["project_context"]=project_context
+            return
         else:
             # PASS 2 -- the real, ALWAYS-live-streamed visible response.
             # Deliberately omits `tools` entirely on every turn, tool-using
@@ -11545,16 +11645,115 @@ def _tool_read_buildiq_ui_page(user, endpoint, path_values_json=None, query_json
     if not result.get("success"): raise ToolWriteRejected("ui_read_failed")
     return result
 
+def _atlas_external_data_version():
+    """Observe durable SQLite commits from a separate connection."""
+    conn=None
+    try:
+        conn=sqlite3.connect(DB_PATH, timeout=3)
+        return int(conn.execute("PRAGMA data_version").fetchone()[0])
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _atlas_verify_ui_action_exact(endpoint, path_values, form_data):
+    """Exact post-write checks for high-value edit/delete/create UI routes.
+
+    Returns True/False when this verifier understands the endpoint, otherwise
+    None. Generic fallback then still requires a durable DB commit and never
+    fabricates exact field verification.
+    """
+    db=get_db(); path_values=path_values or {}; form_data=form_data or {}
+    def norm(v): return "" if v is None else str(v).strip()
+    if endpoint in ("tracker_edit_project","tracker_update_project"):
+        pid=path_values.get("project_id")
+        row=db.execute("SELECT * FROM tracker_projects WHERE id=?",(pid,)).fetchone() if pid else None
+        if not row: return False
+        for k,v in form_data.items():
+            if k in row.keys() and norm(row[k]) != norm(v):
+                # numeric formatting may differ (100 vs 100.0)
+                try:
+                    if float(row[k]) == float(v): continue
+                except Exception: pass
+                return False
+        return True
+    if endpoint == "tracker_delete_project":
+        pid=path_values.get("project_id")
+        return bool(pid) and db.execute("SELECT 1 FROM tracker_projects WHERE id=?",(pid,)).fetchone() is None
+    if endpoint == "inventory_delete_material":
+        mid=path_values.get("material_id")
+        return bool(mid) and db.execute("SELECT 1 FROM inventory_materials WHERE id=?",(mid,)).fetchone() is None
+    if endpoint == "inventory_new_material":
+        name=norm(form_data.get("item_name")); site=norm(form_data.get("site"))
+        if not name or not site: return False
+        row=db.execute("SELECT * FROM inventory_materials WHERE lower(item_name)=lower(?) AND lower(site)=lower(?) ORDER BY id DESC LIMIT 1",(name,site)).fetchone()
+        if not row: return False
+        for k in ("quantity","unit","shelf_location","notes"):
+            if k in form_data and norm(row[k]) != norm(form_data.get(k)): return False
+        return True
+    if endpoint == "sitepulse_edit_asset_details":
+        aid=path_values.get("asset_id"); row=db.execute("SELECT * FROM sitepulse_assets WHERE id=?",(aid,)).fetchone() if aid else None
+        if not row: return False
+        for k,v in form_data.items():
+            if k in row.keys() and norm(row[k]) != norm(v):
+                try:
+                    if float(row[k]) == float(v): continue
+                except Exception: pass
+                return False
+        return True
+    if endpoint in ("sitepulse_quick_status","sitepulse_update_asset"):
+        aid=path_values.get("asset_id"); row=db.execute("SELECT * FROM sitepulse_assets WHERE id=?",(aid,)).fetchone() if aid else None
+        if not row: return False
+        for k in ("status","location","hours_mileage"):
+            if k in form_data and k in row.keys() and norm(row[k]) != norm(form_data.get(k)): return False
+        return True
+    if endpoint == "cashflow_job_edit":
+        jid=path_values.get("job_id"); row=db.execute("SELECT * FROM finance_jobs WHERE id=?",(jid,)).fetchone() if jid else None
+        if not row: return False
+        for k,v in form_data.items():
+            if k in row.keys() and norm(row[k]) != norm(v):
+                try:
+                    if float(row[k]) == float(v): continue
+                except Exception: pass
+                return False
+        return True
+    if endpoint == "cashflow_invoice_edit":
+        iid=path_values.get("invoice_id"); row=db.execute("SELECT * FROM finance_invoices WHERE id=?",(iid,)).fetchone() if iid else None
+        if not row: return False
+        for k,v in form_data.items():
+            if k in row.keys() and norm(row[k]) != norm(v):
+                try:
+                    if float(row[k]) == float(v): continue
+                except Exception: pass
+                return False
+        return True
+    return None
+
+
 def _tool_invoke_buildiq_ui_action(user, endpoint, path_values_json=None, form_data_json=None):
-    result=_atlas_ui_invoke(user,endpoint,"POST",path_values=_atlas_parse_json_object(path_values_json,"path_values_json"),form_data=_atlas_parse_json_object(form_data_json,"form_data_json"))
+    path_values=_atlas_parse_json_object(path_values_json,"path_values_json")
+    form_data=_atlas_parse_json_object(form_data_json,"form_data_json")
+    before_ver=_atlas_external_data_version()
+    result=_atlas_ui_invoke(user,endpoint,"POST",path_values=path_values,form_data=form_data)
+    after_ver=_atlas_external_data_version()
     if not result.get("success"):
         msgs=" | ".join(x.get("message","") for x in result.get("flashes",[]) if x.get("message")); raise ToolWriteRejected("ui_action_failed"+(":"+msgs[:350] if msgs else ""))
-    msgs=[x.get("message") for x in result.get("flashes",[]) if x.get("message")]; receipt="✓ "+msgs[-1] if msgs else "✓ BuildIQ action completed"
-    return _atlas_catalog_ok(receipt,entity_type="ui_action",endpoint=endpoint,result=result)
+    exact=_atlas_verify_ui_action_exact(endpoint,path_values,form_data)
+    durable_changed=(before_ver is not None and after_ver is not None and before_ver != after_ver)
+    if exact is False:
+        raise ToolWriteRejected("ui_action_not_verified")
+    if exact is None and not durable_changed:
+        # A redirect/flash alone is never proof of a persisted BuildIQ mutation.
+        raise ToolWriteRejected("ui_action_not_verified")
+    msgs=[x.get("message") for x in result.get("flashes",[]) if x.get("message")]
+    receipt="✓ "+msgs[-1] if msgs else "✓ BuildIQ action verified"
+    return _atlas_catalog_ok(receipt,entity_type="ui_action",endpoint=endpoint,result=result,verification="exact" if exact is True else "durable_commit")
 
 register_tool(name="get_buildiq_ui_capabilities",description="Inspect metadata for allowlisted BuildIQ UI capabilities. Filter by query and/or method. Does not execute anything.",parameters={"query":{"type":"string"},"method":{"type":"string","enum":["GET","POST"]}},permission="module:atlas:view",atlas_permission="atlas:view_business_data",kind="read",handler=_tool_get_buildiq_ui_capabilities,confirm=False)
 register_tool(name="read_buildiq_ui_page",description="Read visible text from one allowlisted BuildIQ GET page as the authenticated user through the real UI route and permission checks. path_values_json/query_json are JSON objects.",parameters={"endpoint":{"type":"string","required":True,"enum":sorted([k for k,v in ATLAS_UI_CAPABILITIES.items() if "GET" in v.get("methods",[])])},"path_values_json":{"type":"string"},"query_json":{"type":"string"}},permission="module:atlas:view",atlas_permission="atlas:view_business_data",kind="read",handler=_tool_read_buildiq_ui_page,confirm=False)
-register_tool(name="invoke_buildiq_ui_action",description="Fallback full-parity bridge for an allowlisted BuildIQ UI POST operation when no dedicated Atlas write tool exists. Runs the real Flask route/business logic as the authenticated user. endpoint must be allowlisted; path_values_json/form_data_json are JSON objects. Always confirmation-gated. File-requiring routes fail closed without a real file.",parameters={"endpoint":{"type":"string","required":True,"enum":sorted([k for k,v in ATLAS_UI_CAPABILITIES.items() if "POST" in v.get("methods",[])])},"path_values_json":{"type":"string"},"form_data_json":{"type":"string"}},permission="module:atlas:view",atlas_permission="module:atlas:view",kind="write",handler=_tool_invoke_buildiq_ui_action,confirm=True)
+register_tool(name="invoke_buildiq_ui_action",description="Controlled fallback for an allowlisted BuildIQ UI POST operation when no dedicated Atlas write tool exists. Runs the real BuildIQ route as the authenticated user. path_values_json and form_data_json must be JSON objects. Always confirmation-gated. File-requiring routes fail closed without a real file.",parameters={"endpoint":{"type":"string","required":True,"enum":sorted([k for k,v in ATLAS_UI_CAPABILITIES.items() if "POST" in v.get("methods",[])])},"path_values_json":{"type":"string","required":True},"form_data_json":{"type":"string","required":True}},permission="module:atlas:view",atlas_permission="module:atlas:view",kind="write",handler=_tool_invoke_buildiq_ui_action,confirm=True)
 
 # ---------------------------------------------------------------------------
 # ATLAS V11.1 ACTION CATALOG
@@ -11585,6 +11784,7 @@ _ATLAS_ACTION_CATALOG_SUMMARY = [
     ("schedule_rental_exchange", "Rentals: schedule exchange"),
     ("complete_rental_exchange", "Rentals: complete exchange/replacement received"),
     ("create_project_hunt_project", "Project Hunt: create project"),
+    ("edit_project_hunt_project", "Project Hunt: edit/rename an existing project"),
     ("create_project_quote", "Project Hunt: create quote/vendor bid"),
     ("update_project_quote", "Project Hunt: update quote status/amount"),
     ("create_project_document", "Project Hunt: create document/checklist record"),
@@ -11597,6 +11797,7 @@ _ATLAS_ACTION_CATALOG_SUMMARY = [
     ("update_deployment_status", "Project Deployment: change deployment status"),
     ("reopen_project_deployment", "Project Deployment: reopen deployment"),
     ("create_material", "Site Inventory: create material record"),
+    ("update_inventory_material", "Site Inventory: edit quantity/unit/location/notes/name/site"),
     ("create_purchase_request", "Purchase Requests: create request with line items"),
     ("update_purchase_request_status", "Purchase Requests: change lifecycle status"),
     ("place_purchase_order", "Purchase Requests: place order / schedule delivery"),
@@ -11782,6 +11983,42 @@ def _cat_create_project(user,name,client=None,address=None,bid_due_date=None,est
     return _atlas_catalog_ok(f"✓ Project Hunt project created: {n}",id=cur.lastrowid,project_id=cur.lastrowid,entity_type="project",name=n)
 _reg_catalog("create_project_hunt_project","Create a Project Hunt project.",{"name":{"type":"string","required":True},"client":{"type":"string"},"address":{"type":"string"},"bid_due_date":{"type":"string"},"estimated_value":{"type":"string"},"status":{"type":"string","enum":TR_STATUS_OPTIONS},"assigned_to":{"type":"string"},"notes":{"type":"string"}},"action:project_hunt:manage",_cat_create_project)
 
+
+def _cat_edit_project(user,project_name=None,project_id=None,name=None,client=None,address=None,bid_due_date=None,estimated_value=None,status=None,assigned_to=None,notes=None):
+    db=get_db(); p=_atlas_resolve_project_write(project_name,project_id)
+    changes={}
+    supplied={"name":name,"client":client,"address":address,"bid_due_date":bid_due_date,"estimated_value":estimated_value,"status":status,"assigned_to":assigned_to,"notes":notes}
+    for k,v in supplied.items():
+        if v is not None:
+            changes[k]=v
+    if not changes: raise ToolWriteRejected("project_changes_required")
+    if "name" in changes:
+        changes["name"]=str(changes["name"] or "").strip()
+        if not changes["name"]: raise ToolWriteRejected("project_name_required")
+    if "status" in changes and changes["status"] not in TR_STATUS_OPTIONS:
+        raise ToolWriteRejected("invalid_project_status")
+    if "estimated_value" in changes:
+        changes["estimated_value"]=tr_format_currency(changes["estimated_value"] or "")
+    cols=[]; vals=[]
+    for k,v in changes.items(): cols.append(f"{k}=?"); vals.append(v)
+    vals.extend([datetime.utcnow().isoformat(),p["id"]])
+    db.execute("UPDATE tracker_projects SET "+",".join(cols)+",updated_at=? WHERE id=?",vals)
+    for k,v in changes.items():
+        if str(p[k] or "") != str(v or ""):
+            log_activity("tracker","project",p["id"],"updated",asset_id=p["id"],field=k,old_value=p[k],new_value=v)
+    db.commit()
+    row=db.execute("SELECT * FROM tracker_projects WHERE id=?",(p["id"],)).fetchone()
+    if not row: raise ToolWriteRejected("project_edit_not_verified")
+    for k,v in changes.items():
+        if str(row[k] or "").strip()!=str(v or "").strip():
+            try:
+                if float(row[k])==float(v): continue
+            except Exception: pass
+            raise ToolWriteRejected("project_edit_not_verified")
+    changed=", ".join(k.replace("_"," ") for k in changes)
+    return _atlas_catalog_ok(f"✓ Project Hunt project updated: {row['name']} ({changed})",id=row["id"],project_id=row["id"],entity_type="project",name=row["name"])
+_reg_catalog("edit_project_hunt_project","Edit an existing Project Hunt project, including renaming it.",{"project_name":{"type":"string"},"project_id":{"type":"integer"},"name":{"type":"string"},"client":{"type":"string"},"address":{"type":"string"},"bid_due_date":{"type":"string"},"estimated_value":{"type":"string"},"status":{"type":"string","enum":TR_STATUS_OPTIONS},"assigned_to":{"type":"string"},"notes":{"type":"string"}},"action:project_hunt:manage",_cat_edit_project)
+
 def _cat_create_quote(user,project_name=None,project_id=None,trade=None,vendor_name=None,vendor_contact=None,vendor_email=None,vendor_phone=None,rfq_sent_date=None,status=None,is_submit_blocking=None,notes=None):
     db=get_db(); p=_atlas_resolve_project_write(project_name,project_id); tr=str(trade or "").strip();
     if not tr: raise ToolWriteRejected("trade_required")
@@ -11868,6 +12105,37 @@ _reg_catalog("reopen_project_deployment","Reopen a Project Deployment.",{"projec
 def _cat_create_material(user,item_name,site,quantity=None,unit=None,shelf_location=None,notes=None):
     db=get_db(); now=datetime.utcnow().isoformat(); cur=db.execute("INSERT INTO inventory_materials(item_name,site,quantity,unit,shelf_location,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",(item_name,site,quantity or "",unit or "",shelf_location or "",notes or "",now,now)); log_activity("inventory","material",cur.lastrowid,"created",new_value=item_name); db.commit(); return _atlas_catalog_ok(f"✓ Material added: {item_name} — {site}",id=cur.lastrowid)
 _reg_catalog("create_material","Create a Site Inventory material record.",{"item_name":{"type":"string","required":True},"site":{"type":"string","required":True},"quantity":{"type":"string"},"unit":{"type":"string"},"shelf_location":{"type":"string"},"notes":{"type":"string"}},("action:sitepulse:manage_inventory","action:sitepulse:manage"),_cat_create_material)
+
+
+def _cat_update_material(user,item_name,site=None,quantity=None,unit=None,shelf_location=None,notes=None,new_item_name=None,new_site=None):
+    db=get_db(); name=str(item_name or "").strip()
+    if not name: raise ToolWriteRejected("item_name_required")
+    if site:
+        rows=db.execute("SELECT * FROM inventory_materials WHERE lower(item_name)=lower(?) AND lower(site)=lower(?) ORDER BY id",(name,str(site).strip())).fetchall()
+    else:
+        rows=db.execute("SELECT * FROM inventory_materials WHERE lower(item_name)=lower(?) ORDER BY id",(name,)).fetchall()
+    if not rows: raise ToolWriteRejected("inventory_material_not_found")
+    if len(rows)>1: raise ToolWriteRejected("inventory_material_ambiguous")
+    old=rows[0]
+    changes={}
+    supplied={"quantity":quantity,"unit":unit,"shelf_location":shelf_location,"notes":notes,"item_name":new_item_name,"site":new_site}
+    for k,v in supplied.items():
+        if v is not None: changes[k]=str(v).strip()
+    if not changes: raise ToolWriteRejected("inventory_changes_required")
+    if "item_name" in changes and not changes["item_name"]: raise ToolWriteRejected("item_name_required")
+    if "site" in changes and not changes["site"]: raise ToolWriteRejected("site_required")
+    cols=[]; vals=[]
+    for k,v in changes.items(): cols.append(f"{k}=?"); vals.append(v)
+    vals.extend([datetime.utcnow().isoformat(),old["id"]])
+    db.execute("UPDATE inventory_materials SET "+",".join(cols)+",updated_at=? WHERE id=?",vals)
+    log_activity("inventory","material",old["id"],"edited",old_value=" | ".join(str(old[k] or "") for k in ("item_name","site","quantity","unit","shelf_location","notes")),new_value=str(changes))
+    db.commit()
+    row=db.execute("SELECT * FROM inventory_materials WHERE id=?",(old["id"],)).fetchone()
+    if not row: raise ToolWriteRejected("inventory_update_not_verified")
+    for k,v in changes.items():
+        if str(row[k] or "").strip()!=str(v or "").strip(): raise ToolWriteRejected("inventory_update_not_verified")
+    return _atlas_catalog_ok(f"✓ Inventory item updated: {row['item_name']} at {row['site']}",id=row["id"],entity_type="inventory_material",name=row["item_name"],site=row["site"],quantity=row["quantity"])
+_reg_catalog("update_inventory_material","Edit an existing Inventory material quantity, unit, location, notes, item name, or site.",{"item_name":{"type":"string","required":True},"site":{"type":"string"},"quantity":{"type":"string"},"unit":{"type":"string"},"shelf_location":{"type":"string"},"notes":{"type":"string"},"new_item_name":{"type":"string"},"new_site":{"type":"string"}},("action:sitepulse:manage_inventory","action:sitepulse:manage"),_cat_update_material)
 
 def _cat_create_purchase(user,project_name=None,project_id=None,job_name=None,location_description=None,needed_on=None,source_of_supply=None,items_json=None):
     db=get_db(); pid=None; job=str(job_name or "").strip()
