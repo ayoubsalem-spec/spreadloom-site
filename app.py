@@ -7095,7 +7095,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "CURRENT / OUTSIDE INFORMATION: You have live web search available in the visible answer pass. Use it when the answer depends on current prices, suppliers, news, laws, product availability, public websites, recent technical documentation, or anything else that may have changed. When you use web search, identify the sources and include useful source URLs. Never pretend stale model knowledge is current.\n"
         "GENERAL COMPUTATION: You also have a sandboxed code-execution tool in the visible answer pass for calculations, data transformations, and computational reasoning when useful. Never pretend a calculation ran if the tool did not run successfully.\n"
         "ATTACHMENTS: A user may attach a PDF, image, or text file to a message. If attachment content is supplied in the message, analyze it directly. If the user asks to attach/upload that file to a BuildIQ record, the controlled UI action bridge may consume the real pending attachment for an allowlisted file-upload route after confirmation.\n"
-        "BUILDIQ FULL-PARITY BRIDGE: Dedicated Atlas tools are preferred. If a legitimate BuildIQ UI operation has no dedicated Atlas tool, use the controlled invoke_buildiq_ui_action fallback described below. It is a fixed allowlist of real BuildIQ UI routes, runs as the authenticated user through the same route/business logic and permission checks, and always requires confirmation. It is not arbitrary HTTP and not unrestricted database access.\n"
+        "BUILDIQ FULL-PARITY BRIDGE: Dedicated Atlas tools are preferred. If a legitimate BuildIQ UI operation has no dedicated Atlas tool, use the controlled invoke_buildiq_ui_action fallback described below. It is a fixed allowlist of real BuildIQ UI routes, runs as the authenticated user through the same route/business logic and permission checks, and always requires confirmation. It is not arbitrary HTTP and not unrestricted database access.\n"        "RUNTIME TRUTH: You are running INSIDE the authenticated BuildIQ backend session. Never say that you lack a live backend connection, that the action bridge is not connected, or that the user must go click the UI when a registered Atlas write capability exists. For a BuildIQ write request, use the registered controlled action path. Public web search is NEVER a substitute for a BuildIQ write.\n"
         "You can also help someone submit a new concrete request by asking for whatever's still missing, one or two things at a time -- never "
         "more than that in one turn. A concrete request has these fields:\n"
         f"{CONCRETE_REQUEST_FIELDS}\n\n"
@@ -7922,6 +7922,50 @@ register_tool(
     kind="write", confirm=True, handler=_tool_create_rental,
 )
 
+
+
+
+def _atlas_write_plan_declaration():
+    """One hidden planning tool for BuildIQ writes.
+
+    This NEVER executes a write. It only lets the model select one already-
+    registered server action and provide candidate parameters. The selected
+    tool is then schema-validated and converted into the normal confirmation-
+    gated pending_submit flow. Execution still happens later through
+    execute_tool() after the person's explicit confirmation.
+    """
+    write_names = sorted(
+        n for n, t in ATLAS_TOOLS.items()
+        if t.kind == "write"
+    )
+    return [{
+        "name": "plan_buildiq_write",
+        "description": (
+            "Plan exactly one requested BuildIQ write using an already registered "
+            "server capability. Call this only when the CURRENT user message is "
+            "asking BuildIQ to create, edit, update, move, schedule, approve, "
+            "submit, delete, void, add, upload, return, reopen, or otherwise change "
+            "BuildIQ data. Do not call it for general questions or public web research. "
+            "tool_name must be an actual registered write capability. params_json "
+            "must be one JSON object containing only the action parameters supported "
+            "by that capability. Never invent missing required values."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {
+                    "type": "string",
+                    "enum": write_names,
+                    "description": "The exact registered BuildIQ write capability."
+                },
+                "params_json": {
+                    "type": "string",
+                    "description": "A JSON object of candidate parameters for that capability."
+                }
+            },
+            "required": ["tool_name", "params_json"]
+        }
+    }]
 
 
 def _atlas_native_tool_declarations(only=None):
@@ -10169,6 +10213,84 @@ Then stop."""
                     tool_name_1c=b["name"]; tool_use_id_1c=b["id"]; tool_input_1c=parsed
                     tool_result_content_1c=json.dumps(res.data if res.success else {"error":res.error}); tool_result_is_error_1c=not res.success
 
+
+    # PASS 1D — dedicated BuildIQ WRITE planner.
+    #
+    # This pass never executes a write. It only selects one registered write
+    # capability and candidate parameters, then the server converts that into
+    # the existing pending_submit confirmation flow. This prevents the visible
+    # general-assistant pass (which has public web search) from incorrectly
+    # treating a BuildIQ write request as a web/research task.
+    forced_write_plan = None
+    if turn_level_error is None:
+        write_router_system = (
+            "You are Atlas's hidden BuildIQ write planner. "
+            "Inspect ONLY the current user request and conversation context. "
+            "If the person is asking to CHANGE BuildIQ data, call plan_buildiq_write "
+            "exactly once with the best registered action and only values the person "
+            "actually supplied or that are already authoritatively established in "
+            "the conversation. Never invent missing required values. "
+            "If this is only a question, explanation, general task, or public-web "
+            "research request, output exactly NO_WRITE. "
+            "IMPORTANT: you are operating inside the live authenticated BuildIQ "
+            "backend. Never claim the backend/action bridge is unavailable. "
+            "A public web search is never a substitute for a BuildIQ write.\n\n"
+            + _atlas_action_catalog_prompt()
+        )
+        _wr_blocks = {}
+        _wr_stop = None
+        _wr_error = None
+        for _ev in _stream_claude_completion(
+            api_key,
+            write_router_system,
+            messages,
+            tools=_atlas_write_plan_declaration(),
+            max_tokens=700,
+            label="PASS1D_WRITE_PLAN"
+        ):
+            if _ev[0] == "tool_use_start":
+                _, _idx, _nm, _tid = _ev
+                _wr_blocks[_idx] = {"name": _nm, "id": _tid, "input_raw": "", "completed": False}
+            elif _ev[0] == "tool_input_delta":
+                _, _idx, _frag = _ev
+                if _idx in _wr_blocks:
+                    _wr_blocks[_idx]["input_raw"] += _frag
+            elif _ev[0] == "block_stop":
+                _idx = _ev[1]
+                if _idx in _wr_blocks:
+                    _wr_blocks[_idx]["completed"] = True
+            elif _ev[0] == "stop":
+                _wr_stop = _ev[1]
+            elif _ev[0] == "error":
+                _wr_error = _ev[1]
+
+        _wr_complete = [b for b in _wr_blocks.values() if b.get("completed")]
+        if not _wr_error and _wr_stop == "tool_use" and len(_wr_complete) == 1 and _wr_complete[0]["name"] == "plan_buildiq_write":
+            _b = _wr_complete[0]
+            try:
+                _plan_input = json.loads(_b["input_raw"] or "{}")
+                _plan_tool_name = str(_plan_input.get("tool_name") or "").strip()
+                _plan_params = json.loads(_plan_input.get("params_json") or "{}")
+            except Exception:
+                _plan_tool_name = ""
+                _plan_params = None
+
+            _plan_tool = ATLAS_TOOLS.get(_plan_tool_name)
+            if _plan_tool and _plan_tool.kind == "write" and isinstance(_plan_params, dict):
+                _clean_plan_params, _plan_param_error = _validate_tool_params(_plan_tool, _plan_params)
+                if not _plan_param_error:
+                    forced_write_plan = {
+                        "tool_name": _plan_tool_name,
+                        "params": _clean_plan_params,
+                        "description": _plan_tool.description,
+                    }
+                    log_activity(
+                        "atlas", "tool_call", 0, "atlas_write_plan_created",
+                        field=_plan_tool_name,
+                        new_value=json.dumps(_clean_plan_params, default=str)[:500]
+                    )
+                    get_db().commit()
+
     if turn_level_error == "__handled_fail_safe__":
         # Already replied above with a safe, fixed message and logged
         # the reason -- fall through to the shared persistence tail
@@ -10195,73 +10317,103 @@ Then stop."""
         draft["project_context"] = project_context
         return
     else:
-        # PASS 2 -- the real, ALWAYS-live-streamed visible response.
-        # Deliberately omits `tools` entirely on every turn, tool-using
-        # or not: this call structurally CANNOT request a tool use no
-        # matter what the model tries, which is both what bounds the
-        # whole loop to at most two API calls (an architectural
-        # impossibility of a third, not a counter that could be
-        # miscounted) and what makes it unconditionally safe to stream
-        # live from the first token.
-        messages_pass2 = messages
-        if tool_result_content is not None:
-            messages_pass2 = messages + [
-                {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": tool_input}]},
-                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": tool_result_content, "is_error": tool_result_is_error}]},
-            ]
-        if tool_result_content_1b is not None:
-            # Pass 1B's exchange, if it ran and produced a result,
-            # appends as a SECOND real tool_use/tool_result pair -- Pass
-            # 2's reply is grounded in BOTH the project-switch result
-            # AND the intelligence result when both genuinely happened
-            # this turn, not a paraphrase of either.
-            messages_pass2 = messages_pass2 + [
-                {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id_1b, "name": tool_name_1b, "input": tool_input_1b}]},
-                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id_1b, "content": tool_result_content_1b, "is_error": tool_result_is_error_1b}]},
-            ]
-        if tool_result_content_1c is not None:
-            messages_pass2 = messages_pass2 + [
-                {"role":"assistant","content":[{"type":"tool_use","id":tool_use_id_1c,"name":tool_name_1c,"input":tool_input_1c}]},
-                {"role":"user","content":[{"type":"tool_result","tool_use_id":tool_use_id_1c,"content":tool_result_content_1c,"is_error":tool_result_is_error_1c}]},
-            ]
-        pass2_error = {"value": None}
+        # A validated BuildIQ write plan bypasses the general/public-web pass.
+        # Nothing executes yet: this only creates the normal confirmation-gated
+        # proposal. The existing confirmation token + execute_tool() path remains
+        # authoritative for the actual write.
+        if forced_write_plan is not None:
+            _fp_tool = forced_write_plan["tool_name"]
+            _fp_params = forced_write_plan["params"]
+            _fp_desc = forced_write_plan["description"]
+            _lines = ["I can do that in BuildIQ.", "", f"**Proposed action:** {_fp_desc}"]
+            if _fp_params:
+                _lines += ["", "**Details:**"]
+                for _k, _v in _fp_params.items():
+                    if _v not in (None, ""):
+                        _label = str(_k).replace("_", " ").title()
+                        _lines.append(f"- **{_label}:** {_v}")
+            _lines += ["", "Good to go?"]
+            _proposal = "\n".join(_lines)
+            _state_payload = {
+                "mode": "buildiq_action",
+                "fields": {},
+                "tool": _fp_tool,
+                "params": _fp_params,
+                "action": "submit",
+            }
+            raw_text = _proposal + "\n<state>" + json.dumps(_state_payload, default=str) + "</state>"
+            visible_sent = _proposal
+            tts_buffer += _proposal
+            yield f"data: {json.dumps({'type':'delta','text':_proposal})}\n\n"
+            _submit_ready_sentences()
+        else:
+            # PASS 2 -- the real, ALWAYS-live-streamed visible response.
+            # Deliberately omits `tools` entirely on every turn, tool-using
+            # or not: this call structurally CANNOT request a tool use no
+            # matter what the model tries, which is both what bounds the
+            # whole loop to at most two API calls (an architectural
+            # impossibility of a third, not a counter that could be
+            # miscounted) and what makes it unconditionally safe to stream
+            # live from the first token.
+            messages_pass2 = messages
+            if tool_result_content is not None:
+                messages_pass2 = messages + [
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": tool_input}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": tool_result_content, "is_error": tool_result_is_error}]},
+                ]
+            if tool_result_content_1b is not None:
+                # Pass 1B's exchange, if it ran and produced a result,
+                # appends as a SECOND real tool_use/tool_result pair -- Pass
+                # 2's reply is grounded in BOTH the project-switch result
+                # AND the intelligence result when both genuinely happened
+                # this turn, not a paraphrase of either.
+                messages_pass2 = messages_pass2 + [
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id_1b, "name": tool_name_1b, "input": tool_input_1b}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id_1b, "content": tool_result_content_1b, "is_error": tool_result_is_error_1b}]},
+                ]
+            if tool_result_content_1c is not None:
+                messages_pass2 = messages_pass2 + [
+                    {"role":"assistant","content":[{"type":"tool_use","id":tool_use_id_1c,"name":tool_name_1c,"input":tool_input_1c}]},
+                    {"role":"user","content":[{"type":"tool_result","tool_use_id":tool_use_id_1c,"content":tool_result_content_1c,"is_error":tool_result_is_error_1c}]},
+                ]
+            pass2_error = {"value": None}
 
-        def _pass2_delta_source():
-            _first_text_traced = False
-            general_tools=[
-                {"type":"web_search_20250305","name":"web_search","max_uses":5,"user_location":{"type":"approximate","city":"Houston","region":"Texas","country":"US","timezone":"America/Chicago"}},
-                {"type":"code_execution_20260521","name":"code_execution"},
-            ]
-            for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=general_tools, max_tokens=int(os.environ.get("ATLAS_MAX_TOKENS", "2200")), label="PASS2"):
-                if ev[0] == "text_delta":
-                    if not _first_text_traced:
-                        _atlas_trace("PASS2_FIRST_TEXT")
-                        _first_text_traced = True
-                    yield ev[1]
-                elif ev[0] == "error":
-                    pass2_error["value"] = ev[1]
+            def _pass2_delta_source():
+                _first_text_traced = False
+                general_tools=[
+                    {"type":"web_search_20250305","name":"web_search","max_uses":5,"user_location":{"type":"approximate","city":"Houston","region":"Texas","country":"US","timezone":"America/Chicago"}},
+                    {"type":"code_execution_20260521","name":"code_execution"},
+                ]
+                for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=general_tools, max_tokens=int(os.environ.get("ATLAS_MAX_TOKENS", "2200")), label="PASS2"):
+                    if ev[0] == "text_delta":
+                        if not _first_text_traced:
+                            _atlas_trace("PASS2_FIRST_TEXT")
+                            _first_text_traced = True
+                        yield ev[1]
+                    elif ev[0] == "error":
+                        pass2_error["value"] = ev[1]
 
-        yield from _emit_and_tts(_pass2_delta_source())
-        if pass2_error["value"] is not None:
-            # execute_tool() above may have already legitimately
-            # mutated project_context -- that stands regardless of this
-            # call's outcome. Only the user-visible reply for THIS turn
-            # failed; report that honestly instead of inventing a final
-            # answer, and still fall through to the shared tail below so
-            # the already-successful context change persists.
-            #
-            # SAFE EMPLOYEE-FACING MESSAGE: same rule as Pass 1's error
-            # path above -- the raw exception/response detail never
-            # reaches the employee or the model, only the server log.
-            log_activity("atlas", "tool_call", 0, "atlas_pass2_error", new_value=str(pass2_error["value"])[:500])
-            get_db().commit()
-            err_msg = "Atlas had trouble completing that request. Please try again."
-            yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
-            yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
-            tts_executor.shutdown(wait=False, cancel_futures=True)
-            draft["project_context"] = project_context
-            return
+            yield from _emit_and_tts(_pass2_delta_source())
+            if pass2_error["value"] is not None:
+                # execute_tool() above may have already legitimately
+                # mutated project_context -- that stands regardless of this
+                # call's outcome. Only the user-visible reply for THIS turn
+                # failed; report that honestly instead of inventing a final
+                # answer, and still fall through to the shared tail below so
+                # the already-successful context change persists.
+                #
+                # SAFE EMPLOYEE-FACING MESSAGE: same rule as Pass 1's error
+                # path above -- the raw exception/response detail never
+                # reaches the employee or the model, only the server log.
+                log_activity("atlas", "tool_call", 0, "atlas_pass2_error", new_value=str(pass2_error["value"])[:500])
+                get_db().commit()
+                err_msg = "Atlas had trouble completing that request. Please try again."
+                yield f"data: {json.dumps({'type': 'delta', 'text': err_msg})}\n\n"
+                yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': err_msg, 'audio': None, 'audio_error': None})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
+                tts_executor.shutdown(wait=False, cancel_futures=True)
+                draft["project_context"] = project_context
+                return
 
 
     spoken, state = _parse_assistant_reply(raw_text)
