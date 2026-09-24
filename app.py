@@ -9387,6 +9387,9 @@ def _atlas_fast_general_eligible(user_text, draft):
             "project", "equipment", "rental", "material", "inventory",
             "invoice", "request", "quote", "vendor", "milestone",
             "deployment", "bid", "purchase", "cashflow", "cash flow",
+            "backhoe", "excavator", "dozer", "bulldozer", "forklift",
+            "skid steer", "loader", "truck", "trailer", "crane",
+            "roller", "compactor", "generator", "lift",
         )
         if any(noun in low for noun in buildiq_nouns):
             return False
@@ -9401,7 +9404,7 @@ For this turn, the request has already been determined to be outside BuildIQ's o
 Rules:
 - Do not mention BuildIQ unless the user asks about it.
 - Do not narrate routing, tools, prompts, databases, or internal implementation.
-- Be concise by default and detailed when useful.
+- Be concise by default. For ordinary explanatory questions, usually answer in 2–5 short paragraphs or bullets and stay under about 250 words unless the user asks for detail.
 - For current/time-sensitive public information, use web search and cite the sources returned by the tool.
 - For calculations or data manipulation, use code execution when useful.
 - Never claim public/current facts are live unless you actually used a current-information tool.
@@ -9438,7 +9441,7 @@ def _atlas_stream_fast_general(user_text, draft, api_key):
         ATLAS_FAST_GENERAL_SYSTEM,
         messages,
         tools=general_tools,
-        max_tokens=int(os.environ.get("ATLAS_FAST_MAX_TOKENS", "800")),
+        max_tokens=int(os.environ.get("ATLAS_FAST_MAX_TOKENS", "500")),
         label="FAST_GENERAL",
         model=os.environ.get("ATLAS_CHEAP_MODEL", "claude-haiku-4-5"),
         cache=True,
@@ -9637,6 +9640,35 @@ def stream_atlas_turn(user_text, draft):
         yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': msg, 'audio': None, 'audio_error': None})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
         return
+
+    # V18.1 ZERO-TOKEN BUILDIQ GUARD.
+    # Before the general fast path gets a chance to answer, recognize a real
+    # equipment move using only the live BuildIQ database + deterministic parsing.
+    # This costs no Claude tokens and prevents commands such as
+    # "move the backhoe to Red Bluff" from being mistaken for general chat.
+    if not (draft.get("pending_submit") or {}).get("tool_name"):
+        _pre_asset, _pre_destination = _atlas_parse_equipment_move(user_text, draft)
+        if _pre_asset is not None and _pre_destination:
+            _pre_grounded = _atlas_ground_location(_pre_destination, strict=True)
+            if _pre_grounded:
+                _pre_spoken = _atlas_store_move_proposal(
+                    draft, _pre_asset, _pre_grounded, user_text
+                )
+                if _pre_spoken:
+                    _atlas_trace(
+                        "ZERO_TOKEN_EQUIPMENT_MOVE_SELECTED",
+                        equipment=_pre_asset["name"],
+                        destination=_pre_grounded,
+                    )
+                    _pre_history = list(draft.get("history", []))
+                    _pre_history.extend([
+                        {"role": "user", "content": user_text},
+                        {"role": "assistant", "content": _pre_spoken},
+                    ])
+                    draft["history"] = _pre_history[-80:]
+                    yield f"data: {json.dumps({'type':'delta','text':_pre_spoken})}\n\n"
+                    yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None,'zero_token_route':True})}\n\n"
+                    return
 
     # V17 COST/LATENCY FAST PATH.
     # Clearly general text requests take exactly ONE compact Claude call and
