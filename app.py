@@ -7130,6 +7130,7 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
         "- Never claim the move happened before confirmation. First summarize the proposed move clearly and ask for confirmation.\n"
         "- HARD ACTION GROUNDING: never propose or confirm a write containing unresolved conversational/reference language such as it, there, original location, where it was, the other one, or filler/slang. Resolve meaning first, then map every required entity/value to canonical BuildIQ state. If that cannot be done unambiguously, ask a concise clarification instead of proposing a write.\n"
         "- NEVER say a BuildIQ write is done, completed, moved, created, submitted, approved, or otherwise successful based on your own reasoning. Only the server-side action executor may authoritatively report write success after the database operation returns success. Before that receipt, describe it only as proposed/pending/confirmed.\n"
+        "- CRITICAL: if no server-owned pending action was created for this turn, do NOT invent a confirmation prompt and do NOT say you will create/update/move something. Ask only for the missing operational detail needed to form a real server action.\n"
         "- When proposing or confirming an equipment move, emit mode=buildiq_action, tool=move_equipment, action=submit, and params containing the exact known values. On the confirmation turn, repeat the exact same tool/params.\n"        "- Project Hunt status changes are real controlled actions. For requests like 'move X to Awarded', resolve the canonical project and emit mode=buildiq_action, tool=update_project_status, action=submit with project_name and the exact status. Never change a project status without confirmation.\n"
         "- Creating Equipment Center equipment is a controlled action. Collect name (required) plus any provided description/year/serial/value/rates/location/hours, then emit tool=create_equipment and require confirmation. Do not invent missing optional fields.\n"
         "- Creating/logging an outside rental is a controlled action. Vendor and equipment description are required; project/job, rate, rental date, due date and notes are optional. Use tool=create_rental and require confirmation. If a project is named, resolve it canonically rather than inventing a project_id.\n"
@@ -9579,6 +9580,113 @@ def _atlas_is_simple_buildiq_request(user_text):
     return any(m in low for m in simple_markers) and any(m in low for m in buildiq_markers)
 
 
+
+def _atlas_required_missing(tool, params):
+    """Return required action parameters that are still genuinely missing."""
+    params = dict(params or {})
+    missing = []
+    for name, spec in (tool.parameters or {}).items():
+        if spec.get("required") and params.get(name) in (None, ""):
+            missing.append(name)
+    return missing
+
+
+def _atlas_field_label(name):
+    labels = {
+        "item_name": "item name",
+        "site": "site",
+        "quantity": "quantity",
+        "vendor": "vendor",
+        "equipment_description": "equipment",
+        "project_name": "project",
+        "status": "status",
+        "to_location": "destination",
+        "equipment_name": "equipment",
+        "area_description": "area / description",
+        "pour_date": "pour date",
+        "pour_time": "pour time",
+        "yards": "yards",
+        "psi": "PSI",
+        "request_id": "request",
+        "invoice_id": "invoice",
+        "rental_id": "rental",
+    }
+    return labels.get(name, name.replace("_", " "))
+
+
+def _atlas_missing_fields_prompt(tool_name, missing):
+    labels = [_atlas_field_label(x) for x in missing]
+    action = _atlas_human_action_label(tool_name, {})
+    if len(labels) == 1:
+        return f"I can do that. I just need the **{labels[0]}** first."
+    if len(labels) == 2:
+        joined = f"**{labels[0]}** and **{labels[1]}**"
+    else:
+        joined = ", ".join(f"**{x}**" for x in labels[:-1]) + f", and **{labels[-1]}**"
+    return f"I can do that. I still need {joined}."
+
+
+def _atlas_extract_pending_fields(user_text, missing, api_key):
+    """Cheap continuation parser for a server-owned incomplete action.
+
+    One missing field costs zero model tokens: the user's whole reply is the value.
+    Multiple fields use one tiny Haiku extraction call.
+    """
+    missing = list(missing or [])
+    raw = (user_text or "").strip()
+    if not raw:
+        return {}
+    if len(missing) == 1:
+        return {missing[0]: raw}
+
+    system = (
+        "Extract values for an already-selected BuildIQ action. "
+        "Return ONLY one JSON object. Use only these keys: "
+        + ", ".join(missing)
+        + ". Do not invent values. Omit any key the person did not provide. "
+        "Example: if keys are vendor,equipment_description and the user says "
+        "'Darycet and it is a toilet', return "
+        '{"vendor":"Darycet","equipment_description":"toilet"}.'
+    )
+    chunks = []
+    for ev in _stream_claude_completion(
+        api_key,
+        system,
+        [{"role": "user", "content": raw}],
+        tools=None,
+        max_tokens=120,
+        label="PENDING_FIELD_EXTRACT",
+        model=os.environ.get("ATLAS_CHEAP_MODEL", "claude-haiku-4-5"),
+        cache=False,
+    ):
+        if ev[0] == "text_delta":
+            chunks.append(ev[1])
+        elif ev[0] == "error":
+            return {}
+    out = "".join(chunks).strip()
+    m = re.search(r"\{.*\}", out, re.S)
+    if not m:
+        return {}
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return {}
+    return {k: v for k, v in data.items() if k in missing and v not in (None, "")}
+
+
+def _atlas_write_proposal(tool_name, params):
+    """Deterministic employee-facing proposal from validated server state."""
+    label = _atlas_human_action_label(tool_name, params)
+    lines = [f"**Proposed action:** {label}"]
+    details = _atlas_proposal_details(tool_name, params)
+    if details:
+        lines += ["", "**Details:**"]
+        for k, v in details:
+            lines.append(f"- **{k}:** {v}")
+    lines += ["", "Good to go?"]
+    return "\n".join(lines)
+
+
 def stream_atlas_turn(user_text, draft):
     """Streams one turn of the assistant as an SSE generator. Yields
     'data: {...}\\n\\n' lines; the caller (the Flask route) is responsible
@@ -9640,6 +9748,85 @@ def stream_atlas_turn(user_text, draft):
         yield f"data: {json.dumps({'type': 'audio_chunk', 'seq': 0, 'final': True, 'text': msg, 'audio': None, 'audio_error': None})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'mode': draft.get('mode', 'chat'), 'submitted_id': None, 'audio': None, 'audio_error': None, 'pending_write_token': None})}\n\n"
         return
+
+    # V19 SERVER-OWNED ACTION COLLECTION GATE.
+    # If a prior BuildIQ write was recognized but lacked required fields,
+    # continue THAT exact action before any general-chat or fresh routing.
+    _collection = draft.get("pending_collection") or {}
+    if _collection.get("tool_name"):
+        _cancel = _atlas_normalize_pending_reply(user_text)
+        if _cancel in {"cancel", "never mind", "nevermind", "stop"}:
+            draft["pending_collection"] = None
+            msg = "Canceled. Nothing was changed."
+            hist = list(draft.get("history", []))
+            hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":msg}])
+            draft["history"] = hist[-80:]
+            yield f"data: {json.dumps({'type':'delta','text':msg})}\n\n"
+            yield f"data: {json.dumps({'type':'done','mode':'chat','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+            return
+
+        _ctool = ATLAS_TOOLS.get(_collection.get("tool_name"))
+        _cparams = dict(_collection.get("params") or {})
+        _cmissing = _atlas_required_missing(_ctool, _cparams) if _ctool else []
+        if _ctool and _cmissing:
+            # A bare yes is NOT accepted as a missing field value.
+            if _atlas_normalize_pending_reply(user_text) in {"yes","yep","yup","yeah","yea","confirm","confirmed","proceed","do it","go ahead"}:
+                msg = _atlas_missing_fields_prompt(_ctool.name, _cmissing)
+                hist = list(draft.get("history", []))
+                hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":msg}])
+                draft["history"] = hist[-80:]
+                yield f"data: {json.dumps({'type':'delta','text':msg})}\n\n"
+                yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+                return
+
+            _extracted = _atlas_extract_pending_fields(user_text, _cmissing, api_key)
+            _cparams.update(_extracted)
+            _cmissing = _atlas_required_missing(_ctool, _cparams)
+            if _cmissing:
+                draft["pending_collection"] = {
+                    "tool_name": _ctool.name,
+                    "params": _cparams,
+                    "issued_at": time.time(),
+                }
+                msg = _atlas_missing_fields_prompt(_ctool.name, _cmissing)
+                hist = list(draft.get("history", []))
+                hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":msg}])
+                draft["history"] = hist[-80:]
+                yield f"data: {json.dumps({'type':'delta','text':msg})}\n\n"
+                yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+                return
+
+            _clean, _err = _validate_tool_params(_ctool, _cparams)
+            if _err:
+                draft["pending_collection"] = None
+                msg = "I couldn't validate that action yet. Please restate the change you want."
+                hist = list(draft.get("history", []))
+                hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":msg}])
+                draft["history"] = hist[-80:]
+                yield f"data: {json.dumps({'type':'delta','text':msg})}\n\n"
+                yield f"data: {json.dumps({'type':'done','mode':'chat','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+                return
+
+            proposal = _atlas_write_proposal(_ctool.name, _clean)
+            phash = hashlib.sha256(
+                json.dumps({"tool":_ctool.name,"params":_clean}, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            draft["pending_collection"] = None
+            draft["pending_submit"] = {
+                "fields_hash": phash,
+                "tool_name": _ctool.name,
+                "params": dict(_clean),
+                "issued_at": time.time(),
+                "action_context": dict(draft.get("active_context") or {}),
+            }
+            hist = list(draft.get("history", []))
+            hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":proposal}])
+            draft["history"] = hist[-80:]
+            yield f"data: {json.dumps({'type':'delta','text':proposal})}\n\n"
+            yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+            return
+        else:
+            draft["pending_collection"] = None
 
     # V18.1 ZERO-TOKEN BUILDIQ GUARD.
     # Before the general fast path gets a chance to answer, recognize a real
@@ -10725,6 +10912,24 @@ Then stop."""
             if _plan_tool and _plan_tool.kind == "write" and isinstance(_plan_params, dict):
                 if _plan_tool_name == "invoke_buildiq_ui_action":
                     _plan_params = _atlas_prepare_ui_bridge_params(_plan_params, draft)
+
+                _missing_required = _atlas_required_missing(_plan_tool, _plan_params)
+                if _missing_required:
+                    draft["pending_collection"] = {
+                        "tool_name": _plan_tool_name,
+                        "params": dict(_plan_params),
+                        "issued_at": time.time(),
+                    }
+                    _msg = _atlas_missing_fields_prompt(_plan_tool_name, _missing_required)
+                    _hist = list(draft.get("history", []))
+                    _hist.extend([{"role":"user","content":user_text},{"role":"assistant","content":_msg}])
+                    draft["history"] = _hist[-80:]
+                    yield f"data: {json.dumps({'type':'delta','text':_msg})}\n\n"
+                    yield f"data: {json.dumps({'type':'done','mode':'buildiq_action','submitted_id':None,'audio':None,'audio_error':None,'pending_write_token':None})}\n\n"
+                    tts_executor.shutdown(wait=False, cancel_futures=True)
+                    draft["project_context"] = project_context
+                    return
+
                 _clean_plan_params, _plan_param_error = _validate_tool_params(_plan_tool, _plan_params)
                 if not _plan_param_error:
                     forced_write_plan = {
@@ -11729,6 +11934,36 @@ def assistant_confirm_write():
         row=get_db().execute("SELECT id,vendor,equipment_description,project_id,job_name FROM sitepulse_rentals WHERE id=?", (rid,)).fetchone() if rid else None
         if not row or row["vendor"] != tool_params.get("vendor") or row["equipment_description"] != tool_params.get("equipment_description"):
             return {"success":False,"submitted_id":None,"error":"the rental could not be verified in BuildIQ after creation"}
+    elif tool_name == "create_material":
+        mid = (result.data or {}).get("id")
+        row = get_db().execute(
+            "SELECT id,item_name,site,quantity,unit,shelf_location,notes FROM inventory_materials WHERE id=?",
+            (mid,)
+        ).fetchone() if mid else None
+        verified = bool(row)
+        for key in ("item_name","site","quantity","unit","shelf_location","notes"):
+            if verified and tool_params.get(key) not in (None, ""):
+                if str(row[key] or "").strip() != str(tool_params.get(key) or "").strip():
+                    verified = False
+                    break
+        if not verified:
+            log_activity(
+                "atlas","write_verify",mid or 0,"inventory_create_verification_failed",
+                new_value=str(tool_params)
+            )
+            get_db().commit()
+            return {
+                "success":False,
+                "submitted_id":None,
+                "error":"the Inventory material could not be verified in BuildIQ after creation"
+            }
+        result.data.update({
+            "id": row["id"],
+            "item_name": row["item_name"],
+            "site": row["site"],
+            "quantity": row["quantity"],
+        })
+
     elif isinstance(result.data, dict) and result.data.get("_atlas_catalog_action"):
         # V11.1 catalog handlers verify the authoritative post-write state themselves
         # before returning. Refuse a green receipt unless that verification flag is present.
@@ -11787,6 +12022,31 @@ def assistant_confirm_write():
         receipt=f"✓ Equipment created: {d.get('equipment') or tool_params.get('name')}" + (f" at {d.get('location')}" if d.get('location') else "")
         recent_actions.append({"action":"create_equipment","equipment":d.get("equipment"),"id":d.get("id"),"completed_at":datetime.utcnow().isoformat()})
         ac=dict(draft.get("active_context") or {}); ac.update({"entity_type":"equipment","name":d.get("equipment"),"current_location":d.get("location") or "","last_action":"create_equipment","last_action_status":"completed","recent_actions":recent_actions[-20:]}); draft["active_context"]=ac
+    elif tool_name == "create_material":
+        d = result.data or {}
+        receipt = (
+            f"✓ Inventory material created: {d.get('item_name') or tool_params.get('item_name')}"
+            f" at {d.get('site') or tool_params.get('site')}"
+            + (f", quantity {d.get('quantity')}" if d.get("quantity") not in (None, "") else "")
+        )
+        recent_actions.append({
+            "action":"create_material",
+            "material_id":d.get("id"),
+            "item_name":d.get("item_name"),
+            "site":d.get("site"),
+            "quantity":d.get("quantity"),
+            "completed_at":datetime.utcnow().isoformat(),
+        })
+        ac=dict(draft.get("active_context") or {})
+        ac.update({
+            "entity_type":"inventory_material",
+            "name":d.get("item_name"),
+            "site":d.get("site"),
+            "last_action":"create_material",
+            "last_action_status":"completed",
+            "recent_actions":recent_actions[-20:],
+        })
+        draft["active_context"]=ac
     elif tool_name == "create_rental":
         d=result.data or {}
         receipt=f"✓ Rental #{d.get('id')} created for {d.get('rental') or tool_params.get('equipment_description')} from {d.get('vendor') or tool_params.get('vendor')}" + (f" — {d.get('project')}" if d.get('project') else "")
