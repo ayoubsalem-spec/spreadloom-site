@@ -161,6 +161,8 @@
     <div class="atlas-inputbar">
         <div class="atlas-inputrow">
             <textarea id="text-input" class="atlas-textinput" rows="1" placeholder="Message Atlas..."></textarea>
+            <input id="atlas-file-input" type="file" style="display:none" accept=".pdf,.txt,.md,.csv,.json,.log,.png,.jpg,.jpeg,.gif,.webp,.doc,.docx,.xls,.xlsx">
+            <button id="attach-btn" class="atlas-mic-btn" type="button" title="Attach a file">&#128206;</button>
             <button id="mic-btn" class="atlas-mic-btn" title="Talk (single turn)">&#127908;</button>
             <button id="send-btn" class="atlas-send-btn" title="Send">&#8593;</button>
         </div>
@@ -178,6 +180,8 @@
     var textInput = document.getElementById('text-input');
     var sendBtn = document.getElementById('send-btn');
     var micBtn = document.getElementById('mic-btn');
+    var attachBtn = document.getElementById('attach-btn');
+    var fileInput = document.getElementById('atlas-file-input');
     var statusLine = document.getElementById('status-line');
     var resetBtn = document.getElementById('reset-btn');
     var voiceStartBtn = document.getElementById('voice-start-btn');
@@ -703,8 +707,18 @@
     // NETWORK / SSE
     // ============================================================
     function askServer(question) {
-        addMessage('user', question);
+        var attachment = fileInput && fileInput.files && fileInput.files.length ? fileInput.files[0] : null;
+        addMessage('user', question + (attachment ? '\n📎 ' + attachment.name : ''));
         streamFromServer(function (mySignal) {
+            if (attachment) {
+                var fd = new FormData();
+                fd.append('question', question);
+                fd.append('interaction_mode', 'text');
+                fd.append('attachment', attachment, attachment.name);
+                return fetch('{{ url_for("assistant_ask") }}', {
+                    method: 'POST', headers: { 'X-CSRFToken': csrfToken }, body: fd, signal: mySignal
+                });
+            }
             return fetch('{{ url_for("assistant_ask") }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
@@ -712,6 +726,7 @@
                 signal: mySignal
             });
         }, true);
+        if (attachment && fileInput) { fileInput.value = ''; attachBtn.title = 'Attach a file'; }
     }
 
     function askServerWithAudio(blob) {
@@ -964,6 +979,24 @@
         textInput.style.height = 'auto';
         if (!audioUnlocked) unlockAudioElement();
         askServer(text);
+    }
+    if (attachBtn && fileInput) {
+        attachBtn.addEventListener('click', function () { fileInput.click(); });
+        fileInput.addEventListener('change', function () {
+            if (fileInput.files && fileInput.files.length) {
+                var f=fileInput.files[0];
+                if (f.size > 12 * 1024 * 1024) {
+                    statusLine.textContent='Attachment is too large (12 MB maximum).';
+                    fileInput.value='';
+                    attachBtn.title='Attach a file';
+                    return;
+                }
+                attachBtn.title='Attached: ' + f.name;
+                statusLine.textContent='Attached: ' + f.name;
+            } else {
+                attachBtn.title='Attach a file';
+            }
+        });
     }
     sendBtn.addEventListener('click', sendTyped);
     textInput.addEventListener('keydown', function (e) {

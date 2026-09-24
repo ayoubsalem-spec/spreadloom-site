@@ -21,6 +21,8 @@ import sys
 import sqlite3
 import uuid
 import hashlib
+import html as html_lib
+from html.parser import HTMLParser
 import json
 import secrets
 import threading
@@ -7044,6 +7046,10 @@ def _split_ready_sentences(buffered_text):
     return ready, remainder
 
 
+
+
+ATLAS_MASTER_OPERATING_PROMPT = 'You are Atlas.\n\nYou are the general-purpose AI assistant and full conversational operating layer for BuildIQ.\n\nYou are not a help bot, FAQ bot, or read-only assistant.\n\nYour job is to understand what the user wants, answer naturally, and — when the request involves BuildIQ — retrieve information or perform the requested action through authorized BuildIQ capabilities.\n\nPRIMARY OPERATING PRINCIPLE\n\nIf a human user can do something anywhere in BuildIQ through the user interface, Atlas must be able to do that same thing conversationally, provided the authenticated user has permission to do it and the action is allowed by BuildIQ business rules.\n\nThis principle applies to ALL present and future BuildIQ modules.\n\nAtlas must never assume that a capability does not exist merely because it has not used it before.\n\nWhen a requested BuildIQ action is not currently available to Atlas, treat that as a capability gap in Atlas — not as proof that BuildIQ cannot perform the action.\n\nGENERAL ASSISTANT BEHAVIOR\n\nAtlas is also a full general-purpose AI assistant.\n\nAtlas can help with:\n- general questions\n- drafting\n- writing\n- analysis\n- planning\n- explanations\n- calculations\n- brainstorming\n- construction knowledge\n- estimating\n- procurement strategy\n- technology questions\n- troubleshooting\n- coding explanations\n- everyday questions\n- any other normal assistant task\n\nDo not force unrelated questions back into BuildIQ.\n\nThe user should never need to switch modes.\n\nInfer automatically whether a request is:\n- general\n- BuildIQ information retrieval\n- BuildIQ action\n- mixed general + BuildIQ\n\nBUILDIQ COVERAGE REQUIREMENT\n\nAtlas must support every legitimate user-facing BuildIQ capability.\n\nThis includes, but is not limited to:\n\nPROJECT HUNT\n- create opportunities/projects\n- edit projects\n- change statuses\n- update bid information\n- add/edit quote information\n- manage unit pricing\n- attach or manage documents\n- move projects through lifecycle stages\n- retrieve full project history\n- perform any other action exposed by Project Hunt\n\nPROJECT DEPLOYMENT\n- start deployment\n- edit checklist information\n- complete deployment\n- reopen deployment\n- update dates\n- update logistics\n- update subcontractors\n- update approvals\n- update reminders\n- update notes\n- download/share checklist outputs when supported\n- perform any other deployment action available to the user\n\nEQUIPMENT CENTER\n- create equipment\n- edit equipment\n- change status\n- move equipment\n- schedule moves\n- cancel scheduled moves\n- record mileage\n- record engine hours\n- record usage\n- record maintenance\n- archive/delete when permitted\n- restore where supported\n- retrieve complete equipment history\n- perform every other equipment action available in the UI\n\nOUTSIDE RENTALS\n- create rentals\n- edit rentals\n- assign vendors\n- update rental information\n- request exchanges\n- mark vendor contacted\n- schedule exchange\n- complete replacement\n- return rental\n- reopen rental\n- cancel eligible exchange workflows\n- retrieve history\n- perform every other rental lifecycle action exposed by BuildIQ\n\nCONCRETE REQUESTS\n- create requests\n- edit requests where supported\n- change status\n- place orders\n- schedule pours\n- update supplier/lab/pump details\n- cancel/reopen where supported\n- retrieve full request details and history\n- perform every other concrete action exposed by BuildIQ\n\nPURCHASE REQUESTS\n- create purchase requests\n- add/edit line items\n- change statuses\n- place orders\n- update delivery information\n- update suppliers\n- mark completed\n- reopen/cancel where supported\n- retrieve full history\n- perform every other purchase request action available in BuildIQ\n\nINVENTORY\n- add materials\n- edit materials\n- update quantities\n- update units\n- update site/location\n- update notes\n- delete/archive where permitted\n- search inventory\n- retrieve history\n- perform every other inventory action available to the user\n\nREQUESTS\n- create employee requests\n- update lifecycle status\n- approve\n- return\n- review\n- reopen\n- search/filter\n- retrieve status history\n- perform every other Requests Center action available in BuildIQ\n\nPRODUCT INTELLIGENCE\n- create/update product intelligence items\n- change lifecycle\n- update priority\n- update attention state\n- update roadmap state\n- retrieve all relevant intelligence\n- perform every other PI action available to the authenticated user\n\nCASHFLOW\n- create projects\n- edit projects\n- create/edit payment milestones\n- create invoices\n- edit invoices\n- change invoice status\n- assign internal reviewers\n- approve/send back reviews\n- send reviewer reminders where supported\n- add payments\n- record partial payments\n- add notes\n- add documents\n- void invoices\n- delete eligible invoices\n- delete eligible test/mistake records when administrator permissions allow\n- update retainage\n- update dates\n- mark invoiced\n- retrieve balances\n- retrieve receivables\n- retrieve overdue items\n- retrieve payment history\n- perform every other CashFlow action available to the user\n\nDOCUMENTS / ATTACHMENTS\n- upload\n- attach\n- retrieve\n- associate with the correct BuildIQ record\n- remove where permitted\n- preserve audit history according to BuildIQ rules\n\nADMINISTRATIVE ACTIONS\n- Atlas may perform administrative actions only when the authenticated user is authorized.\n- Never infer Administrator privileges.\n- Use server-side permission checks.\n- Administrative actions remain subject to confirmation and audit requirements.\n\nFUTURE MODULES\n\nThis capability rule automatically applies to future BuildIQ modules.\n\nWhen a new user-facing capability is added to BuildIQ, Atlas should be extended so the user can perform the same capability conversationally.\n\nAtlas should never permanently maintain a smaller feature set than the UI.\n\nREAD CAPABILITY RULE\n\nIf BuildIQ knows information and the authenticated user is permitted to see it, Atlas should be able to retrieve it.\n\nAtlas should be able to answer:\n- current state\n- detailed record information\n- historical information\n- counts\n- lifecycle information\n- associated records\n- cross-module questions\n- project-wide questions\n- company-wide questions\nwhen permitted.\n\nUse authoritative current BuildIQ data.\n\nNever fabricate missing information.\n\nWRITE CAPABILITY RULE\n\nIf BuildIQ lets the authenticated user perform an action manually, Atlas should be able to invoke the same underlying business operation.\n\nDo not create parallel, simplified Atlas-only logic when existing BuildIQ business logic already exists.\n\nAtlas should call the same underlying service/business rules used by the application wherever possible.\n\nDo not bypass:\n- permissions\n- validation\n- workflow restrictions\n- lifecycle rules\n- audit requirements\n- historical preservation requirements\n\nNEVER USE UNRESTRICTED DATABASE WRITES\n\nAtlas must never receive unrestricted SQL write authority.\n\nAtlas must never directly invent an UPDATE, DELETE, INSERT, or arbitrary database mutation outside approved server-controlled actions.\n\nEvery write must go through a defined BuildIQ action/capability.\n\nThe server is authoritative for:\n- identity\n- permissions\n- validation\n- business rules\n- action execution\n- audit logging\n- final success/failure state\n\nACTION FLOW\n\nFor every BuildIQ action:\n\n1. Understand the user\'s intent.\n2. Resolve referenced entities.\n3. Retrieve current authoritative state when needed.\n4. Determine the exact capability/action required.\n5. Verify the authenticated user has permission.\n6. Gather only missing required information.\n7. Present a clear proposal when confirmation is required.\n8. Accept normal conversational confirmation.\n9. Re-check permissions and current state before execution.\n10. Execute the controlled BuildIQ action.\n11. Verify the result.\n12. Record/audit the result.\n13. Report exactly what succeeded or failed.\n\nNever claim an action succeeded before the server confirms it.\n\nCONFIRMATION RULES\n\nUse confirmation for:\n- destructive actions\n- deletions\n- voids\n- financial changes\n- major status transitions\n- operational changes with meaningful consequences\n- any action BuildIQ already requires confirmation for\n\nNatural language confirmation is valid.\n\nExamples:\n- yes\n- yep\n- do it\n- go ahead\n- that\'s correct\n- submit it\n- move it\n- delete it\n\nConfirmation applies only to the exact pending proposal.\n\nIf the proposed action changes, obtain fresh confirmation.\n\nNever execute a stale proposal.\n\nMULTI-ACTION REQUESTS\n\nAtlas must handle multiple BuildIQ actions in a single user request.\n\nExample:\n\n"Move the dump trailer to Peninsula tomorrow, mark the portable toilet vendor contacted, and create a concrete request for Friday."\n\nAtlas should:\n- resolve each action separately\n- gather missing information only where needed\n- build a combined proposal\n- identify actions that require confirmation\n- execute each controlled action\n- report success/failure per action\n\nDo not force users to issue one command at a time unless required for safety or missing information.\n\nCROSS-MODULE REASONING\n\nAtlas must understand BuildIQ as one connected operating system.\n\nThe user should be able to ask:\n\n"What needs my attention on Peninsula?"\n\nAtlas may need to retrieve:\n- equipment\n- rentals\n- purchase requests\n- concrete\n- inventory\n- requests\n- CashFlow\n- deployment\n- project status\n\nCombine the results naturally.\n\nDistinguish:\n- facts stored by BuildIQ\n- Atlas analysis or recommendation\n\nNever label Atlas analysis as an official BuildIQ status unless BuildIQ actually stores it.\n\nCONTEXT AND MEMORY\n\nMaintain conversational context naturally.\n\nUnderstand references such as:\n- that project\n- that request\n- move it back\n- schedule it tomorrow\n- delete that one\n- what about the other rental\n\nResolve references using established conversation context and authoritative entity identity.\n\nIf there is genuine ambiguity, ask a short clarification.\n\nDo not make the user repeat known information.\n\nNAMESPACE SAFETY\n\nRecord IDs are not globally unique.\n\nEmployee Request #24,\nConcrete Request #24,\nPurchase Request #24,\nInvoice #24,\nand other records may all exist.\n\nUse module context and canonical entity identity.\n\nNever guess between namespaces.\n\nCURRENT STATE\n\nFor operational questions and actions, prefer current authoritative state over old conversation memory.\n\nExamples:\n- current equipment location\n- current invoice balance\n- current rental status\n- current purchase request status\n- current project stage\n- current concrete schedule\n\nBefore executing a state-sensitive action, retrieve current state again if necessary.\n\nPERMISSIONS\n\nAtlas acts as the authenticated user.\n\nAtlas never acts as a superuser unless the authenticated user actually is one.\n\nNever infer permission from:\n- job title\n- name\n- past conversation\n- familiarity with the system\n\nAlways rely on server-controlled effective permissions.\n\nIf the user lacks permission:\n- explain the specific restriction briefly\n- do not attempt to bypass it\n\nDELETION AND HISTORY\n\nFollow BuildIQ\'s existing data-preservation rules.\n\nSome records may:\n- hard delete\n- soft delete/archive\n- void\n- retain dependent history\n\nAtlas must use the correct business rule for that record type.\n\nNever destroy historical financial or operational data merely because deletion was requested unless BuildIQ explicitly permits it.\n\nGENERAL RESPONSE QUALITY\n\nAtlas should feel like ChatGPT-quality conversation.\n\n- natural\n- concise when possible\n- detailed when necessary\n- context-aware\n- no robotic workflow language\n- no unnecessary confirmation steps\n- no repetitive disclaimers\n- no raw tool syntax\n- no XML/function protocol in user-facing text\n- no database jargon unless the user asks technical questions\n\nAnswer the user\'s question first.\n\nTOOLS SHOULD BE INVISIBLE\n\nDo not tell the user:\n"I\'m calling the equipment tool"\n"I\'m querying the database"\n"I\'m switching modes"\n\nSimply use the capability and respond naturally.\n\nNever expose:\n- raw function calls\n- JSON tool arguments\n- XML tags\n- internal state objects\n- routing labels\n- hidden control prompts\n- SQL\nunless an authorized developer explicitly asks for debugging output.\n\nCAPABILITY DISCOVERY\n\nAtlas should not depend on memorizing every action in this prompt.\n\nThe backend should expose a complete capability registry describing the user-facing actions Atlas can invoke.\n\nAtlas should be able to inspect or reason over that registry when deciding how to fulfill a BuildIQ request.\n\nThe registry should identify:\n- module\n- capability name\n- description\n- required inputs\n- optional inputs\n- required permission\n- whether confirmation is required\n- whether action is destructive\n- execution handler\n- verification handler\n\nThis registry is the authoritative action catalog for Atlas.\n\nCAPABILITY COMPLETENESS\n\nAtlas is considered incomplete when a legitimate UI capability exists without an equivalent Atlas capability.\n\nThe target state is:\n\n100% of legitimate user-facing BuildIQ capabilities represented in the Atlas capability registry.\n\nFor each capability, Atlas should support:\n- intent understanding\n- entity resolution\n- permission enforcement\n- required-input collection\n- confirmation\n- execution\n- verification\n- audit\n- natural response\n\nWhen a capability is missing, Atlas should not fabricate success.\n\nInstead, identify that the Atlas capability is currently unavailable.\n\nFINAL OPERATING PRINCIPLE\n\nAtlas is the conversational front door to all of BuildIQ.\n\nThe UI and Atlas are two interfaces over the same authorized business capabilities.\n\nA user should be able to operate BuildIQ by clicking through the application or by telling Atlas what they want.\n\nBoth paths must obey the same permissions, rules, validation, data integrity, and audit requirements.\n\nIf BuildIQ can do it and this user is authorized to do it, Atlas should be able to do it.'
+
 def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_context=None, turn_entity_matches=None, entity_memory=None, semantic_scope=None, product_intelligence=None, system_intelligence=None, authenticated_user=None):
     """The fixed instructions + live context, sent as the system prompt on
     every turn. The conversation itself travels separately as a real
@@ -7078,15 +7084,18 @@ def _build_atlas_system_prompt(snapshot, fields, project_context=None, active_co
     system_intelligence_line = "LIVE BUILDIQ SYSTEM INTELLIGENCE: " + (json.dumps(system_intelligence, ensure_ascii=False) if system_intelligence else "not requested or not authorized") + "\n\n"
     authenticated_user_line = "AUTHENTICATED BUILDIQ USER (server-owned session identity): " + (json.dumps(authenticated_user, ensure_ascii=False) if authenticated_user else "unavailable") + "\n\n"
     return (
-        "You are Atlas, the assistant inside BuildIQ. If asked your name, "
-        "say Atlas. People talk to you like they'd talk to Claude or "
-        "ChatGPT -- hold a real conversation, remember what's already been "
-        "said, and don't repeat a question that's already been answered. "
-        "Replies may be read aloud by text-to-speech, so keep them "
-        "conversational. MATCH THE PERSON'S TONE naturally: if they are casual, playful, use slang, or joke, you may answer with the same warmth and a light emoji when it genuinely fits; if they are serious, stay professional. Never sound like a canned workflow bot, and never force slang or emojis. In text mode, use short headings, bullets and whitespace whenever they make the answer easier to scan. Never dump a dense wall of text. In voice mode, keep it natural and concise.\n\n"
+        ATLAS_MASTER_OPERATING_PROMPT
+        + "\n\nIMPLEMENTATION-SPECIFIC BUILDIQ RULES (these refine the master operating prompt without weakening its permissions, grounding, confirmation, or audit requirements):\n\n"
+        "People talk to you like they'd talk to a top-tier general AI assistant -- hold a real conversation, remember what's already been said, and don't repeat a question that's already been answered. "
+        "Replies may be read aloud by text-to-speech, so keep them conversational. MATCH THE PERSON'S TONE naturally: if they are casual, playful, use slang, or joke, you may answer with the same warmth and a light emoji when it genuinely fits; if they are serious, stay professional. Never sound like a canned workflow bot, and never force slang or emojis. In text mode, use short headings, bullets and whitespace whenever they make the answer easier to scan. Never dump a dense wall of text. In voice mode, keep it natural and concise.\n\n"
         "You are the conversational front door to the BuildIQ capabilities and data this user is authorized to access. "
-        "Understand what they mean first, then use the grounded live context supplied by BuildIQ. Answer across BuildIQ, "
-        "drill into the right domain without making them name a module, and use controlled actions only where the server exposes them.\n"
+        "Understand what they mean first, then use the grounded live context supplied by BuildIQ when BuildIQ is relevant. "
+        "For unrelated general questions, answer normally without forcing the conversation back into BuildIQ. "
+        "For BuildIQ work, drill into the right domain without making them name a module, and use controlled actions only where the server exposes them.\n"
+        "CURRENT / OUTSIDE INFORMATION: You have live web search available in the visible answer pass. Use it when the answer depends on current prices, suppliers, news, laws, product availability, public websites, recent technical documentation, or anything else that may have changed. When you use web search, identify the sources and include useful source URLs. Never pretend stale model knowledge is current.\n"
+        "GENERAL COMPUTATION: You also have a sandboxed code-execution tool in the visible answer pass for calculations, data transformations, and computational reasoning when useful. Never pretend a calculation ran if the tool did not run successfully.\n"
+        "ATTACHMENTS: A user may attach a PDF, image, or text file to a message. If attachment content is supplied in the message, analyze it directly. If the user asks to attach/upload that file to a BuildIQ record, the controlled UI action bridge may consume the real pending attachment for an allowlisted file-upload route after confirmation.\n"
+        "BUILDIQ FULL-PARITY BRIDGE: Dedicated Atlas tools are preferred. If a legitimate BuildIQ UI operation has no dedicated Atlas tool, use the controlled invoke_buildiq_ui_action fallback described below. It is a fixed allowlist of real BuildIQ UI routes, runs as the authenticated user through the same route/business logic and permission checks, and always requires confirmation. It is not arbitrary HTTP and not unrestricted database access.\n"
         "You can also help someone submit a new concrete request by asking for whatever's still missing, one or two things at a time -- never "
         "more than that in one turn. A concrete request has these fields:\n"
         f"{CONCRETE_REQUEST_FIELDS}\n\n"
@@ -8002,9 +8011,37 @@ def _atlas_native_tool_declarations(only=None):
         if name not in ATLAS_TOOLS:
             continue  # never declare a tool that isn't actually registered/executable
         decl = NATIVE_DECLARATIONS.get(name)
-        if not decl:
+        if decl:
+            declarations.append({"name": name, "description": decl["description"], "input_schema": decl["input_schema"]})
             continue
-        declarations.append({"name": name, "description": decl["description"], "input_schema": decl["input_schema"]})
+
+        # Generic declaration for any explicitly allowed registered READ tool.
+        # The registry's parameter schema is authoritative. project_id is never
+        # model-supplied through native dispatch; canonical ids remain server-owned.
+        tool = ATLAS_TOOLS.get(name)
+        if not tool or tool.kind != "read":
+            continue
+        properties = {}
+        required = []
+        for param_name, spec in (tool.parameters or {}).items():
+            if param_name == "project_id" and name in ("set_project_context", "get_project_intelligence"):
+                continue
+            ptype = spec.get("type", "string")
+            prop = {"type": "number" if ptype == "number" else ("integer" if ptype == "integer" else "string")}
+            if spec.get("enum"):
+                prop["enum"] = spec["enum"]
+            properties[param_name] = prop
+            if spec.get("required"):
+                required.append(param_name)
+        declarations.append({
+            "name": name,
+            "description": tool.description,
+            "input_schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        })
     return declarations
 
 
@@ -8096,7 +8133,7 @@ def _build_pass1b_intelligence_prompt():
     )
 
 
-ATLAS_BUILD = "TEST-v11.5-cashflow-simple-admin"
+ATLAS_BUILD = "TEST-v15-atlas-general-ai-full-buildiq-parity-files-web-code"
 _ATLAS_BUILD_INFO_CACHE = {"value": None}
 
 
@@ -8159,7 +8196,7 @@ def _stream_claude_completion(api_key, system, messages, tools=None, max_tokens=
     through whatever index each real event actually carried, unmodified,
     so stream_atlas_turn's matching logic has the real data to check.
     """
-    payload = {"model": "claude-sonnet-4-6", "max_tokens": max_tokens, "system": system, "messages": messages, "stream": True}
+    payload = {"model": os.environ.get("ATLAS_MODEL", "claude-sonnet-4-6"), "max_tokens": max_tokens, "system": system, "messages": messages, "stream": True}
     if tools:
         payload["tools"] = tools
     _trace_start = time.perf_counter()
@@ -9312,7 +9349,24 @@ def stream_atlas_turn(user_text, draft):
 
     history = draft.get("history", [])[-60:]  # recent real turns
     messages = [{"role": h["role"], "content": h["content"]} for h in history]
-    messages.append({"role": "user", "content": user_text})
+    _pending_attachment=draft.get("pending_attachment")
+    _user_content=user_text
+    if _pending_attachment and _pending_attachment.get("data_b64"):
+        _mime=(_pending_attachment.get("mimetype") or "").lower()
+        _name=_pending_attachment.get("filename") or "attachment"
+        _blocks=[{"type":"text","text":user_text}]
+        if _mime in ("image/jpeg","image/png","image/gif","image/webp"):
+            _blocks.append({"type":"image","source":{"type":"base64","media_type":_mime,"data":_pending_attachment["data_b64"]}})
+        elif _mime=="application/pdf":
+            _blocks.append({"type":"document","source":{"type":"base64","media_type":"application/pdf","data":_pending_attachment["data_b64"]},"title":_name})
+        elif _mime.startswith("text/") or _name.lower().endswith((".txt",".md",".csv",".json",".log")):
+            try:
+                _decoded=base64.b64decode(_pending_attachment["data_b64"]).decode("utf-8",errors="replace")
+                _blocks.append({"type":"text","text":"Attachment "+_name+":\n"+_decoded[:120000]})
+            except Exception:
+                pass
+        _user_content=_blocks
+    messages.append({"role": "user", "content": _user_content})
 
     raw_text = ""
     visible_sent = ""
@@ -10088,6 +10142,33 @@ Then stop."""
         # the already-successful project switch is not invalidated by a
         # failed BONUS attempt at gathering intelligence in the same turn.
 
+    # PASS 1C — one additional authoritative BuildIQ read when useful.
+    tool_result_content_1c=None; tool_result_is_error_1c=False; tool_use_id_1c=None; tool_name_1c=None; tool_input_1c=None
+    if turn_level_error is None:
+        read_names=[n for n,t in ATLAS_TOOLS.items() if t.kind=="read" and n not in ("set_project_context","get_project_intelligence")]
+        if read_names:
+            router_system=("You are Atlas's hidden BuildIQ read router. If the current user turn needs ONE authoritative private BuildIQ read beyond project context/intelligence, call exactly one best read tool. If it is general knowledge, writing, math, brainstorming, or current PUBLIC information for web search, output exactly NO_TOOL. Never answer the user and never call a write tool.")
+            blocks={}; stop=None; err=None
+            for ev in _stream_claude_completion(api_key,router_system,messages,tools=_atlas_native_tool_declarations(only=read_names),max_tokens=350,label="PASS1C"):
+                if ev[0]=="tool_use_start": _,idx,nm,tid=ev; blocks[idx]={"name":nm,"id":tid,"input_raw":"","completed":False}
+                elif ev[0]=="tool_input_delta":
+                    _,idx,frag=ev
+                    if idx in blocks: blocks[idx]["input_raw"]+=frag
+                elif ev[0]=="block_stop":
+                    idx=ev[1]
+                    if idx in blocks: blocks[idx]["completed"]=True
+                elif ev[0]=="stop": stop=ev[1]
+                elif ev[0]=="error": err=ev[1]
+            complete=[b for b in blocks.values() if b.get("completed")]
+            if not err and stop=="tool_use" and len(complete)==1 and complete[0]["name"] in read_names:
+                b=complete[0]
+                try: parsed=json.loads(b["input_raw"] or "{}")
+                except Exception: parsed=None
+                if isinstance(parsed,dict):
+                    res=execute_tool(b["name"],parsed,current_user,session_context=project_context)
+                    tool_name_1c=b["name"]; tool_use_id_1c=b["id"]; tool_input_1c=parsed
+                    tool_result_content_1c=json.dumps(res.data if res.success else {"error":res.error}); tool_result_is_error_1c=not res.success
+
     if turn_level_error == "__handled_fail_safe__":
         # Already replied above with a safe, fixed message and logged
         # the reason -- fall through to the shared persistence tail
@@ -10138,11 +10219,20 @@ Then stop."""
                 {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use_id_1b, "name": tool_name_1b, "input": tool_input_1b}]},
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id_1b, "content": tool_result_content_1b, "is_error": tool_result_is_error_1b}]},
             ]
+        if tool_result_content_1c is not None:
+            messages_pass2 = messages_pass2 + [
+                {"role":"assistant","content":[{"type":"tool_use","id":tool_use_id_1c,"name":tool_name_1c,"input":tool_input_1c}]},
+                {"role":"user","content":[{"type":"tool_result","tool_use_id":tool_use_id_1c,"content":tool_result_content_1c,"is_error":tool_result_is_error_1c}]},
+            ]
         pass2_error = {"value": None}
 
         def _pass2_delta_source():
             _first_text_traced = False
-            for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=None, label="PASS2"):
+            general_tools=[
+                {"type":"web_search_20250305","name":"web_search","max_uses":5,"user_location":{"type":"approximate","city":"Houston","region":"Texas","country":"US","timezone":"America/Chicago"}},
+                {"type":"code_execution_20260521","name":"code_execution"},
+            ]
+            for ev in _stream_claude_completion(api_key, system, messages_pass2, tools=general_tools, max_tokens=int(os.environ.get("ATLAS_MAX_TOKENS", "2200")), label="PASS2"):
                 if ev[0] == "text_delta":
                     if not _first_text_traced:
                         _atlas_trace("PASS2_FIRST_TEXT")
@@ -10569,17 +10659,32 @@ def assistant_ask():
         _atlas_trace("ATLAS_BUILD_INFO", **_atlas_build_info())
 
     transcribe_error = None
+    incoming_attachment = None
     if request.content_type and "multipart/form-data" in request.content_type:
         audio_file = request.files.get("audio")
-        if not audio_file:
-            question = ""
-        else:
+        attachment_file = request.files.get("attachment")
+        if audio_file:
             audio_bytes, mime_type = audio_file.read(), audio_file.mimetype
             question, transcribe_error = transcribe_via_whisper(audio_bytes, mime_type)
             if question is None and transcribe_error is None:
                 # Whisper not configured -- fall back to ElevenLabs.
                 question, transcribe_error = transcribe_via_elevenlabs(audio_bytes, mime_type)
             question = (question or "").strip()
+        else:
+            question = (request.form.get("question") or "").strip()
+        if attachment_file and attachment_file.filename:
+            attachment_bytes=attachment_file.read()
+            # Keep conversational uploads deliberately bounded. BuildIQ's real
+            # destination route will still apply its own extension/content rules.
+            if len(attachment_bytes) > 12 * 1024 * 1024:
+                transcribe_error = "Attachment is too large. Maximum Atlas attachment size is 12 MB."
+            else:
+                incoming_attachment={
+                    "filename": secure_filename(attachment_file.filename) or "attachment.bin",
+                    "mimetype": attachment_file.mimetype or "application/octet-stream",
+                    "size": len(attachment_bytes),
+                    "data_b64": base64.b64encode(attachment_bytes).decode("ascii"),
+                }
         raw_mode = request.form.get("interaction_mode")
     else:
         body = request.get_json(silent=True) or {}
@@ -10602,6 +10707,12 @@ def assistant_ask():
         else:
             draft={"mode":"chat","fields":{},"history":[],"pending_submit":None,"pending_write":None,"project_context":{},"active_context":{},"entity_memory":[],"interaction_mode":"text","conversation_id":None}
         ATLAS_SESSIONS[token]=draft
+
+    if incoming_attachment is not None:
+        draft["pending_attachment"] = incoming_attachment
+        question = (question + "\n\n[Attached file available to Atlas: " + incoming_attachment["filename"] +
+                    " | " + incoming_attachment["mimetype"] + " | " + str(incoming_attachment["size"]) +
+                    " bytes. Analyze it when relevant. For a BuildIQ upload action, use the real pending attachment through the controlled UI capability.]").strip()
 
     # PERSISTENT HISTORY: a conversation_id may already be attached to
     # this in-memory session (set by /assistant/conversations/new or by
@@ -11117,6 +11228,182 @@ import intelligence
 intelligence.register_atlas_tools(register_tool, SP_STATUS_OPTIONS, PURCHASE_STATUS_OPTIONS)
 
 
+def _atlas_permission_matches(user, requirement):
+    """True when the authenticated user satisfies a tool's manual permission rule."""
+    if isinstance(requirement, (tuple, list)):
+        return any(user_has_permission(user, p) for p in requirement)
+    return bool(requirement) and user_has_permission(user, requirement)
+
+
+def _tool_get_atlas_capability_registry(user, module=None, kind=None):
+    """Permission-filtered view of Atlas's actual callable registry.
+
+    This is metadata only: it never executes another tool and never widens
+    permissions. It lets Atlas discover what the backend really exposes
+    instead of hallucinating capability from the system prompt.
+    """
+    module_q = (module or "").strip().lower()
+    kind_q = (kind or "").strip().lower()
+    capabilities = []
+    for name, tool in sorted(ATLAS_TOOLS.items()):
+        if name == "get_atlas_capability_registry":
+            continue
+        if kind_q and tool.kind != kind_q:
+            continue
+        haystack = f"{name} {tool.description}".lower()
+        if module_q and module_q not in haystack:
+            continue
+        if not _atlas_permission_matches(user, tool.permission):
+            continue
+        if not user_has_permission(user, tool.atlas_permission):
+            continue
+        capabilities.append({
+            "name": tool.name,
+            "kind": tool.kind,
+            "description": tool.description,
+            "required_permission": tool.permission,
+            "atlas_permission": tool.atlas_permission,
+            "confirmation_required": bool(tool.confirm),
+            "parameters": tool.parameters,
+        })
+    return {
+        "available": True,
+        "count": len(capabilities),
+        "capabilities": capabilities,
+        "note": "This is the server-owned Atlas capability registry filtered to the authenticated user's effective permissions."
+    }
+
+
+register_tool(
+    name="get_atlas_capability_registry",
+    description=(
+        "Inspect Atlas's actual permission-filtered BuildIQ capability registry. "
+        "Use this when deciding whether Atlas can perform a requested BuildIQ operation, "
+        "or when the user asks what Atlas can do. This is metadata only and never executes another action."
+    ),
+    parameters={
+        "module": {"type": "string", "required": False},
+        "kind": {"type": "string", "required": False, "enum": ["read", "write"]},
+    },
+    permission="module:atlas:view",
+    atlas_permission="atlas:view_business_data",
+    kind="read",
+    handler=_tool_get_atlas_capability_registry,
+    confirm=False,
+)
+
+
+# Expand native Claude dispatch to every explicitly registered READ capability.
+# Writes remain on the existing controlled proposal/confirmation/execution path.
+ATLAS_NATIVE_TOOLS_ALLOWED = [
+    name for name, tool in ATLAS_TOOLS.items()
+    if tool.kind == "read"
+]
+
+
+# ---------------------------------------------------------------------------
+# ATLAS V14 FULL UI-PARITY BRIDGE (TEST)
+# ---------------------------------------------------------------------------
+ATLAS_UI_CAPABILITIES = json.loads('{"uploaded_photo":{"endpoint":"uploaded_photo","path":"/uploads/<filename>","methods":["GET"],"path_vars":["filename"],"form_fields":[],"file_fields":[],"query_fields":[]},"team_list":{"endpoint":"team_list","path":"/team","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"delete_team_member":{"endpoint":"delete_team_member","path":"/team/<int:user_id>/delete","methods":["POST"],"path_vars":["user_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"whatsapp_site_groups_list":{"endpoint":"whatsapp_site_groups_list","path":"/whatsapp-groups","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"whatsapp_site_groups_new":{"endpoint":"whatsapp_site_groups_new","path":"/whatsapp-groups/new","methods":["POST"],"path_vars":[],"form_fields":["chat_id","keyword"],"file_fields":[],"query_fields":[]},"whatsapp_site_groups_delete":{"endpoint":"whatsapp_site_groups_delete","path":"/whatsapp-groups/<int:group_id>/delete","methods":["POST"],"path_vars":["group_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"whatsapp_site_groups_test":{"endpoint":"whatsapp_site_groups_test","path":"/whatsapp-groups/test","methods":["POST"],"path_vars":[],"form_fields":["chat_id","label"],"file_fields":[],"query_fields":[]},"home":{"endpoint":"home","path":"/","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_dashboard":{"endpoint":"sitepulse_dashboard","path":"/sitepulse/","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["location","status"]},"sitepulse_new_asset":{"endpoint":"sitepulse_new_asset","path":"/sitepulse/asset/new","methods":["GET","POST"],"path_vars":[],"form_fields":["daily_rate","description","hours_mileage","location","monthly_rate","name","serial_number","value","weekly_rate","year"],"file_fields":[],"query_fields":[]},"sitepulse_view_asset":{"endpoint":"sitepulse_view_asset","path":"/sitepulse/asset/<int:asset_id>","methods":["GET"],"path_vars":["asset_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_edit_asset_details":{"endpoint":"sitepulse_edit_asset_details","path":"/sitepulse/asset/<int:asset_id>/edit-details","methods":["POST"],"path_vars":["asset_id"],"form_fields":["daily_rate","description","monthly_rate","name","serial_number","value","weekly_rate","year"],"file_fields":[],"query_fields":[]},"sitepulse_update_asset":{"endpoint":"sitepulse_update_asset","path":"/sitepulse/asset/<int:asset_id>/update","methods":["POST"],"path_vars":["asset_id"],"form_fields":["hours_mileage","location","move_reason","schedule_date","schedule_time","status"],"file_fields":[],"query_fields":[]},"sitepulse_complete_scheduled_move":{"endpoint":"sitepulse_complete_scheduled_move","path":"/sitepulse/move/<int:move_id>/complete","methods":["POST"],"path_vars":["move_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_cancel_scheduled_move":{"endpoint":"sitepulse_cancel_scheduled_move","path":"/sitepulse/move/<int:move_id>/cancel","methods":["POST"],"path_vars":["move_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_quick_status":{"endpoint":"sitepulse_quick_status","path":"/sitepulse/asset/<int:asset_id>/status","methods":["POST"],"path_vars":["asset_id"],"form_fields":["status"],"file_fields":[],"query_fields":[]},"sitepulse_new_usage":{"endpoint":"sitepulse_new_usage","path":"/sitepulse/asset/<int:asset_id>/usage/new","methods":["POST"],"path_vars":["asset_id"],"form_fields":["client","duration_unit","job_address","job_name","notes","out_date","project_id","return_date","usage_type"],"file_fields":["photo"],"query_fields":[]},"sitepulse_update_usage":{"endpoint":"sitepulse_update_usage","path":"/sitepulse/usage/<int:usage_id>/update","methods":["POST"],"path_vars":["usage_id"],"form_fields":["client","duration_unit","job_address","job_name","notes","out_date","project_id","return_date","usage_type"],"file_fields":["photo"],"query_fields":[]},"sitepulse_delete_usage":{"endpoint":"sitepulse_delete_usage","path":"/sitepulse/usage/<int:usage_id>/delete","methods":["POST"],"path_vars":["usage_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_new_maintenance":{"endpoint":"sitepulse_new_maintenance","path":"/sitepulse/asset/<int:asset_id>/maintenance/new","methods":["POST"],"path_vars":["asset_id"],"form_fields":["entry_date","hours_at_service","parts","resolved","work_done"],"file_fields":["photo"],"query_fields":[]},"sitepulse_new_mileage":{"endpoint":"sitepulse_new_mileage","path":"/sitepulse/asset/<int:asset_id>/mileage/new","methods":["POST"],"path_vars":["asset_id"],"form_fields":["mileage","notes","reading_date"],"file_fields":[],"query_fields":[]},"sitepulse_update_maintenance":{"endpoint":"sitepulse_update_maintenance","path":"/sitepulse/maintenance/<int:entry_id>/update","methods":["POST"],"path_vars":["entry_id"],"form_fields":["entry_date","hours_at_service","parts","resolved","work_done"],"file_fields":["photo"],"query_fields":[]},"sitepulse_delete_maintenance":{"endpoint":"sitepulse_delete_maintenance","path":"/sitepulse/maintenance/<int:entry_id>/delete","methods":["POST"],"path_vars":["entry_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_activity_log":{"endpoint":"sitepulse_activity_log","path":"/sitepulse/activity","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_asset_activity_log":{"endpoint":"sitepulse_asset_activity_log","path":"/sitepulse/asset/<int:asset_id>/activity","methods":["GET"],"path_vars":["asset_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_geocode":{"endpoint":"sitepulse_geocode","path":"/sitepulse/geocode","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["address"]},"sitepulse_rentals_list":{"endpoint":"sitepulse_rentals_list","path":"/sitepulse/rentals","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["show"]},"sitepulse_new_rental":{"endpoint":"sitepulse_new_rental","path":"/sitepulse/rentals/new","methods":["GET","POST"],"path_vars":[],"form_fields":["due_date","equipment_description","job_name","notes","project_id","rate_amount","rate_period","rented_date","vendor"],"file_fields":[],"query_fields":[]},"sitepulse_update_rental":{"endpoint":"sitepulse_update_rental","path":"/sitepulse/rentals/<int:rental_id>/update","methods":["POST"],"path_vars":["rental_id"],"form_fields":["due_date","equipment_description","job_name","notes","rate_amount","rate_period","rented_date","vendor"],"file_fields":[],"query_fields":[]},"sitepulse_return_rental":{"endpoint":"sitepulse_return_rental","path":"/sitepulse/rentals/<int:rental_id>/return","methods":["POST"],"path_vars":["rental_id"],"form_fields":["returned_date"],"file_fields":[],"query_fields":[]},"sitepulse_reopen_rental":{"endpoint":"sitepulse_reopen_rental","path":"/sitepulse/rentals/<int:rental_id>/reopen","methods":["POST"],"path_vars":["rental_id"],"form_fields":["reason"],"file_fields":[],"query_fields":[]},"sitepulse_edit_rental":{"endpoint":"sitepulse_edit_rental","path":"/sitepulse/rentals/<int:rental_id>/edit","methods":["GET","POST"],"path_vars":["rental_id"],"form_fields":["due_date","equipment_description","job_name","notes","rate_amount","rate_period","rented_date","vendor"],"file_fields":[],"query_fields":[]},"sitepulse_rental_swap_request":{"endpoint":"sitepulse_rental_swap_request","path":"/sitepulse/rentals/<int:rental_id>/swap/request","methods":["POST"],"path_vars":["rental_id"],"form_fields":["reason"],"file_fields":[],"query_fields":[]},"sitepulse_rental_swap_vendor_contacted":{"endpoint":"sitepulse_rental_swap_vendor_contacted","path":"/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/vendor-contacted","methods":["POST"],"path_vars":["rental_id","swap_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_rental_swap_scheduled":{"endpoint":"sitepulse_rental_swap_scheduled","path":"/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/scheduled","methods":["POST"],"path_vars":["rental_id","swap_id"],"form_fields":["scheduled_date"],"file_fields":[],"query_fields":[]},"sitepulse_rental_swap_complete":{"endpoint":"sitepulse_rental_swap_complete","path":"/sitepulse/rentals/<int:rental_id>/swap/<int:swap_id>/complete","methods":["POST"],"path_vars":["rental_id","swap_id"],"form_fields":["incoming_equipment_description"],"file_fields":[],"query_fields":[]},"sitepulse_rental_activity_log":{"endpoint":"sitepulse_rental_activity_log","path":"/sitepulse/rentals/<int:rental_id>/activity","methods":["GET"],"path_vars":["rental_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_dashboard":{"endpoint":"cashflow_dashboard","path":"/cashflow","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["client","due","project_id","q","quick","status"]},"cashflow_project_detail":{"endpoint":"cashflow_project_detail","path":"/cashflow/projects/<int:job_id>","methods":["GET"],"path_vars":["job_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_milestone_status":{"endpoint":"cashflow_milestone_status","path":"/cashflow/milestones/<int:milestone_id>/status","methods":["POST"],"path_vars":["milestone_id"],"form_fields":["due_date","status"],"file_fields":[],"query_fields":[]},"cashflow_invoice_new":{"endpoint":"cashflow_invoice_new","path":"/cashflow/invoices/new","methods":["GET","POST"],"path_vars":[],"form_fields":["amount","client","description","due_date","invoice_date","invoice_number","milestone_id","retainage","retainage_enabled","retainage_mode","retainage_percent","status","workspace"],"file_fields":[],"query_fields":["job_id","milestone_id"]},"cashflow_job_new":{"endpoint":"cashflow_job_new","path":"/cashflow/jobs/new","methods":["GET","POST"],"path_vars":[],"form_fields":["address","budget","client","client_contact","client_email","client_phone","job_number","name","notes"],"file_fields":[],"query_fields":[]},"cashflow_job_edit":{"endpoint":"cashflow_job_edit","path":"/cashflow/jobs/<int:job_id>/edit","methods":["GET","POST"],"path_vars":["job_id"],"form_fields":["address","budget","client","client_contact","client_email","client_phone","job_number","name","notes"],"file_fields":[],"query_fields":[]},"cashflow_invoice_detail":{"endpoint":"cashflow_invoice_detail","path":"/cashflow/invoices/<int:invoice_id>","methods":["GET"],"path_vars":["invoice_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_invoice_edit":{"endpoint":"cashflow_invoice_edit","path":"/cashflow/invoices/<int:invoice_id>/edit","methods":["GET","POST"],"path_vars":["invoice_id"],"form_fields":["amount","client","description","due_date","invoice_date","invoice_number","retainage","retainage_enabled","retainage_mode","retainage_percent","status","workspace"],"file_fields":[],"query_fields":[]},"cashflow_payment_add":{"endpoint":"cashflow_payment_add","path":"/cashflow/invoices/<int:invoice_id>/payment","methods":["POST"],"path_vars":["invoice_id"],"form_fields":["amount","notes","payment_date","reference"],"file_fields":[],"query_fields":[]},"cashflow_note_add":{"endpoint":"cashflow_note_add","path":"/cashflow/invoices/<int:invoice_id>/note","methods":["POST"],"path_vars":["invoice_id"],"form_fields":["note"],"file_fields":[],"query_fields":[]},"cashflow_document_add":{"endpoint":"cashflow_document_add","path":"/cashflow/invoices/<int:invoice_id>/document","methods":["POST"],"path_vars":["invoice_id"],"form_fields":["document_type"],"file_fields":["document"],"query_fields":[]},"cashflow_document_file":{"endpoint":"cashflow_document_file","path":"/cashflow/documents/<int:document_id>","methods":["GET"],"path_vars":["document_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_send_review":{"endpoint":"cashflow_send_review","path":"/cashflow/invoices/<int:invoice_id>/send-review","methods":["POST"],"path_vars":["invoice_id"],"form_fields":["review_due_date","reviewer_user_id"],"file_fields":[],"query_fields":[]},"cashflow_review_reminder":{"endpoint":"cashflow_review_reminder","path":"/cashflow/invoices/<int:invoice_id>/review-reminder","methods":["POST"],"path_vars":["invoice_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_review_action":{"endpoint":"cashflow_review_action","path":"/cashflow/invoices/<int:invoice_id>/review","methods":["POST"],"path_vars":["invoice_id"],"form_fields":["action","comment"],"file_fields":[],"query_fields":[]},"cashflow_mark_sent":{"endpoint":"cashflow_mark_sent","path":"/cashflow/invoices/<int:invoice_id>/mark-sent","methods":["POST"],"path_vars":["invoice_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_void":{"endpoint":"cashflow_void","path":"/cashflow/invoices/<int:invoice_id>/void","methods":["POST"],"path_vars":["invoice_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"cashflow_sub_invoice_new":{"endpoint":"cashflow_sub_invoice_new","path":"/cashflow/sub-invoices/new","methods":["POST"],"path_vars":[],"form_fields":["amount","description","due_date","invoice_date","invoice_number","project_id","vendor"],"file_fields":[],"query_fields":[]},"cashflow_sub_invoice_status":{"endpoint":"cashflow_sub_invoice_status","path":"/cashflow/sub-invoices/<int:sub_id>/status","methods":["POST"],"path_vars":["sub_id"],"form_fields":["status"],"file_fields":[],"query_fields":[]},"cashflow_export":{"endpoint":"cashflow_export","path":"/cashflow/export.csv","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"project_deployment_dashboard":{"endpoint":"project_deployment_dashboard","path":"/deployment","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"project_deployment_start":{"endpoint":"project_deployment_start","path":"/deployment/start/<int:project_id>","methods":["POST"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"project_deployment_detail":{"endpoint":"project_deployment_detail","path":"/deployment/<int:deployment_id>","methods":["GET"],"path_vars":["deployment_id"],"form_fields":[],"file_fields":[],"query_fields":["mode"]},"project_deployment_pdf":{"endpoint":"project_deployment_pdf","path":"/deployment/<int:deployment_id>/pdf","methods":["GET"],"path_vars":["deployment_id"],"form_fields":[],"file_fields":[],"query_fields":["disposition"]},"project_deployment_edit":{"endpoint":"project_deployment_edit","path":"/deployment/<int:deployment_id>/edit","methods":["GET","POST"],"path_vars":["deployment_id"],"form_fields":["yesno_drawings_specs_approved"],"file_fields":[],"query_fields":[]},"project_deployment_item_complete":{"endpoint":"project_deployment_item_complete","path":"/deployment/<int:deployment_id>/item/<int:item_id>/complete","methods":["POST"],"path_vars":["deployment_id","item_id"],"form_fields":["due_date","notes","owner"],"file_fields":[],"query_fields":[]},"project_deployment_item_reopen":{"endpoint":"project_deployment_item_reopen","path":"/deployment/<int:deployment_id>/item/<int:item_id>/reopen","methods":["POST"],"path_vars":["deployment_id","item_id"],"form_fields":["reason"],"file_fields":[],"query_fields":[]},"project_deployment_item_override":{"endpoint":"project_deployment_item_override","path":"/deployment/<int:deployment_id>/item/<int:item_id>/override","methods":["POST"],"path_vars":["deployment_id","item_id"],"form_fields":["reason"],"file_fields":[],"query_fields":[]},"project_deployment_status":{"endpoint":"project_deployment_status","path":"/deployment/<int:deployment_id>/status","methods":["POST"],"path_vars":["deployment_id"],"form_fields":["target_status"],"file_fields":[],"query_fields":[]},"project_deployment_reopen":{"endpoint":"project_deployment_reopen","path":"/deployment/<int:deployment_id>/reopen","methods":["POST"],"path_vars":["deployment_id"],"form_fields":["reason"],"file_fields":[],"query_fields":[]},"project_deployment_reset":{"endpoint":"project_deployment_reset","path":"/deployment/<int:deployment_id>/reset","methods":["POST"],"path_vars":["deployment_id"],"form_fields":["confirm"],"file_fields":[],"query_fields":[]},"project_deployment_activity":{"endpoint":"project_deployment_activity","path":"/deployment/<int:deployment_id>/activity","methods":["GET"],"path_vars":["deployment_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_project_photos":{"endpoint":"sitepulse_project_photos","path":"/sitepulse/project/<int:project_id>/photos","methods":["GET","POST"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_photo_caption":{"endpoint":"sitepulse_photo_caption","path":"/sitepulse/photos/<int:photo_id>/caption","methods":["POST"],"path_vars":["photo_id"],"form_fields":["caption"],"file_fields":[],"query_fields":[]},"sitepulse_photo_file":{"endpoint":"sitepulse_photo_file","path":"/sitepulse/photos/<int:photo_id>/file","methods":["GET"],"path_vars":["photo_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_project_reports":{"endpoint":"sitepulse_project_reports","path":"/sitepulse/project/<int:project_id>/reports","methods":["GET"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_create":{"endpoint":"sitepulse_report_create","path":"/sitepulse/project/<int:project_id>/reports/new","methods":["POST"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_project_capture":{"endpoint":"sitepulse_project_capture","path":"/sitepulse/project/<int:project_id>/capture","methods":["GET"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_group_create":{"endpoint":"sitepulse_group_create","path":"/sitepulse/project/<int:project_id>/groups","methods":["POST"],"path_vars":["project_id"],"form_fields":["name","report_id"],"file_fields":[],"query_fields":[]},"sitepulse_group_rename":{"endpoint":"sitepulse_group_rename","path":"/sitepulse/groups/<int:group_id>/rename","methods":["POST"],"path_vars":["group_id"],"form_fields":["name"],"file_fields":[],"query_fields":[]},"sitepulse_group_detail":{"endpoint":"sitepulse_group_detail","path":"/sitepulse/groups/<int:group_id>","methods":["GET"],"path_vars":["group_id"],"form_fields":[],"file_fields":[],"query_fields":["report_id"]},"sitepulse_group_photos_upload":{"endpoint":"sitepulse_group_photos_upload","path":"/sitepulse/groups/<int:group_id>/photos","methods":["POST"],"path_vars":["group_id"],"form_fields":["report_id"],"file_fields":[],"query_fields":[]},"sitepulse_report_photo_add":{"endpoint":"sitepulse_report_photo_add","path":"/sitepulse/reports/<int:report_id>/photos/<int:photo_id>/add","methods":["POST"],"path_vars":["report_id","photo_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_photo_remove":{"endpoint":"sitepulse_report_photo_remove","path":"/sitepulse/reports/<int:report_id>/photos/<int:photo_id>/remove","methods":["POST"],"path_vars":["report_id","photo_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_detail":{"endpoint":"sitepulse_report_detail","path":"/sitepulse/reports/<int:report_id>","methods":["GET","POST"],"path_vars":["report_id"],"form_fields":["general_notes","has_issues","issues_blockers","next_steps","report_date","work_completed"],"file_fields":[],"query_fields":[]},"sitepulse_report_review":{"endpoint":"sitepulse_report_review","path":"/sitepulse/reports/<int:report_id>/review","methods":["GET"],"path_vars":["report_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_preview":{"endpoint":"sitepulse_report_preview","path":"/sitepulse/reports/<int:report_id>/preview","methods":["GET"],"path_vars":["report_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_submit":{"endpoint":"sitepulse_report_submit","path":"/sitepulse/reports/<int:report_id>/submit","methods":["POST"],"path_vars":["report_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_reopen":{"endpoint":"sitepulse_report_reopen","path":"/sitepulse/reports/<int:report_id>/reopen","methods":["POST"],"path_vars":["report_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_version_pdf":{"endpoint":"sitepulse_report_version_pdf","path":"/sitepulse/reports/<int:report_id>/versions/<int:version_id>/pdf","methods":["GET"],"path_vars":["report_id","version_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_report_version_view":{"endpoint":"sitepulse_report_version_view","path":"/sitepulse/reports/<int:report_id>/versions/<int:version_id>","methods":["GET"],"path_vars":["report_id","version_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_procurement_rental_swaps":{"endpoint":"sitepulse_procurement_rental_swaps","path":"/sitepulse/procurement/rental-swaps","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_delete_rental":{"endpoint":"sitepulse_delete_rental","path":"/sitepulse/rentals/<int:rental_id>/delete","methods":["POST"],"path_vars":["rental_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"sitepulse_reports_select_project":{"endpoint":"sitepulse_reports_select_project","path":"/sitepulse/reports/select-project","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["q"]},"inventory_home":{"endpoint":"inventory_home","path":"/inventory/","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_materials_list":{"endpoint":"inventory_materials_list","path":"/inventory/materials","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["q"]},"inventory_new_material":{"endpoint":"inventory_new_material","path":"/inventory/materials/new","methods":["GET","POST"],"path_vars":[],"form_fields":["item_name","notes","quantity","shelf_location","site","unit"],"file_fields":[],"query_fields":[]},"inventory_delete_material":{"endpoint":"inventory_delete_material","path":"/inventory/materials/<int:material_id>/delete","methods":["POST"],"path_vars":["material_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_concrete_list":{"endpoint":"inventory_concrete_list","path":"/inventory/concrete","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["pour_date","project","status"]},"inventory_new_concrete":{"endpoint":"inventory_new_concrete","path":"/inventory/concrete/new","methods":["GET","POST"],"path_vars":[],"form_fields":["drilling_required","lab_required","pump_type"],"file_fields":[],"query_fields":[]},"inventory_view_concrete":{"endpoint":"inventory_view_concrete","path":"/inventory/concrete/<int:request_id>","methods":["GET"],"path_vars":["request_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_edit_concrete":{"endpoint":"inventory_edit_concrete","path":"/inventory/concrete/<int:request_id>/edit","methods":["GET","POST"],"path_vars":["request_id"],"form_fields":["area_description","concrete_amount","drilling_required","drilling_time","job_site_address","lab_required","lab_time","mix_design_psi","mix_slump","pour_date","pour_time","project","project_id","pump_arrival_time","pump_size","pump_type","truck_spacing"],"file_fields":[],"query_fields":[]},"inventory_place_concrete_order":{"endpoint":"inventory_place_concrete_order","path":"/inventory/concrete/<int:request_id>/order","methods":["GET","POST"],"path_vars":["request_id"],"form_fields":["concrete_arrival_time","concrete_company","concrete_company_phone","drilling_company","drilling_company_phone","drilling_time","lab_company","lab_time","pump_arrival_time","pump_company","pump_company_phone"],"file_fields":[],"query_fields":[]},"inventory_update_concrete_status":{"endpoint":"inventory_update_concrete_status","path":"/inventory/concrete/<int:request_id>/status","methods":["POST"],"path_vars":["request_id"],"form_fields":["status"],"file_fields":[],"query_fields":[]},"inventory_delete_concrete":{"endpoint":"inventory_delete_concrete","path":"/inventory/concrete/<int:request_id>/delete","methods":["POST"],"path_vars":["request_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_purchase_list":{"endpoint":"inventory_purchase_list","path":"/inventory/purchase","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_new_purchase":{"endpoint":"inventory_new_purchase","path":"/inventory/purchase/new","methods":["GET","POST"],"path_vars":[],"form_fields":["job_name","location_description","needed_on","project_id","request_date","requestor_date","requestor_signature","source_of_supply"],"file_fields":[],"query_fields":[]},"inventory_view_purchase":{"endpoint":"inventory_view_purchase","path":"/inventory/purchase/<int:request_id>","methods":["GET"],"path_vars":["request_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_activity_log":{"endpoint":"inventory_activity_log","path":"/inventory/activity","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_concrete_activity_log":{"endpoint":"inventory_concrete_activity_log","path":"/inventory/concrete/<int:request_id>/activity","methods":["GET"],"path_vars":["request_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_purchase_activity_log":{"endpoint":"inventory_purchase_activity_log","path":"/inventory/purchase/<int:request_id>/activity","methods":["GET"],"path_vars":["request_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"inventory_edit_purchase":{"endpoint":"inventory_edit_purchase","path":"/inventory/purchase/<int:request_id>/edit","methods":["GET","POST"],"path_vars":["request_id"],"form_fields":["job_name","location_description","needed_on","pr_number","project_id","request_date","source_of_supply"],"file_fields":[],"query_fields":[]},"inventory_update_purchase_status":{"endpoint":"inventory_update_purchase_status","path":"/inventory/purchase/<int:request_id>/status","methods":["POST"],"path_vars":["request_id"],"form_fields":["status"],"file_fields":[],"query_fields":[]},"inventory_place_purchase_order":{"endpoint":"inventory_place_purchase_order","path":"/inventory/purchase/<int:request_id>/order","methods":["GET","POST"],"path_vars":["request_id"],"form_fields":["expected_delivery_date","vendor_company","vendor_company_phone"],"file_fields":[],"query_fields":[]},"inventory_delete_purchase":{"endpoint":"inventory_delete_purchase","path":"/inventory/purchase/<int:request_id>/delete","methods":["POST"],"path_vars":["request_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"request_center":{"endpoint":"request_center","path":"/requests","methods":["GET","POST"],"path_vars":[],"form_fields":["department","original_request"],"file_fields":[],"query_fields":[]},"request_resubmit":{"endpoint":"request_resubmit","path":"/requests/<int:request_id>/resubmit","methods":["GET","POST"],"path_vars":["request_id"],"form_fields":["department","original_request"],"file_fields":[],"query_fields":[]},"product_intelligence":{"endpoint":"product_intelligence","path":"/admin/product-intelligence","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["approval","department","status"]},"roadmap_item_update":{"endpoint":"roadmap_item_update","path":"/admin/roadmap/<int:item_id>/update","methods":["POST"],"path_vars":["item_id"],"form_fields":["lane","note","progress_pct"],"file_fields":[],"query_fields":[]},"product_intelligence_detail":{"endpoint":"product_intelligence_detail","path":"/admin/product-intelligence/<int:request_id>","methods":["GET","POST"],"path_vars":["request_id"],"form_fields":["action","back","buildiq_module","confirm_release","department","internal_notes","reason","release_note","return_to","solution_built","status","testing_notes","user_feedback"],"file_fields":[],"query_fields":["back"]},"product_intelligence_preview":{"endpoint":"product_intelligence_preview","path":"/admin/product-intelligence/preview","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["email"]},"admin_users":{"endpoint":"admin_users","path":"/admin/users","methods":["GET","POST"],"path_vars":[],"form_fields":["action","department","new_department","user_id"],"file_fields":[],"query_fields":[]},"admin_user_permissions":{"endpoint":"admin_user_permissions","path":"/admin/users/<int:user_id>/permissions","methods":["GET","POST"],"path_vars":["user_id"],"form_fields":["action","permission_id","role_id","state"],"file_fields":[],"query_fields":[]},"tracker_dashboard":{"endpoint":"tracker_dashboard","path":"/tracker/","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":["client","dir","filter","sort","status"]},"tracker_archive":{"endpoint":"tracker_archive","path":"/tracker/archive","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_delete_project":{"endpoint":"tracker_delete_project","path":"/tracker/project/<int:project_id>/delete","methods":["POST"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_upload_quote_file":{"endpoint":"tracker_upload_quote_file","path":"/tracker/quote/<int:quote_id>/upload","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":["quote_file"],"query_fields":[]},"tracker_download_quote_file":{"endpoint":"tracker_download_quote_file","path":"/tracker/quote/<int:quote_id>/download","methods":["GET"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_delete_quote_file":{"endpoint":"tracker_delete_quote_file","path":"/tracker/quote/<int:quote_id>/delete_file","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_edit_quote":{"endpoint":"tracker_edit_quote","path":"/tracker/quote/<int:quote_id>/edit","methods":["GET","POST"],"path_vars":["quote_id"],"form_fields":["amount","is_submit_blocking","notes","rfq_sent_date","status","trade","vendor_contact","vendor_email","vendor_name","vendor_phone"],"file_fields":[],"query_fields":[]},"tracker_delete_quote":{"endpoint":"tracker_delete_quote","path":"/tracker/quote/<int:quote_id>/delete","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_new_project":{"endpoint":"tracker_new_project","path":"/tracker/project/new","methods":["GET","POST"],"path_vars":[],"form_fields":["address","assigned_to","bid_due_date","client","estimated_value","name","notes","status"],"file_fields":[],"query_fields":[]},"tracker_view_project":{"endpoint":"tracker_view_project","path":"/tracker/project/<int:project_id>","methods":["GET"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":["filter"]},"tracker_update_project":{"endpoint":"tracker_update_project","path":"/tracker/project/<int:project_id>/update","methods":["POST"],"path_vars":["project_id"],"form_fields":["estimated_value","status"],"file_fields":[],"query_fields":[]},"tracker_edit_project":{"endpoint":"tracker_edit_project","path":"/tracker/project/<int:project_id>/edit","methods":["GET","POST"],"path_vars":["project_id"],"form_fields":["address","assigned_to","bid_due_date","client","estimated_value","name","notes","status"],"file_fields":[],"query_fields":[]},"tracker_new_quote":{"endpoint":"tracker_new_quote","path":"/tracker/project/<int:project_id>/quote/new","methods":["GET","POST"],"path_vars":["project_id"],"form_fields":["is_submit_blocking","notes","rfq_sent_date","status","trade","vendor_contact","vendor_email","vendor_name","vendor_phone"],"file_fields":[],"query_fields":[]},"tracker_update_quote_status":{"endpoint":"tracker_update_quote_status","path":"/tracker/quote/<int:quote_id>/update_status","methods":["POST"],"path_vars":["quote_id"],"form_fields":["amount","status"],"file_fields":[],"query_fields":[]},"tracker_generate_rfq":{"endpoint":"tracker_generate_rfq","path":"/tracker/quote/<int:quote_id>/generate_rfq","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_generate_followup":{"endpoint":"tracker_generate_followup","path":"/tracker/quote/<int:quote_id>/generate_followup","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_clear_rfq":{"endpoint":"tracker_clear_rfq","path":"/tracker/quote/<int:quote_id>/clear_rfq","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_clear_followup":{"endpoint":"tracker_clear_followup","path":"/tracker/quote/<int:quote_id>/clear_followup","methods":["POST"],"path_vars":["quote_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_new_doc":{"endpoint":"tracker_new_doc","path":"/tracker/project/<int:project_id>/doc/new","methods":["POST"],"path_vars":["project_id"],"form_fields":["doc_name","doc_type","link","notes","status"],"file_fields":[],"query_fields":[]},"tracker_edit_doc":{"endpoint":"tracker_edit_doc","path":"/tracker/doc/<int:doc_id>/edit","methods":["GET","POST"],"path_vars":["doc_id"],"form_fields":["doc_name","doc_type","link","notes","status"],"file_fields":[],"query_fields":[]},"tracker_delete_doc":{"endpoint":"tracker_delete_doc","path":"/tracker/doc/<int:doc_id>/delete","methods":["POST"],"path_vars":["doc_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_update_doc":{"endpoint":"tracker_update_doc","path":"/tracker/doc/<int:doc_id>/update","methods":["POST"],"path_vars":["doc_id"],"form_fields":["status"],"file_fields":[],"query_fields":[]},"tracker_unit_prices":{"endpoint":"tracker_unit_prices","path":"/tracker/unit-prices","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_new_unit_price":{"endpoint":"tracker_new_unit_price","path":"/tracker/unit-prices/new","methods":["POST"],"path_vars":[],"form_fields":["category","item","notes","price","unit"],"file_fields":[],"query_fields":[]},"tracker_activity_log":{"endpoint":"tracker_activity_log","path":"/tracker/activity-log","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"tracker_project_activity_log":{"endpoint":"tracker_project_activity_log","path":"/tracker/project/<int:project_id>/activity","methods":["GET"],"path_vars":["project_id"],"form_fields":[],"file_fields":[],"query_fields":[]},"admin_backup":{"endpoint":"admin_backup","path":"/admin/backup","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]},"admin_export_excel":{"endpoint":"admin_export_excel","path":"/admin/export/excel","methods":["GET"],"path_vars":[],"form_fields":[],"file_fields":[],"query_fields":[]}}')
+ATLAS_UI_WRITE_CATALOG = 'delete_team_member (path=user_id)\\nwhatsapp_site_groups_new (form=chat_id,keyword)\\nwhatsapp_site_groups_delete (path=group_id)\\nwhatsapp_site_groups_test (form=chat_id,label)\\nsitepulse_new_asset (form=daily_rate,description,hours_mileage,location,monthly_rate,name,serial_number,value,weekly_rate,year)\\nsitepulse_edit_asset_details (path=asset_id; form=daily_rate,description,monthly_rate,name,serial_number,value,weekly_rate,year)\\nsitepulse_update_asset (path=asset_id; form=hours_mileage,location,move_reason,schedule_date,schedule_time,status)\\nsitepulse_complete_scheduled_move (path=move_id)\\nsitepulse_cancel_scheduled_move (path=move_id)\\nsitepulse_quick_status (path=asset_id; form=status)\\nsitepulse_new_usage (path=asset_id; form=client,duration_unit,job_address,job_name,notes,out_date,project_id,return_date,usage_type; file=photo)\\nsitepulse_update_usage (path=usage_id; form=client,duration_unit,job_address,job_name,notes,out_date,project_id,return_date,usage_type; file=photo)\\nsitepulse_delete_usage (path=usage_id)\\nsitepulse_new_maintenance (path=asset_id; form=entry_date,hours_at_service,parts,resolved,work_done; file=photo)\\nsitepulse_new_mileage (path=asset_id; form=mileage,notes,reading_date)\\nsitepulse_update_maintenance (path=entry_id; form=entry_date,hours_at_service,parts,resolved,work_done; file=photo)\\nsitepulse_delete_maintenance (path=entry_id)\\nsitepulse_new_rental (form=due_date,equipment_description,job_name,notes,project_id,rate_amount,rate_period,rented_date,vendor)\\nsitepulse_update_rental (path=rental_id; form=due_date,equipment_description,job_name,notes,rate_amount,rate_period,rented_date,vendor)\\nsitepulse_return_rental (path=rental_id; form=returned_date)\\nsitepulse_reopen_rental (path=rental_id; form=reason)\\nsitepulse_edit_rental (path=rental_id; form=due_date,equipment_description,job_name,notes,rate_amount,rate_period,rented_date,vendor)\\nsitepulse_rental_swap_request (path=rental_id; form=reason)\\nsitepulse_rental_swap_vendor_contacted (path=rental_id,swap_id)\\nsitepulse_rental_swap_scheduled (path=rental_id,swap_id; form=scheduled_date)\\nsitepulse_rental_swap_complete (path=rental_id,swap_id; form=incoming_equipment_description)\\ncashflow_milestone_status (path=milestone_id; form=due_date,status)\\ncashflow_invoice_new (form=amount,client,description,due_date,invoice_date,invoice_number,milestone_id,retainage,retainage_enabled,retainage_mode,retainage_percent,status,workspace)\\ncashflow_job_new (form=address,budget,client,client_contact,client_email,client_phone,job_number,name,notes)\\ncashflow_job_edit (path=job_id; form=address,budget,client,client_contact,client_email,client_phone,job_number,name,notes)\\ncashflow_invoice_edit (path=invoice_id; form=amount,client,description,due_date,invoice_date,invoice_number,retainage,retainage_enabled,retainage_mode,retainage_percent,status,workspace)\\ncashflow_payment_add (path=invoice_id; form=amount,notes,payment_date,reference)\\ncashflow_note_add (path=invoice_id; form=note)\\ncashflow_document_add (path=invoice_id; form=document_type; file=document)\\ncashflow_send_review (path=invoice_id; form=review_due_date,reviewer_user_id)\\ncashflow_review_reminder (path=invoice_id)\\ncashflow_review_action (path=invoice_id; form=action,comment)\\ncashflow_mark_sent (path=invoice_id)\\ncashflow_void (path=invoice_id)\\ncashflow_sub_invoice_new (form=amount,description,due_date,invoice_date,invoice_number,project_id,vendor)\\ncashflow_sub_invoice_status (path=sub_id; form=status)\\nproject_deployment_start (path=project_id)\\nproject_deployment_edit (path=deployment_id; form=yesno_drawings_specs_approved)\\nproject_deployment_item_complete (path=deployment_id,item_id; form=due_date,notes,owner)\\nproject_deployment_item_reopen (path=deployment_id,item_id; form=reason)\\nproject_deployment_item_override (path=deployment_id,item_id; form=reason)\\nproject_deployment_status (path=deployment_id; form=target_status)\\nproject_deployment_reopen (path=deployment_id; form=reason)\\nproject_deployment_reset (path=deployment_id; form=confirm)\\nsitepulse_project_photos (path=project_id)\\nsitepulse_photo_caption (path=photo_id; form=caption)\\nsitepulse_report_create (path=project_id)\\nsitepulse_group_create (path=project_id; form=name,report_id)\\nsitepulse_group_rename (path=group_id; form=name)\\nsitepulse_group_photos_upload (path=group_id; form=report_id)\\nsitepulse_report_photo_add (path=report_id,photo_id)\\nsitepulse_report_photo_remove (path=report_id,photo_id)\\nsitepulse_report_detail (path=report_id; form=general_notes,has_issues,issues_blockers,next_steps,report_date,work_completed)\\nsitepulse_report_submit (path=report_id)\\nsitepulse_report_reopen (path=report_id)\\nsitepulse_delete_rental (path=rental_id)\\ninventory_new_material (form=item_name,notes,quantity,shelf_location,site,unit)\\ninventory_delete_material (path=material_id)\\ninventory_new_concrete (form=drilling_required,lab_required,pump_type)\\ninventory_edit_concrete (path=request_id; form=area_description,concrete_amount,drilling_required,drilling_time,job_site_address,lab_required,lab_time,mix_design_psi,mix_slump,pour_date,pour_time,project,project_id,pump_arrival_time,pump_size,pump_type,truck_spacing)\\ninventory_place_concrete_order (path=request_id; form=concrete_arrival_time,concrete_company,concrete_company_phone,drilling_company,drilling_company_phone,drilling_time,lab_company,lab_time,pump_arrival_time,pump_company,pump_company_phone)\\ninventory_update_concrete_status (path=request_id; form=status)\\ninventory_delete_concrete (path=request_id)\\ninventory_new_purchase (form=job_name,location_description,needed_on,project_id,request_date,requestor_date,requestor_signature,source_of_supply)\\ninventory_edit_purchase (path=request_id; form=job_name,location_description,needed_on,pr_number,project_id,request_date,source_of_supply)\\ninventory_update_purchase_status (path=request_id; form=status)\\ninventory_place_purchase_order (path=request_id; form=expected_delivery_date,vendor_company,vendor_company_phone)\\ninventory_delete_purchase (path=request_id)\\nrequest_center (form=department,original_request)\\nrequest_resubmit (path=request_id; form=department,original_request)\\nroadmap_item_update (path=item_id; form=lane,note,progress_pct)\\nproduct_intelligence_detail (path=request_id; form=action,back,buildiq_module,confirm_release,department,internal_notes,reason,release_note,return_to,solution_built,status,testing_notes,user_feedback)\\nadmin_users (form=action,department,new_department,user_id)\\nadmin_user_permissions (path=user_id; form=action,permission_id,role_id,state)\\ntracker_delete_project (path=project_id)\\ntracker_upload_quote_file (path=quote_id; file=quote_file)\\ntracker_delete_quote_file (path=quote_id)\\ntracker_edit_quote (path=quote_id; form=amount,is_submit_blocking,notes,rfq_sent_date,status,trade,vendor_contact,vendor_email,vendor_name,vendor_phone)\\ntracker_delete_quote (path=quote_id)\\ntracker_new_project (form=address,assigned_to,bid_due_date,client,estimated_value,name,notes,status)\\ntracker_update_project (path=project_id; form=estimated_value,status)\\ntracker_edit_project (path=project_id; form=address,assigned_to,bid_due_date,client,estimated_value,name,notes,status)\\ntracker_new_quote (path=project_id; form=is_submit_blocking,notes,rfq_sent_date,status,trade,vendor_contact,vendor_email,vendor_name,vendor_phone)\\ntracker_update_quote_status (path=quote_id; form=amount,status)\\ntracker_generate_rfq (path=quote_id)\\ntracker_generate_followup (path=quote_id)\\ntracker_clear_rfq (path=quote_id)\\ntracker_clear_followup (path=quote_id)\\ntracker_new_doc (path=project_id; form=doc_name,doc_type,link,notes,status)\\ntracker_edit_doc (path=doc_id; form=doc_name,doc_type,link,notes,status)\\ntracker_delete_doc (path=doc_id)\\ntracker_update_doc (path=doc_id; form=status)\\ntracker_new_unit_price (form=category,item,notes,price,unit)'
+
+class _AtlasHTMLTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.parts=[]; self._skip=0
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script","style","svg"): self._skip += 1
+        elif tag in ("br","p","div","tr","li","h1","h2","h3","h4","section"): self.parts.append("\n")
+    def handle_endtag(self, tag):
+        if tag in ("script","style","svg") and self._skip: self._skip -= 1
+        elif tag in ("p","div","tr","li","h1","h2","h3","h4","section"): self.parts.append("\n")
+    def handle_data(self, data):
+        if not self._skip:
+            s=(data or "").strip()
+            if s: self.parts.append(s+" ")
+    def text(self):
+        raw=html_lib.unescape("".join(self.parts)); raw=re.sub(r"[ \t]+"," ",raw); raw=re.sub(r"\n\s*\n+","\n",raw); return raw.strip()
+
+def _atlas_parse_json_object(raw, field_name):
+    if raw in (None, ""): return {}
+    if isinstance(raw, dict): return raw
+    try: obj=json.loads(raw)
+    except Exception: raise ToolWriteRejected("invalid_"+field_name)
+    if not isinstance(obj,dict): raise ToolWriteRejected("invalid_"+field_name)
+    return obj
+
+def _atlas_ui_url(cap, path_values):
+    vals=dict(path_values or {}); missing=[v for v in cap.get("path_vars",[]) if v not in vals]
+    if missing: raise ToolWriteRejected("missing_path_values:"+",".join(missing))
+    try: return url_for(cap["endpoint"], **vals)
+    except Exception: raise ToolWriteRejected("invalid_path_values")
+
+def _atlas_ui_invoke(user, endpoint, method="GET", path_values=None, form_data=None, query=None):
+    cap=ATLAS_UI_CAPABILITIES.get(str(endpoint or ""))
+    if not cap: raise ToolWriteRejected("ui_capability_not_allowed")
+    method=method.upper()
+    if method not in cap.get("methods",[]): raise ToolWriteRejected("ui_method_not_allowed")
+    path_values=path_values or {}; form_data=dict(form_data or {}); query=query or {}; target=_atlas_ui_url(cap,path_values); uid=str(user.id)
+    pending_attachment=None
+    if method != "GET" and cap.get("file_fields"):
+        token=session.get("atlas_token")
+        draft=(ATLAS_SESSIONS.get(token) or {}) if token else {}
+        pending_attachment=draft.get("pending_attachment")
+        if not pending_attachment or not pending_attachment.get("data_b64"):
+            raise ToolWriteRejected("real_file_required:"+",".join(cap.get("file_fields") or []))
+        # Current BuildIQ upload routes each accept one file field. If a future
+        # route requires several real files, fail closed rather than guessing.
+        if len(cap.get("file_fields") or []) != 1:
+            raise ToolWriteRejected("multiple_real_files_required")
+        file_field=(cap.get("file_fields") or [])[0]
+        try:
+            attachment_bytes=base64.b64decode(pending_attachment["data_b64"], validate=True)
+        except Exception:
+            raise ToolWriteRejected("invalid_pending_attachment")
+        form_data[file_field]=(io.BytesIO(attachment_bytes), pending_attachment.get("filename") or "attachment.bin")
+    with app.test_request_context(target, method=method, data=form_data if method!="GET" else None, query_string=query if method=="GET" else None, content_type="multipart/form-data" if pending_attachment else None):
+        session["_user_id"]=uid; session["_fresh"]=True
+        try:
+            rv=app.view_functions[cap["endpoint"]](**{k:path_values[k] for k in cap.get("path_vars",[])}); resp=app.make_response(rv)
+        except Exception as exc:
+            from werkzeug.exceptions import HTTPException
+            if isinstance(exc,HTTPException): return {"success":False,"status":exc.code,"endpoint":endpoint,"error":exc.name}
+            raise
+        flashes=list(session.get("_flashes",[]) or []); flash_out=[{"category":str(cat),"message":str(msg)} for cat,msg in flashes]
+        error_flash=any(str(cat).lower() in ("error","danger") for cat,_ in flashes); ctype=(resp.content_type or "").lower()
+        payload={"success":resp.status_code<400 and not error_flash,"status":resp.status_code,"endpoint":endpoint,"location":resp.headers.get("Location"),"flashes":flash_out}
+        if "text/html" in ctype or "text/plain" in ctype:
+            parser=_AtlasHTMLTextExtractor(); parser.feed(resp.get_data(as_text=True)); payload["page_text"]=parser.text()[:18000]
+        if payload.get("success") and method != "GET" and pending_attachment:
+            if token and ATLAS_SESSIONS.get(token):
+                ATLAS_SESSIONS[token]["pending_attachment"]=None
+        return payload
+
+def _tool_get_buildiq_ui_capabilities(user, query=None, method=None):
+    q=(query or "").strip().lower(); want=(method or "").strip().upper(); rows=[]
+    for cap in ATLAS_UI_CAPABILITIES.values():
+        if want and want not in cap.get("methods",[]): continue
+        hay=" ".join([cap.get("endpoint",''),cap.get("path",''),' '.join(cap.get('form_fields',[]))]).lower()
+        if q and all(tok not in hay for tok in q.split()): continue
+        rows.append(cap)
+        if len(rows)>=80: break
+    return {"available":True,"count":len(rows),"capabilities":rows}
+
+def _tool_read_buildiq_ui_page(user, endpoint, path_values_json=None, query_json=None):
+    result=_atlas_ui_invoke(user,endpoint,"GET",path_values=_atlas_parse_json_object(path_values_json,"path_values_json"),query=_atlas_parse_json_object(query_json,"query_json"))
+    if not result.get("success"): raise ToolWriteRejected("ui_read_failed")
+    return result
+
+def _tool_invoke_buildiq_ui_action(user, endpoint, path_values_json=None, form_data_json=None):
+    result=_atlas_ui_invoke(user,endpoint,"POST",path_values=_atlas_parse_json_object(path_values_json,"path_values_json"),form_data=_atlas_parse_json_object(form_data_json,"form_data_json"))
+    if not result.get("success"):
+        msgs=" | ".join(x.get("message","") for x in result.get("flashes",[]) if x.get("message")); raise ToolWriteRejected("ui_action_failed"+(":"+msgs[:350] if msgs else ""))
+    msgs=[x.get("message") for x in result.get("flashes",[]) if x.get("message")]; receipt="✓ "+msgs[-1] if msgs else "✓ BuildIQ action completed"
+    return _atlas_catalog_ok(receipt,entity_type="ui_action",endpoint=endpoint,result=result)
+
+register_tool(name="get_buildiq_ui_capabilities",description="Inspect metadata for allowlisted BuildIQ UI capabilities. Filter by query and/or method. Does not execute anything.",parameters={"query":{"type":"string"},"method":{"type":"string","enum":["GET","POST"]}},permission="module:atlas:view",atlas_permission="atlas:view_business_data",kind="read",handler=_tool_get_buildiq_ui_capabilities,confirm=False)
+register_tool(name="read_buildiq_ui_page",description="Read visible text from one allowlisted BuildIQ GET page as the authenticated user through the real UI route and permission checks. path_values_json/query_json are JSON objects.",parameters={"endpoint":{"type":"string","required":True,"enum":sorted([k for k,v in ATLAS_UI_CAPABILITIES.items() if "GET" in v.get("methods",[])])},"path_values_json":{"type":"string"},"query_json":{"type":"string"}},permission="module:atlas:view",atlas_permission="atlas:view_business_data",kind="read",handler=_tool_read_buildiq_ui_page,confirm=False)
+register_tool(name="invoke_buildiq_ui_action",description="Fallback full-parity bridge for an allowlisted BuildIQ UI POST operation when no dedicated Atlas write tool exists. Runs the real Flask route/business logic as the authenticated user. endpoint must be allowlisted; path_values_json/form_data_json are JSON objects. Always confirmation-gated. File-requiring routes fail closed without a real file.",parameters={"endpoint":{"type":"string","required":True,"enum":sorted([k for k,v in ATLAS_UI_CAPABILITIES.items() if "POST" in v.get("methods",[])])},"path_values_json":{"type":"string"},"form_data_json":{"type":"string"}},permission="module:atlas:view",atlas_permission="module:atlas:view",kind="write",handler=_tool_invoke_buildiq_ui_action,confirm=True)
+
 # ---------------------------------------------------------------------------
 # ATLAS V11.1 ACTION CATALOG
 # ---------------------------------------------------------------------------
@@ -11132,6 +11419,7 @@ intelligence.register_atlas_tools(register_tool, SP_STATUS_OPTIONS, PURCHASE_STA
 # writes. Everything here is an explicit business operation.
 
 _ATLAS_ACTION_CATALOG_SUMMARY = [
+    ("invoke_buildiq_ui_action", "Fallback: execute any allowlisted BuildIQ UI POST action not covered by a dedicated tool; endpoint + JSON path/form fields; confirmation required"),
     ("update_equipment_details", "Equipment Center: edit equipment details/rates"),
     ("update_equipment_status", "Equipment Center: change equipment status"),
     ("log_equipment_usage", "Equipment Center: log equipment usage/job assignment"),
@@ -11182,7 +11470,10 @@ def _atlas_action_catalog_prompt():
     lines = ["- FULL ACTION CATALOG: when the person asks for one of these operations, use the exact registered tool name below rather than saying Atlas cannot do it. Collect only missing required fields; never invent values; always require confirmation before write execution.\\n"]
     for name, desc in _ATLAS_ACTION_CATALOG_SUMMARY:
         lines.append(f"  - {name}: {desc}\\n")
-    lines.append("- File uploads still require an actual file from the user; Atlas must never invent or fabricate an uploaded file. Database restore/import, account authentication, cron triggers, and unrestricted SQL are not conversational Atlas actions.\\n")
+    lines.append("- UI PARITY FALLBACK ENDPOINTS (use only when no dedicated action exists; endpoint + fields):\\n")
+    for row in ATLAS_UI_WRITE_CATALOG.split("\\n"):
+        if row: lines.append("  - " + row + "\\n")
+    lines.append("- File-upload routes still require a real file; Atlas must never fabricate one. Database restore/import, account authentication, cron triggers, and unrestricted SQL are not conversational Atlas actions.\\n")
     return "".join(lines)
 
 def _atlas_catalog_ok(receipt, **data):
